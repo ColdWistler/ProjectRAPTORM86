@@ -8,12 +8,23 @@
 
 mod aircraft;
 mod environment;
+mod menu;
 
 use bevy::prelude::*;
 use flight_core::Simulator;
 
 use aircraft::{animate_control_surfaces, spawn_aircraft, spin_propeller, AircraftRoot};
 use environment::{animate_wind_turbines, spawn_environment};
+use menu::MainMenuPlugin;
+
+/// Top-level application screen. Each variant is a separate, independently
+/// schedulable mode; add new component-simulator screens here as tabs.
+#[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum AppState {
+    #[default]
+    MainMenu,
+    FlightSim,
+}
 
 /// Candidate paths for the aircraft configuration file.
 const CONFIG_PATHS: [&str; 2] = ["aircraft.toml", "../aircraft.toml"];
@@ -52,6 +63,10 @@ impl Default for FlightControls {
 #[derive(Component)]
 struct HudText;
 
+/// Marker for the HUD container (its clickable-free root node).
+#[derive(Component)]
+struct HudRoot;
+
 /// Resolve the first existing aircraft config path.
 fn resolve_config_path() -> String {
     for p in CONFIG_PATHS {
@@ -80,8 +95,18 @@ fn main() {
             brightness: 450.0,
         })
         .insert_resource(FlightControls::default())
-        .add_systems(Startup, setup)
-        .add_systems(PreUpdate, (handle_manual_input, update_aircraft).chain())
+        .init_state::<AppState>()
+        .enable_state_scoped_entities::<AppState>()
+        .add_plugins(MainMenuPlugin)
+        .add_systems(Startup, menu_env_setup)
+        .add_systems(OnEnter(AppState::FlightSim), setup)
+        .add_systems(OnExit(AppState::FlightSim), cleanup_sim_screen)
+        .add_systems(
+            PreUpdate,
+            (handle_manual_input, update_aircraft)
+                .chain()
+                .run_if(in_state(AppState::FlightSim)),
+        )
         .add_systems(
             Update,
             (
@@ -90,22 +115,66 @@ fn main() {
                 animate_wind_turbines,
                 update_hud,
                 print_telemetry,
-            ),
+            )
+                .run_if(in_state(AppState::FlightSim)),
         )
         .run();
 }
 
 /// Injected simulation resource.
 #[derive(Resource)]
-struct Sim(Simulator);
+struct Sim {
+    physics: Simulator,
+    wind: flight_core::WindEnvironment,
+    /// Last wind vector (Earth NED) applied, for HUD/telemetry display.
+    last_wind: flight_core::nalgebra::Vector3<f64>,
+}
 
 /// Marker for the chase camera entity.
 #[derive(Component)]
 struct ChaseCamera;
 
+/// Marker for the main-menu camera (renders the menu UI + environment backdrop).
+#[derive(Component)]
+struct MenuCamera;
+
 /// Timestamp accumulator for the per-second telemetry log.
 #[derive(Resource, Default)]
 struct TelemetryTimer(f32);
+
+/// Build a [`WindConfig`] from optional environment variables so the air
+/// simulation can be tweaked without recompiling:
+///   RAPTOR_WIND_SPEED    m/s (default 0 = still air)
+///   RAPTOR_WIND_DIR_DEG  true bearing the wind blows TOWARD (default 0)
+///   RAPTOR_WIND_SHEAR    "1" enables altitude shear (default off)
+///   RAPTOR_TURBULENCE    light | moderate | severe (default light)
+fn wind_from_env() -> flight_core::WindConfig {
+    use flight_core::TurbulenceIntensity;
+
+    let env = |k: &str| std::env::var(k).ok();
+    let speed = env("RAPTOR_WIND_SPEED")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let dir_deg = env("RAPTOR_WIND_DIR_DEG")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let shear = env("RAPTOR_WIND_SHEAR").map(|v| v == "1").unwrap_or(false);
+    let turbulence = match env("RAPTOR_TURBULENCE").as_deref() {
+        Some("moderate") => TurbulenceIntensity::Moderate,
+        Some("severe") => TurbulenceIntensity::Severe,
+        _ => TurbulenceIntensity::Light,
+    };
+
+    flight_core::WindConfig {
+        wind_speed: speed,
+        wind_direction: dir_deg.to_radians(),
+        reference_altitude: 1000.0,
+        wind_shear: shear,
+        turbulence,
+        turbulence_scale: 533.0,
+        seed: 0x9E37_79B9_7F4A_7C15,
+    }
+}
 
 fn setup(
     mut commands: Commands,
@@ -124,53 +193,23 @@ fn setup(
     controls.flaps_deg = 0.0;
     controls.target_alt = 1000.0;
 
-    commands.insert_resource(Sim(sim));
+    // Wind is configured through environment variables so it can be tuned
+    // without recompiling. Defaults to still air (wind disabled).
+    let wind_config = wind_from_env();
+    commands.insert_resource(Sim {
+        physics: sim,
+        wind: flight_core::WindEnvironment::new(wind_config),
+        last_wind: flight_core::nalgebra::Vector3::zeros(),
+    });
     commands.insert_resource(TelemetryTimer::default());
-
-    // --- Sunlight (Directional Light with Shadows) --------------------
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 14000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::ZYX,
-            0.0,
-            std::f32::consts::FRAC_PI_4,
-            -std::f32::consts::FRAC_PI_4,
-        )),
-    ));
-
-    // --- Spawn Environment (Real-World/Procedural Terrain, Airport, City, Clouds) -
-    spawn_environment(&mut commands, &mut meshes, &mut materials, &asset_server);
 
     // --- Spawn Tactical Drone UAV Model (or custom model from assets/models/) -
     spawn_aircraft(&mut commands, &mut meshes, &mut materials, &asset_server);
 
-    // --- Chase Camera with Atmospheric Fog ----------------------------
-    commands.spawn((
-        ChaseCamera,
-        Camera3d::default(),
-        Projection::Perspective(PerspectiveProjection {
-            far: 35000.0,
-            fov: 60.0_f32.to_radians(),
-            ..default()
-        }),
-        DistanceFog {
-            color: Color::srgba(0.68, 0.78, 0.90, 1.0),
-            falloff: FogFalloff::Linear {
-                start: 3500.0,
-                end: 28000.0,
-            },
-            ..default()
-        },
-        Transform::from_xyz(-35.0, 1009.0, 0.0),
-    ));
-
     // --- On-Screen Flight HUD -----------------------------------------
     commands
         .spawn((
+            HudRoot,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(16.0),
@@ -195,12 +234,93 @@ fn setup(
         });
 }
 
+/// Runs once at startup: spawns the static sun and world environment. These
+/// persist across all app states so the simulator does not rebuild (and
+/// duplicate) a ~30-entity scene every time the user enters the simulator.
+fn menu_env_setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+) {
+    // --- Sunlight (Directional Light with Shadows) --------------------
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 14000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(
+            EulerRot::ZYX,
+            0.0,
+            std::f32::consts::FRAC_PI_4,
+            -std::f32::consts::FRAC_PI_4,
+        )),
+    ));
+
+    // --- Spawn Environment (Terrain, Airport, City, Mountains, Clouds) ---
+    spawn_environment(&mut commands, &mut meshes, &mut materials, &asset_server);
+
+    // --- Single Persistent Camera -------------------------------------
+    // One camera for the entire app. It is spawned here sitting at the raw
+    // menu/environment view; while the simulator is active, `update_aircraft`
+    // repositions it as the chase camera every frame. Using a single camera
+    // (rather than separate menu + chase cameras) avoids Bevy's "camera order
+    // ambiguity" warnings that occur when two cameras are briefly active
+    // during state transitions.
+    let mut position = Transform::from_xyz(-60.0, 1050.0, -120.0)
+        .looking_at(Vec3::new(0.0, 1000.0, 0.0), Vec3::Y);
+    position.translation.y = 1060.0;
+    commands.spawn((
+        ChaseCamera,
+        MenuCamera,
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            far: 35000.0,
+            fov: 60.0_f32.to_radians(),
+            ..default()
+        }),
+        DistanceFog {
+            color: Color::srgba(0.68, 0.78, 0.90, 1.0),
+            falloff: FogFalloff::Linear {
+                start: 3500.0,
+                end: 28000.0,
+            },
+            ..default()
+        },
+        position,
+    ));
+}
+
+/// Runs when leaving the simulator back to the menu: despawns the aircraft
+/// and HUD entities spawned in [`setup`], and removes the per-session
+/// simulation resources. The persistent camera and static environment/sun
+/// are left in place; the camera is simply repositioned to look at the world
+/// from the menu vantage instead of chasing the (now-despawned) aircraft.
+fn cleanup_sim_screen(
+    mut commands: Commands,
+    aircraft: Query<Entity, With<AircraftRoot>>,
+    huds: Query<Entity, With<HudRoot>>,
+    mut camera: Query<&mut Transform, (With<MenuCamera>, With<ChaseCamera>)>,
+) {
+    for e in aircraft.iter().chain(huds.iter()) {
+        commands.entity(e).despawn_recursive();
+    }
+    if let Ok(mut tf) = camera.get_single_mut() {
+        *tf = Transform::from_xyz(-60.0, 1060.0, -120.0)
+            .looking_at(Vec3::new(0.0, 1000.0, 0.0), Vec3::Y);
+    }
+    commands.remove_resource::<Sim>();
+    commands.remove_resource::<TelemetryTimer>();
+}
+
 /// Reads keyboard input to adjust 6-DOF controls, flaps, elevator trim, and autopilot.
 fn handle_manual_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut controls: ResMut<FlightControls>,
     mut sim: ResMut<Sim>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     let dt = time.delta_secs() as f64;
 
@@ -292,14 +412,14 @@ fn handle_manual_input(
     if keyboard.just_pressed(KeyCode::KeyH) || keyboard.just_pressed(KeyCode::KeyT) {
         controls.auto_level = !controls.auto_level;
         if controls.auto_level {
-            controls.target_alt = sim.0.state.altitude();
+            controls.target_alt = sim.physics.state.altitude();
         }
     }
 
     // --- Autopilot / Auto-Level Flight Stabilization Assist ---
     if controls.auto_level {
-        let (roll, pitch, _) = sim.0.state.euler_angles();
-        let state = &sim.0.state;
+        let (roll, pitch, _) = sim.physics.state.euler_angles();
+        let state = &sim.physics.state;
 
         // Wing leveler: roll wings back to level when stick is released
         if !manual_roll {
@@ -319,7 +439,7 @@ fn handle_manual_input(
 
     // --- Reset flight state: 'R' key ---
     if keyboard.just_pressed(KeyCode::KeyR) {
-        let (trim_e, trim_t) = sim.0.reset();
+        let (trim_e, trim_t) = sim.physics.reset();
         controls.elevator = 0.0;
         controls.elevator_trim = trim_e;
         controls.aileron = 0.0;
@@ -327,6 +447,11 @@ fn handle_manual_input(
         controls.flaps_deg = 0.0;
         controls.throttle = trim_t;
         controls.target_alt = 1000.0;
+    }
+
+    // --- Return to the main menu: 'Esc' key ---
+    if keyboard.just_pressed(KeyCode::Escape) {
+        next_state.set(AppState::MainMenu);
     }
 }
 
@@ -340,17 +465,28 @@ fn update_aircraft(
     // Total elevator deflection = manual stick + pitch trim tab
     let total_elevator = (controls.elevator + controls.elevator_trim).clamp(-0.35, 0.35);
 
-    // Advance the 6-DOF simulation
-    sim.0.step_6dof(
+    // Compute the total wind in the Earth NED frame (steady + turbulence),
+    // then advance the 6-DOF simulation with that relative wind. Borrow the
+    // three fields disjointly so the mutable wind advance can also read state.
+    let Sim {
+        physics,
+        wind,
+        last_wind,
+    } = &mut *sim;
+    let vt_air = physics.state.airspeed();
+    let wind_earth = wind.total_wind(&physics.state, vt_air, DT);
+    *last_wind = wind_earth;
+    physics.step_6dof(
         total_elevator,
         controls.aileron,
         controls.rudder,
         controls.throttle,
         controls.flaps_deg.to_radians(),
+        Some(&wind_earth),
         DT,
     );
 
-    let state = &sim.0.state;
+    let state = &sim.physics.state;
 
     // Map NED Earth position to Bevy World position:
     let world_pos = Vec3::new(
@@ -392,11 +528,17 @@ fn update_hud(
     controls: Res<FlightControls>,
     mut text_query: Query<&mut Text, With<HudText>>,
 ) {
-    let state = &sim.0.state;
+    let state = &sim.physics.state;
     let alt_m = state.altitude();
     let alt_ft = alt_m * 3.28084;
-    let speed_tas_ms = state.airspeed();
+    let speed_tas_ms = state.true_airspeed(&sim.last_wind);
     let speed_tas_kts = speed_tas_ms * 1.94384;
+
+    // Ground speed and horizontal wind relative to the aircraft.
+    let speed_gs_ms = state.airspeed();
+    let wind = sim.last_wind;
+    let wind_ms = wind.norm();
+    let wind_dir = (wind.y.atan2(wind.x).to_degrees() + 360.0) % 360.0;
 
     // Atmospheric calculations (1976 US Standard Atmosphere)
     let atm = flight_core::Atmosphere::at_altitude(alt_m);
@@ -405,8 +547,8 @@ fn update_hud(
     let q_dyn_pa = atm.dynamic_pressure(speed_tas_ms);
     let oat_c = atm.temperature_c;
 
-    let alpha_deg = state.angle_of_attack().to_degrees();
-    let beta_deg = state.sideslip_angle().to_degrees();
+    let alpha_deg = state.air_angle_of_attack(&sim.last_wind).to_degrees();
+    let beta_deg = state.air_sideslip_angle(&sim.last_wind).to_degrees();
 
     let (roll, pitch, yaw) = state.euler_angles();
     let roll_deg = roll.to_degrees();
@@ -438,6 +580,8 @@ fn update_hud(
              ------------------------------------\n\
              Altitude:       {alt_m:6.0} m ({alt_ft:6.0} ft)\n\
              Airspeed (TAS): {speed_tas_ms:6.1} m/s ({speed_tas_kts:5.0} kts)\n\
+             Ground Speed:   {speed_gs_ms:6.1} m/s\n\
+             Wind:           {wind_ms:5.1} m/s from {wind_dir:3.0}\u{00b0}\n\
              Airspeed (IAS): {speed_ias_kts:6.0} kts  (Mach {mach:4.2})\n\
              Dyn. Pressure:  {q_dyn_pa:6.0} Pa  (OAT: {oat_c:+4.1}\u{00b0}C)\n\
              AoA (\u{03b1}) / Slip (\u{03b2}):  {alpha_deg:+5.1}\u{00b0} / {beta_deg:+5.1}\u{00b0}\n\
@@ -490,7 +634,7 @@ fn print_telemetry(
     timer.0 += time.delta_secs();
     if timer.0 >= 1.0 {
         timer.0 = 0.0;
-        let obs = sim.0.state.to_observation_array();
+        let obs = sim.physics.state.to_observation_array();
         let alt = -obs[1];
         let airspeed = obs[2].hypot(obs[4]);
         println!("altitude: {:.1} m   airspeed: {:.1} m/s", alt, airspeed);

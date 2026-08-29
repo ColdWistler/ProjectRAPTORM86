@@ -1,7 +1,8 @@
 //! Reinforcement-learning environment wrapper around [`crate::Simulator`].
 
 use crate::integrator::step;
-use crate::Simulator;
+use crate::{Simulator, WindConfig, WindEnvironment};
+use nalgebra::Vector3;
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -66,6 +67,10 @@ pub struct EnvConfig {
     /// Physics time step per `step()` call (seconds).
     pub dt: f64,
 
+    /// Optional atmospheric wind configuration. `None` (default) disables
+    /// wind entirely (still air), preserving prior behaviour.
+    pub wind_config: Option<WindConfig>,
+
     /// Per-step survival bonus.
     pub w_time: f64,
     /// Altitude error weight.
@@ -95,6 +100,7 @@ impl Default for EnvConfig {
             max_rudder: 0.35,
             max_steps: 2000,
             dt: 1.0 / 30.0,
+            wind_config: None,
             w_time: 1.0,
             w_alt: 2.0,
             scale_alt: 50.0,
@@ -112,6 +118,7 @@ pub struct Environment {
     sim: Simulator,
     pub config: EnvConfig,
     step_count: usize,
+    wind: Option<WindEnvironment>,
 }
 
 impl Environment {
@@ -124,10 +131,12 @@ impl Environment {
     /// Create an environment with a custom [`EnvConfig`].
     pub fn with_config(config_path: &str, config: EnvConfig) -> Self {
         let sim = Simulator::new(config_path);
+        let wind = config.wind_config.clone().map(WindEnvironment::new);
         Self {
             sim,
             config,
             step_count: 0,
+            wind,
         }
     }
 
@@ -157,6 +166,13 @@ impl Environment {
         let throttle = action.throttle.clamp(0.0, 1.0);
         let flaps = action.flaps.clamp(0.0, 0.7);
 
+        // Compute the total wind (steady + turbulence) in the Earth NED frame.
+        let mut wind_vec: Option<Vector3<f64>> = None;
+        if let Some(wind_env) = &mut self.wind {
+            let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
+            wind_vec = Some(wind_env.total_wind(&self.sim.state, vt_air, self.config.dt));
+        }
+
         step(
             &mut self.sim.state,
             &self.sim.config,
@@ -165,6 +181,7 @@ impl Environment {
             rudder,
             throttle,
             flaps,
+            wind_vec.as_ref(),
             self.config.dt,
         );
 

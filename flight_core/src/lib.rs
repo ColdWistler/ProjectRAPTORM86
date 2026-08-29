@@ -12,12 +12,14 @@ pub mod config;
 pub mod env;
 pub mod integrator;
 pub mod state;
+pub mod wind;
 
 pub use atmosphere::Atmosphere;
 pub use config::AircraftConfig;
 pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
 pub use nalgebra;
 pub use state::AircraftState;
+pub use wind::{TurbulenceIntensity, WindConfig, WindEnvironment};
 
 use crate::config::load_config;
 use crate::integrator::step;
@@ -53,7 +55,8 @@ impl Simulator {
 
     /// Advance the simulation one time step of length `dt` seconds with
     /// full 6-DOF manual controls (elevator, aileron, rudder, throttle)
-    /// plus a trailing-edge flap deflection (radians).
+    /// plus a trailing-edge flap deflection (radians) and an optional wind
+    /// vector in the Earth NED frame (m/s). Pass `None` for still air.
     pub fn step_6dof(
         &mut self,
         elevator: f64,
@@ -61,6 +64,7 @@ impl Simulator {
         rudder: f64,
         throttle: f64,
         flaps: f64,
+        wind_earth: Option<&nalgebra::Vector3<f64>>,
         dt: f64,
     ) -> [f64; 12] {
         step(
@@ -71,6 +75,7 @@ impl Simulator {
             rudder,
             throttle,
             flaps,
+            wind_earth,
             dt,
         );
         self.state.to_observation_array()
@@ -82,6 +87,7 @@ mod tests {
     use super::*;
     use crate::aero::compute_forces_moments;
     use crate::integrator::step;
+    use nalgebra::Vector3;
 
     #[test]
     fn level_flight_maintains_altitude_and_velocity() {
@@ -94,7 +100,7 @@ mod tests {
 
         let start = state.clone();
         for _ in 0..steps {
-            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt);
         }
 
         let alt_start = -start.pos_z;
@@ -141,6 +147,7 @@ mod tests {
                 0.0,
                 throttle_high,
                 0.0,
+                None,
                 dt,
             );
         }
@@ -184,6 +191,7 @@ mod tests {
                 0.0,
                 throttle_high,
                 0.0,
+                None,
                 dt,
             );
             tas_min = tas_min.min(state.airspeed());
@@ -225,6 +233,7 @@ mod tests {
                 0.0,
                 throttle_trim,
                 0.0,
+                None,
                 dt,
             );
         }
@@ -249,6 +258,7 @@ mod tests {
                 0.0,
                 throttle_trim,
                 0.0,
+                None,
                 dt,
             );
             q_min = q_min.min(state.q.abs());
@@ -315,6 +325,7 @@ cy_beta: -0.31,
             cd_flap: 0.14,
             cm_flap: -0.20,
             flap_stall_shift: 6.0_f64.to_radians(),
+            spiral_nose_drop_cm: 0.10,
         }
     }
 
@@ -330,7 +341,7 @@ cy_beta: -0.31,
         let dt = 1.0 / 60.0;
         for _ in 0..120 {
             // 2 s of sustained right aileron (~11 deg deflection).
-            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, 0.0, dt);
+            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, 0.0, None, dt);
         }
 
         let (roll, _, _) = state.euler_angles();
@@ -358,7 +369,7 @@ cy_beta: -0.31,
         let dt = 1.0 / 60.0;
         for _ in 0..90 {
             // 1.5 s of sustained right rudder.
-            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, 0.0, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, 0.0, None, dt);
         }
 
         let heading_change = state.euler_angles().2 - yaw_start;
@@ -381,7 +392,7 @@ cy_beta: -0.31,
         for _ in 0..120 {
             // 2 s at 0.05 rad (~3 deg) stick pull beyond trim.
             let elevator = elev_trim - 0.05;
-            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, 0.0, dt);
+            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, 0.0, None, dt);
         }
 
         let (_, pitch, _) = state.euler_angles();
@@ -404,9 +415,9 @@ cy_beta: -0.31,
 
         let flap = 30.0_f64.to_radians();
         let (f_clean, m_clean) =
-            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0);
+            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, &Vector3::zeros());
         let (f_flap, m_flap) =
-            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, flap);
+            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, flap, &Vector3::zeros());
 
         // Flap lift acts upward = more negative body-Z force.
         assert!(
@@ -421,6 +432,49 @@ cy_beta: -0.31,
             "flaps should pitch the nose down (My clean {:.0}, flap {:.0})",
             m_clean.y,
             m_flap.y
+        );
+    }
+
+    #[test]
+    fn steep_bank_idle_descends_not_climbs() {
+        // A hand-off aircraft banked 90 deg (wings vertical) has no vertical
+        // lift, so gravity must pull the nose down into a dive. It must NOT
+        // be able to pitch its own nose up and climb (a previous bug). This
+        // guards the steep-bank spiral nose-drop behavior.
+        use nalgebra::UnitQuaternion;
+
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        let (_, pitch0, yaw0) = state.euler_angles();
+        let q = (UnitQuaternion::from_euler_angles(0.0, pitch0, yaw0)
+            * UnitQuaternion::from_axis_angle(
+                &nalgebra::Vector3::x_axis(),
+                std::f64::consts::FRAC_PI_2,
+            ))
+        .normalize();
+        state.q0 = q.w;
+        state.q1 = q.i;
+        state.q2 = q.j;
+        state.q3 = q.k;
+        state.p = 0.0;
+        state.q = 0.0;
+        state.r = 0.0;
+        state.v = 0.0;
+
+        let alt0 = state.altitude();
+        let dt = 1.0 / 60.0;
+        // 10 s of hand-off, idle, no inputs.
+        for _ in 0..600 {
+            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt);
+        }
+
+        let alt_change = state.altitude() - alt0;
+        assert!(
+            alt_change < -10.0,
+            "90-deg-banked idle aircraft should dive, not climb (dAlt {:.1} m)",
+            alt_change
         );
     }
 }

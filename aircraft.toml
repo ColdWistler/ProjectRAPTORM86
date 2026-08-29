@@ -30,3 +30,8 @@ cl_flap = 1.10         # lift increment per rad (30 deg => +~0.57 dCL)
 cd_flap = 0.14         # drag increment per rad (30 deg => +~0.073 dCD)
 cm_flap = -0.20        # pitching moment per rad (negative = nose down)
 flap_stall_shift = 6.0 # deg by which positive stall angle is reduced at full flap
+
+# --- Steep-bank spiral nose-drop ---
+# Nose-down pitching-moment coefficient engaged beyond ~45 deg bank, so a
+# hand-off high bank falls into a dive instead of climbing with wings vertical.
+spiral_nose_drop_cm = 0.10

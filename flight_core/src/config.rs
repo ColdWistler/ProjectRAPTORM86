@@ -34,6 +34,10 @@ fn default_cl_flap() -> f64 { 1.10 }
 fn default_cd_flap() -> f64 { 0.14 }
 fn default_cm_flap() -> f64 { -0.20 }
 fn default_flap_stall_shift() -> f64 { 6.0_f64.to_radians() }
+// Nose-down spiral-divergence authority at steep bank. Small: it only needs
+// to overcome the residual nose-up from level-trim coupling (~0.4 kN*m), not
+// dominate normal flight.
+fn default_spiral_nose_drop_cm() -> f64 { 0.10 }
 
 /// A fully-parameterized description of the aircraft that the flight
 /// dynamics and aerodynamic models depend on.
@@ -155,6 +159,15 @@ pub struct AircraftConfig {
     /// lower the stall AoA. `alpha_stall_pos = alpha_stall_pos - flap_stall_shift * delta_flap`.
     #[serde(default = "default_flap_stall_shift")]
     pub flap_stall_shift: f64,
+
+    // --- Steep-bank spiral nose-drop ---
+    /// Additional nose-down pitching-moment coefficient that engages at steep
+    /// bank angle, so a hand-off aircraft in a high bank falls into a dive
+    /// (spiral divergence) instead of being able to climb with its wings
+    /// near-vertical. Zero at shallow bank; ramps to full magnitude beyond
+    /// ~45 deg of bank. Negative = nose-down, acting about body Y.
+    #[serde(default = "default_spiral_nose_drop_cm")]
+    pub spiral_nose_drop_cm: f64,
 }
 
 impl AircraftConfig {

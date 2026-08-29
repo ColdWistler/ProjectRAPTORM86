@@ -14,6 +14,7 @@ engine** and a real-time **Bevy 3D flight simulator** for a tactical UAV drone.
 
 - Full 6-DOF rigid-body simulation (elevator, aileron, rudder, throttle, flaps)
 - Trailing-edge flap aerodynamics: lift, drag, and nose-down pitching-moment increments with stall-angle reduction
+- Atmospheric wind simulation: steady wind, altitude wind shear, and Dryden-style turbulence — aerodynamics act on the true airspeed (air-relative velocity), while the trajectory integrates ground speed
 - Quaternion-based attitude representation
 - 1976 US Standard Atmosphere (Mach, calibrated airspeed, dynamic pressure)
 - Nonlinear post-stall aerodynamics with configurable stall angles
@@ -86,11 +87,32 @@ use flight_core::Simulator;
 let mut sim = Simulator::new("aircraft.toml");
 let (elev_trim, throttle_trim) = sim.trim_level_flight(1000.0, 60.0);
 
-// One 60 Hz physics step at current trim
-let obs = sim.step_6dof(elev_trim, 0.0, 0.0, throttle_trim, 0.0, 1.0 / 60.0);
+// One 60 Hz physics step at current trim (still air: wind = None)
+let obs = sim.step_6dof(elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, 1.0 / 60.0);
 ```
 
 The returned observation array contains position, velocity, attitude,
 angular rates, and more — suitable for reinforcement-learning training loops.
-`step_6dof` takes `(elevator, aileron, rudder, throttle, flaps, dt)` where
-`flaps` is the trailing-edge flap deflection in radians.
+`step_6dof` takes `(elevator, aileron, rudder, throttle, flaps, wind, dt)` where
+`flaps` is the trailing-edge flap deflection in radians and `wind` is an
+optional `&Vector3<f64>` giving the wind in the Earth NED frame (m/s);
+pass `None` for still air. Aerodynamics act on the air-relative velocity.
+
+### Wind simulation
+
+The RL `Environment` (`env.rs`) exposes wind through
+[`EnvConfig::wind_config`](flight_core/src/env.rs). The visual simulator reads
+wind from environment variables so it can be tuned without recompiling:
+
+| Variable               | Meaning                                        | Default    |
+|------------------------|------------------------------------------------|------------|
+| `RAPTOR_WIND_SPEED`    | Steady wind speed (m/s)                        | `0` (still)|
+| `RAPTOR_WIND_DIR_DEG`  | True bearing the wind blows **toward** (deg)   | `0`        |
+| `RAPTOR_WIND_SHEAR`    | `1` enables altitude (boundary-layer) shear    | off        |
+| `RAPTOR_TURBULENCE`    | `light` / `moderate` / `severe`                | `light`    |
+
+Example — a 12 m/s crosswind with moderate turbulence:
+
+```bash
+RAPTOR_WIND_SPEED=12 RAPTOR_WIND_DIR_DEG=90 RAPTOR_TURBULENCE=moderate cargo run -p flight_vis
+```

@@ -155,6 +155,38 @@ impl AircraftState {
         (self.u * self.u + self.v * self.v + self.w * self.w).sqrt()
     }
 
+    /// Air-relative body-frame velocity `(u_air, v_air, w_air)` given the wind
+    /// expressed in the Earth NED frame. The aerodynamics act on this vector
+    /// (the relative wind), not on the ground-referenced velocity.
+    pub fn air_velocity(&self, wind_earth: &Vector3<f64>) -> Vector3<f64> {
+        let wind_body = self.rotation_earth_to_body().transform_vector(wind_earth);
+        Vector3::new(
+            self.u - wind_body.x,
+            self.v - wind_body.y,
+            self.w - wind_body.z,
+        )
+    }
+
+    /// True airspeed (m/s) relative to the moving air, given the wind in the
+    /// Earth NED frame.
+    pub fn true_airspeed(&self, wind_earth: &Vector3<f64>) -> f64 {
+        self.air_velocity(wind_earth).norm()
+    }
+
+    /// Angle of attack from the air-relative velocity, given the wind in the
+    /// Earth NED frame.
+    pub fn air_angle_of_attack(&self, wind_earth: &Vector3<f64>) -> f64 {
+        let v = self.air_velocity(wind_earth);
+        v.z.atan2(v.x)
+    }
+
+    /// Sideslip angle from the air-relative velocity, given the wind in the
+    /// Earth NED frame.
+    pub fn air_sideslip_angle(&self, wind_earth: &Vector3<f64>) -> f64 {
+        let v = self.air_velocity(wind_earth);
+        v.y.atan2(v.x.max(1e-6))
+    }
+
     /// Normalize the orientation quaternion back to unit length. Called
     /// after every integration step to prevent drift.
     pub fn normalize_quaternion(&mut self) {

@@ -37,17 +37,20 @@ pub fn compute_forces(
     rudder_deflection: f64,
     throttle: f64,
     flap_deflection: f64,
+    wind_earth: &Vector3<f64>,
 ) -> Vector3<f64> {
+    // --- Air-relative velocity: the aero acts on the relative wind, not the
+    //     ground-referenced velocity.
+    let v_air = state.air_velocity(wind_earth);
+    let v_tas = v_air.norm();
+    let alpha = v_air.z.atan2(v_air.x);
+    let beta = v_air.y.atan2(v_air.x.max(1e-6));
+
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
     let atm = Atmosphere::at_altitude(altitude);
-    let v_tas = state.airspeed();
     let q_dyn = atm.dynamic_pressure(v_tas);
     let mach = atm.mach_number(v_tas);
-
-    // --- Angles of attack (AoA) and sideslip (beta) ---
-    let alpha = state.angle_of_attack();
-    let beta = (state.v).atan2(state.u.max(1e-6));
 
     // --- Compressibility correction (Prandtl-Glauert rule) ---
     let pg_factor = compressibility_factor(mach);
@@ -84,9 +87,14 @@ pub fn compute_forces(
     let lift = q_dyn * config.wing_area * cl;
     let drag = q_dyn * config.wing_area * cd;
 
-    // Convert lift & drag from wind frame into body axes
-    let force_x = -drag * alpha.cos() + lift * alpha.sin();
-    let force_z = -lift * alpha.cos() - drag * alpha.sin();
+    // Convert lift & drag from wind frame into body axes. Lift acts in the
+    // body X-Z plane; drag is directed along the (possibly sideslipped) body
+    // velocity, so its component along the body X axis is reduced by cos(beta).
+    // This is the standard sideslip-aware wind-to-body transformation, and
+    // correctly reduces to the beta==0 special case at wings-level.
+    let cb = beta.cos();
+    let force_x = -drag * alpha.cos() * cb + lift * alpha.sin();
+    let force_z = -lift * alpha.cos() - drag * alpha.sin() * cb;
 
     // --- Lateral Sideforce CY ---
     let cy = config.cy_beta * beta + config.cy_dr * rudder_deflection;
@@ -130,17 +138,19 @@ pub fn compute_moments(
     throttle: f64,
     alpha_dot: f64,
     flap_deflection: f64,
+    wind_earth: &Vector3<f64>,
 ) -> Vector3<f64> {
+    // --- Air-relative velocity: the aero acts on the relative wind. ---
+    let v_air = state.air_velocity(wind_earth);
+    let v_tas = v_air.norm();
+    let alpha = v_air.z.atan2(v_air.x);
+    let beta = v_air.y.atan2(v_air.x.max(1e-6));
+
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
     let atm = Atmosphere::at_altitude(altitude);
-    let v_tas = state.airspeed();
     let q_dyn = atm.dynamic_pressure(v_tas);
     let mach = atm.mach_number(v_tas);
-
-    // --- Angle of attack ---
-    let alpha = state.angle_of_attack();
-    let beta = (state.v).atan2(state.u.max(1e-6));
 
     // --- Compressibility correction (Prandtl-Glauert rule) ---
     let _pg_factor = compressibility_factor(mach);
@@ -187,15 +197,52 @@ pub fn compute_moments(
         0.0
     };
 
-    let cm = config.cm0
+    // --- Steep-bank spiral nose-drop ---
+    // A fixed-wing banked past ~45 deg has little/no vertical lift, so gravity
+    // must pull the nose down into a dive. In a real aircraft the resulting
+    // sideslip drives spiral divergence (nose drops); here we inject that
+    // tendency directly with a bank-coupled nose-down moment, engaged only at
+    // steep bank so normal turns are unaffected.
+    let (bank, _, _) = state.euler_angles();
+    let sin_bank = bank.sin().abs();
+    // Engage between ~35 deg (sin=0.574) and ~90 deg (sin=1.0).
+    let engage = ((sin_bank - 0.574) / (1.0 - 0.574)).clamp(0.0, 1.0);
+    let spiral_nose_drop = -config.spiral_nose_drop_cm * engage * engage;
+
+    // --- Inversion sign (proper 6-DOF pitch sense) ---
+    // The body down-axis projects onto Earth +Z (NED) as +1 when upright and
+    // -1 when inverted. A real elevator acts nose-toward-the-belly, so both
+    // the elevator authority and the pitch static/dynamic stability reverse
+    // sense when the aircraft is upside down: pulling "up" on a stick when
+    // inverted pushes the nose toward the belly, i.e. down relative to the
+    // world. Applying this sign to the pitch aerodynamic terms makes inverted
+    // pull dive (and inverted attitude be trimmed/stabilised correctly)
+    // instead of climbing. A tanh blend (rather than a hard sign) fades the
+    // pitch authority smoothly to zero at knife-edge (~90 deg bank) and back,
+    // so banking through 90 deg doesn't jerk the nose around. The bank-keyed
+    // spiral nose-drop is left out: it is already a world-space nose-down term
+    // rather than a body-flow term.
+    let (_, _, body_down) = state.body_axes_in_earth();
+    let pitch_sense = (8.0 * body_down.z).tanh();
+    // The spiral nose-drop is a *world-space* gravity nose-down tendency. Its
+    // body-frame pitch component reverses when inverted, but it must stay full
+    // strength exactly at knife-edge (where pitch_sense ~ 0). Use a hard sign
+    // here (not the smooth pitch_sense blend) so inverted bank keeps diving
+    // instead of pushing the nose the wrong way and tumbling.
+    let spiral_sense = if body_down.z >= 0.0 { 1.0 } else { -1.0 };
+
+    let cm_core = config.cm0
         + config.cma * alpha
         + config.cmq * q_hat
         + config.cm_adot * alpha_dot_hat
         + config.cme * elevator_deflection
         + config.cm_flap * flap
         + stall_pitch_break;
-    // Thrust line offset from CG produces a pitching moment proportional to thrust.
-    let pitch_moment = q_dyn * config.wing_area * config.chord * cm + thrust * config.thrust_arm;
+    let cm = cm_core * pitch_sense + spiral_nose_drop * spiral_sense;
+    // Thrust line offset from CG produces a pitching moment proportional to
+    // thrust; its body-Z arm also reverses when inverted.
+    let pitch_moment =
+        q_dyn * config.wing_area * config.chord * cm + thrust * config.thrust_arm * pitch_sense;
 
     // --- Rolling Moment Cl (around body X) ---
     let cl_roll = config.cl_beta * beta
@@ -230,6 +277,7 @@ pub fn compute_forces_moments(
     throttle: f64,
     alpha_dot: f64,
     flap_deflection: f64,
+    wind_earth: &Vector3<f64>,
 ) -> (Vector3<f64>, Vector3<f64>) {
     let forces = compute_forces(
         state,
@@ -239,6 +287,7 @@ pub fn compute_forces_moments(
         rudder_deflection,
         throttle,
         flap_deflection,
+        wind_earth,
     );
     let moments = compute_moments(
         state,
@@ -249,6 +298,7 @@ pub fn compute_forces_moments(
         throttle,
         alpha_dot,
         flap_deflection,
+        wind_earth,
     );
     (forces, moments)
 }

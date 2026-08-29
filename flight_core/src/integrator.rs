@@ -89,10 +89,11 @@ fn derivatives(
     rudder: f64,
     throttle: f64,
     flap: f64,
+    wind_earth: &Vector3<f64>,
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let forces = compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap);
+    let forces = compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
 
     // --- Translational kinematics ---------------------------------------
     let rot_earth_to_body: UnitQuaternion<f64> = s.rotation();
@@ -120,7 +121,8 @@ fn derivatives(
     let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
-    let moments = compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap);
+    let moments =
+        compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap, wind_earth);
     let ixx = config.ixx;
     let iyy = config.iyy;
     let izz = config.izz;
@@ -155,21 +157,26 @@ pub fn step(
     rudder: f64,
     throttle: f64,
     flap: f64,
+    wind_earth: Option<&Vector3<f64>>,
     dt: f64,
 ) {
     let s0 = DynState::from(&*state);
     let half = dt * 0.5;
 
-    let k1 = derivatives(&s0, config, elevator, aileron, rudder, throttle, flap);
+    // Resolve the wind field once for the entire step (quasi-static over dt).
+    let zero_wind = Vector3::zeros();
+    let wind = wind_earth.unwrap_or(&zero_wind);
+
+    let k1 = derivatives(&s0, config, elevator, aileron, rudder, throttle, flap, wind);
 
     let s2 = add_scaled(&s0, &k1, half);
-    let k2 = derivatives(&s2, config, elevator, aileron, rudder, throttle, flap);
+    let k2 = derivatives(&s2, config, elevator, aileron, rudder, throttle, flap, wind);
 
     let s3 = add_scaled(&s0, &k2, half);
-    let k3 = derivatives(&s3, config, elevator, aileron, rudder, throttle, flap);
+    let k3 = derivatives(&s3, config, elevator, aileron, rudder, throttle, flap, wind);
 
     let s4 = add_scaled(&s0, &k3, dt);
-    let k4 = derivatives(&s4, config, elevator, aileron, rudder, throttle, flap);
+    let k4 = derivatives(&s4, config, elevator, aileron, rudder, throttle, flap, wind);
 
     // Combine the four stage slopes: (k1 + 2k2 + 2k3 + k4)/6.
     let one_sixth = dt / 6.0;
