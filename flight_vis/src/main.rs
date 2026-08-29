@@ -205,14 +205,15 @@ fn handle_manual_input(
     let dt = time.delta_secs() as f64;
 
     // --- Pitch / Elevator: S/Down = Pull UP (climb), W/Up = Push DOWN (dive) ---
+    // Physics convention: negative elevator deflection = nose-up (pull).
     let max_elevator = 0.35; // ~20 degrees
     let elevator_rate = 0.9; // rad/s
     let mut manual_pitch = false;
     if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
-        controls.elevator = (controls.elevator + elevator_rate * dt).min(max_elevator);
+        controls.elevator = (controls.elevator - elevator_rate * dt).max(-max_elevator);
         manual_pitch = true;
     } else if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
-        controls.elevator = (controls.elevator - elevator_rate * dt).max(-max_elevator);
+        controls.elevator = (controls.elevator + elevator_rate * dt).min(max_elevator);
         manual_pitch = true;
     } else {
         // Auto-center manual stick input when released
@@ -243,12 +244,13 @@ fn handle_manual_input(
     }
 
     // --- Yaw / Rudder: E/C = Yaw RIGHT, Q/Z = Yaw LEFT ---
+    // Physics convention: positive rudder deflection = yaw right.
     let max_rudder = 0.35;
     let rudder_rate = 0.9;
     if keyboard.pressed(KeyCode::KeyE) || keyboard.pressed(KeyCode::KeyC) {
-        controls.rudder = (controls.rudder - rudder_rate * dt).max(-max_rudder);
-    } else if keyboard.pressed(KeyCode::KeyQ) || keyboard.pressed(KeyCode::KeyZ) {
         controls.rudder = (controls.rudder + rudder_rate * dt).min(max_rudder);
+    } else if keyboard.pressed(KeyCode::KeyQ) || keyboard.pressed(KeyCode::KeyZ) {
+        controls.rudder = (controls.rudder - rudder_rate * dt).max(-max_rudder);
     } else {
         if controls.rudder.abs() < 0.01 {
             controls.rudder = 0.0;

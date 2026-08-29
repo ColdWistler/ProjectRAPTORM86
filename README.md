@@ -65,9 +65,14 @@ Mass properties, moments of inertia, and aerodynamic coefficients live in
 mass = 1100.0       # kg
 wing_area = 16.2    # m^2
 cla = 5.5           # lift curve slope (per radian)
-cmq = -12.0         # pitch damping derivative
-thrust_max = 5000.0 # max thrust, N
+cmq = -20.0         # pitch damping derivative
+thrust_max = 1800.0 # static (low-speed) thrust, N
+power_max = 119000  # engine shaft power, W (thrust ~ P/V above corner speed)
 ```
+
+Throttle is modeled as a constant-power propeller: above the corner speed the
+available thrust falls off as `P_max / V`, which caps the airspeed and gives
+the phugoid its characteristic damped, energy-exchanging climb.
 
 ## Using `flight_core` as a Library
 

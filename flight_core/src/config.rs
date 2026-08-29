@@ -8,21 +8,24 @@ fn default_alpha_stall_pos() -> f64 { 16.0_f64.to_radians() } // ~0.279 rad
 fn default_alpha_stall_neg() -> f64 { (-12.0_f64).to_radians() } // ~-0.209 rad
 fn default_cd_max() -> f64 { 1.95 }
 fn default_mach_crit() -> f64 { 0.65 }
+fn default_cm_adot() -> f64 { -3.0 }
+fn default_thrust_arm() -> f64 { 0.0 }
+fn default_power_max() -> f64 { 119_000.0 }
 
 fn default_cy_beta() -> f64 { -0.31 }
-fn default_cy_dr() -> f64 { 0.15 }
+fn default_cy_dr() -> f64 { -0.15 }  // Rudder side force (positive rudder yaws right, tail pushed left)
 
 fn default_cl_beta() -> f64 { -0.09 } // Dihedral effect
 fn default_cl_p() -> f64 { -0.45 }    // Roll damping
 fn default_cl_r() -> f64 { 0.10 }     // Roll due to yaw rate
-fn default_cl_da() -> f64 { 0.16 }    // Aileron roll authority
+fn default_cl_da() -> f64 { 0.07 }    // Aileron roll authority
 fn default_cl_dr() -> f64 { 0.01 }
 
-fn default_cn_beta() -> f64 { 0.06 }  // Directional weathercock stability
-fn default_cn_p() -> f64 { -0.03 }    // Yaw due to roll rate
-fn default_cn_r() -> f64 { -0.10 }    // Yaw damping
-fn default_cn_da() -> f64 { -0.01 }   // Adverse yaw
-fn default_cn_dr() -> f64 { -0.07 }   // Rudder yaw authority
+fn default_cn_beta() -> f64 { 0.12 }  // Directional weathercock stability
+fn default_cn_p() -> f64 { -0.02 }    // Yaw due to roll rate (adverse yaw)
+fn default_cn_r() -> f64 { -0.16 }    // Yaw damping
+fn default_cn_da() -> f64 { -0.004 }  // Aileron-to-yaw coupling (near-neutral)
+fn default_cn_dr() -> f64 { 0.05 }    // Rudder yaw authority (positive = yaw right)
 
 /// A fully-parameterized description of the aircraft that the flight
 /// dynamics and aerodynamic models depend on.
@@ -68,6 +71,13 @@ pub struct AircraftConfig {
     /// Maximum engine thrust in Newtons (N).
     pub thrust_max: f64,
 
+    /// Maximum engine shaft power in Watts (W). A fixed-pitch propeller
+    /// delivers roughly constant power, so the available thrust falls off as
+    /// `P_max / V` once airspeed rises above the corner speed; this caps the
+    /// airspeed and damps the phugoid.
+    #[serde(default = "default_power_max")]
+    pub power_max: f64,
+
     // --- JSBSim-grade High-AoA & Nonlinear Aero Extensions ---
     /// Oswald wing efficiency span factor e (0.75 - 0.85).
     #[serde(default = "default_oswald_e")]
@@ -84,6 +94,14 @@ pub struct AircraftConfig {
     /// Critical drag-divergence Mach number.
     #[serde(default = "default_mach_crit")]
     pub mach_crit: f64,
+    /// Pitch damping due to (alpha-dot) / downwash lag
+    /// (dCm/d(alpha_dot * c / 2V)). Negative = stabilizing.
+    #[serde(default = "default_cm_adot")]
+    pub cm_adot: f64,
+    /// Vertical offset of the thrust line from the CG along the body Z
+    /// axis (positive = thrust line below CG, so throttle pulls the nose up).
+    #[serde(default = "default_thrust_arm")]
+    pub thrust_arm: f64,
 
     // --- Lateral-directional aerodynamic stability derivatives ---
     #[serde(default = "default_cy_beta")]

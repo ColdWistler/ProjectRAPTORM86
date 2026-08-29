@@ -5,7 +5,7 @@
 //!     the 1976 U.S. Standard Atmosphere model.
 //!   * Viterna-Corrigan high-AoA nonlinear stall and post-stall model.
 //!   * Prandtl-Glauert compressibility correction and Mach wave drag rise.
-//!   * Downwash lag effects and stall center-of-pressure migration.
+//!   * Downwash-lag (alpha-dot) pitch damping and stall center-of-pressure migration.
 //!   * Full 6-DOF aerodynamic forces (Fx, Fy, Fz) and moments (L, M, N).
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -24,14 +24,19 @@ const G: f64 = 9.80665;
 /// Returns:
 ///   * `forces` — total force in the **body** frame (Newtons), `[Fx, Fy, Fz]`
 ///   * `moments` — total moment in the **body** frame (N·m), `[roll, pitch, yaw]` = `[L, M, N]`
-pub fn compute_forces_moments(
+/// Compute the net aerodynamic + propulsive + gravitational force acting on
+/// the aircraft in full 6-DOF with atmospheric lapse and nonlinear stall
+/// aerodynamics.
+///
+/// Returns the total force in the **body** frame (Newtons), `[Fx, Fy, Fz]`.
+pub fn compute_forces(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
+    _elevator_deflection: f64,
+    _aileron_deflection: f64,
     rudder_deflection: f64,
     throttle: f64,
-) -> (Vector3<f64>, Vector3<f64>) {
+) -> Vector3<f64> {
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
     let atm = Atmosphere::at_altitude(altitude);
@@ -44,11 +49,7 @@ pub fn compute_forces_moments(
     let beta = (state.v).atan2(state.u.max(1e-6));
 
     // --- Compressibility correction (Prandtl-Glauert rule) ---
-    let pg_factor = if mach < 0.85 {
-        (1.0 - mach * mach).max(0.04).sqrt()
-    } else {
-        0.20 // Subsonic limit clamp
-    };
+    let pg_factor = compressibility_factor(mach);
     let cla_effective = config.cla / pg_factor;
 
     // --- Nonlinear Lift Coefficient CL(alpha) via Viterna blend ---
@@ -67,7 +68,11 @@ pub fn compute_forces_moments(
     } else {
         0.0
     };
-    let cd = cd_base + cd_mach;
+    // Parasite drag rise with dynamic pressure: profile/compressibility drag
+    // grows well before Mach_crit once airspeed departs far from the trim
+    // speed. This is what actually damps the phugoid in a real light aircraft.
+    let speed_drag = ((v_tas - 85.0).max(0.0) / 85.0).powi(2) * 0.015;
+    let cd = cd_base + cd_mach + speed_drag;
 
     // Lift and drag magnitudes (Newtons)
     let lift = q_dyn * config.wing_area * cl;
@@ -84,16 +89,61 @@ pub fn compute_forces_moments(
     let mut forces = Vector3::new(force_x, force_y, force_z);
 
     // --- Engine Thrust along body +X ---
-    // Engine thrust scales with atmospheric density ratio (rho / rho_0)
-    let thrust_density_factor = (atm.density_ratio).clamp(0.1, 1.2);
-    let thrust = config.thrust_max * throttle.clamp(0.0, 1.0) * thrust_density_factor;
+    // Engine thrust is limited by both the static (low-speed) thrust ceiling
+    // and the constant shaft power delivered by the propeller:
+    //   T(V) = min(thrust_max * δ, P_max * δ / V)
+    // so somewhere above the corner speed the available thrust falls off with
+    // airspeed. Both scale with the atmospheric density ratio (forced / turboshaft
+    // losses), clamped to a sensible range.
+    let throttle = throttle.clamp(0.0, 1.0);
+    let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
+    let static_thrust = config.thrust_max * throttle * density_factor;
+    let power_thrust = config.power_max * throttle * density_factor / v_tas.max(6.0);
+    let thrust = static_thrust.min(power_thrust);
     forces.x += thrust;
 
     // --- Gravity rotated from Earth NED [0, 0, m*g] to body axes ---
     let gravity_earth = Vector3::new(0.0, 0.0, config.mass * G);
     let rot: UnitQuaternion<f64> = state.rotation_earth_to_body();
-    let gravity_body = rot.inverse().transform_vector(&gravity_earth);
+    let gravity_body = rot.transform_vector(&gravity_earth);
     forces += gravity_body;
+
+    forces
+}
+
+/// Compute the net aerodynamic + propulsive moment acting on the aircraft.
+///
+/// `alpha_dot` (rad/s) feeds the downwash-lag pitch damping term `cm_adot`.
+/// Returns the total moment in the **body** frame (N·m), `[L, M, N]`.
+pub fn compute_moments(
+    state: &AircraftState,
+    config: &AircraftConfig,
+    elevator_deflection: f64,
+    aileron_deflection: f64,
+    rudder_deflection: f64,
+    throttle: f64,
+    alpha_dot: f64,
+) -> Vector3<f64> {
+    // --- Atmospheric conditions at current aircraft altitude ---
+    let altitude = state.altitude();
+    let atm = Atmosphere::at_altitude(altitude);
+    let v_tas = state.airspeed();
+    let q_dyn = atm.dynamic_pressure(v_tas);
+    let mach = atm.mach_number(v_tas);
+
+    // --- Angle of attack ---
+    let alpha = state.angle_of_attack();
+    let beta = (state.v).atan2(state.u.max(1e-6));
+
+    // --- Compressibility correction (Prandtl-Glauert rule) ---
+    let _pg_factor = compressibility_factor(mach);
+
+    // --- Engine thrust (used for the thrust-line pitching moment) ---
+    let throttle = throttle.clamp(0.0, 1.0);
+    let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
+    let static_thrust = config.thrust_max * throttle * density_factor;
+    let power_thrust = config.power_max * throttle * density_factor / v_tas.max(6.0);
+    let thrust = static_thrust.min(power_thrust);
 
     // --- Dimensionless body angular rates ---
     let p_hat = if v_tas > 1e-6 {
@@ -111,8 +161,13 @@ pub fn compute_forces_moments(
     } else {
         0.0
     };
+    let alpha_dot_hat = if v_tas > 1e-6 {
+        alpha_dot * config.chord / (2.0 * v_tas)
+    } else {
+        0.0
+    };
 
-    // --- Pitching Moment Cm with downwash lag & stall break ---
+    // --- Pitching Moment Cm with downwash-lag damping & stall break ---
     // At post-stall, center-of-pressure shifts aft, adding a stabilizing nose-down pitch break
     let stall_pitch_break = if alpha > config.alpha_stall_pos {
         -0.45 * (alpha - config.alpha_stall_pos).min(0.4)
@@ -125,9 +180,11 @@ pub fn compute_forces_moments(
     let cm = config.cm0
         + config.cma * alpha
         + config.cmq * q_hat
+        + config.cm_adot * alpha_dot_hat
         + config.cme * elevator_deflection
         + stall_pitch_break;
-    let pitch_moment = q_dyn * config.wing_area * config.chord * cm;
+    // Thrust line offset from CG produces a pitching moment proportional to thrust.
+    let pitch_moment = q_dyn * config.wing_area * config.chord * cm + thrust * config.thrust_arm;
 
     // --- Rolling Moment Cl (around body X) ---
     let cl_roll = config.cl_beta * beta
@@ -147,7 +204,48 @@ pub fn compute_forces_moments(
 
     let moments = Vector3::new(roll_moment, pitch_moment, yaw_moment);
 
+    moments
+}
+
+/// Compute the total body-frame force and moment.
+///
+/// `alpha_dot` (rad/s) feeds the downwash-lag pitch damping term.
+pub fn compute_forces_moments(
+    state: &AircraftState,
+    config: &AircraftConfig,
+    elevator_deflection: f64,
+    aileron_deflection: f64,
+    rudder_deflection: f64,
+    throttle: f64,
+    alpha_dot: f64,
+) -> (Vector3<f64>, Vector3<f64>) {
+    let forces = compute_forces(
+        state,
+        config,
+        elevator_deflection,
+        aileron_deflection,
+        rudder_deflection,
+        throttle,
+    );
+    let moments = compute_moments(
+        state,
+        config,
+        elevator_deflection,
+        aileron_deflection,
+        rudder_deflection,
+        throttle,
+        alpha_dot,
+    );
     (forces, moments)
+}
+
+/// Prandtl-Glauert compressibility correction factor.
+fn compressibility_factor(mach: f64) -> f64 {
+    if mach < 0.85 {
+        (1.0 - mach * mach).max(0.04).sqrt()
+    } else {
+        0.20 // Subsonic limit clamp
+    }
 }
 
 /// Viterna-Corrigan post-stall lift formulation with smooth hyperbolic blending.

@@ -8,7 +8,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::aero::compute_forces_moments;
+use crate::aero::{compute_forces, compute_moments};
 use crate::config::AircraftConfig;
 use crate::state::AircraftState;
 
@@ -91,7 +91,7 @@ fn derivatives(
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let (forces, moments) = compute_forces_moments(&aircraft, config, elevator, aileron, rudder, throttle);
+    let forces = compute_forces(&aircraft, config, elevator, aileron, rudder, throttle);
 
     // --- Translational kinematics ---------------------------------------
     let rot_earth_to_body: UnitQuaternion<f64> = s.rotation();
@@ -104,11 +104,22 @@ fn derivatives(
     let accel = forces / config.mass - omega.cross(&body_vel);
 
     // --- Rotational kinematics: quaternion propagation ------------------
-    let omega_quat = nalgebra::Quaternion::new(0.0, s.p, s.q, s.r);
+    // Positive q (pitch rate about body +Y) is a nose-up rotation for this
+    // quaternion convention (see trim_level_flight / from_axis_angle(-Y)),
+    // matching the -omega.cross(&body_vel) transport term above.
+    let omega_quat = nalgebra::Quaternion::new(0.0, -s.p, -s.q, -s.r);
     let q_as_quat = nalgebra::Quaternion::new(s.q0, s.q1, s.q2, s.q3);
     let q_view_dot = 0.5 * q_as_quat * omega_quat;
 
+    // --- Alpha-dot from the kinematic acceleration (for Cm_adot damping).
+    //     alpha = atan2(w, u)  =>  d(alpha)/dt = (u*w_dot - w*u_dot) / (u² + w²).
+    //     The body accelerations depend only on the forces, not the moments,
+    //     so there is no circularity here.
+    let v_t_sq = s.u * s.u + s.w * s.w;
+    let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
+
     // --- Rotational dynamics (Euler's equations) ------------------------
+    let moments = compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot);
     let ixx = config.ixx;
     let iyy = config.iyy;
     let izz = config.izz;

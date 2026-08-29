@@ -117,6 +117,154 @@ mod tests {
         );
     }
 
+    #[test]
+    fn throttling_up_climbs_instead_of_diving() {
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        // Push throttle well above the level-flight trim setting.
+        let throttle_high = throttle_trim + 0.25;
+
+        let dt = 1.0 / 60.0;
+        let steps = 1800; // 30 seconds
+        for _ in 0..steps {
+            step(
+                &mut state,
+                &config,
+                elev_trim,
+                0.0,
+                0.0,
+                throttle_high,
+                dt,
+            );
+        }
+
+        let alt_end = state.altitude();
+        assert!(
+            alt_end > 1000.0,
+            "after 30s of extra throttle the aircraft dove to {} m instead of climbing",
+            alt_end
+        );
+        // The climb exchange dips the airspeed slightly below the 60 m/s trim
+        // value (phugoid); just ensure it never approaches the ~25 m/s stall.
+        assert!(
+            state.airspeed() > 45.0,
+            "airspeed collapsed to {} m/s (stall/mush detected)",
+            state.airspeed()
+        );
+    }
+
+    #[test]
+    fn sustained_throttle_climb_stays_bounded() {
+        // A real fixed-stick, power-on airplane settles into a steady climb
+        // with a lightly damped phugoid: airspeed wanders only a few m/s
+        // around trim and the altitude gain per minute stays modest. This
+        // guards against the runaway near-vertical zooms that result from
+        // spurious energy leaks in the 6-DOF coupling.
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+        let throttle_high = (throttle_trim + 0.35).min(1.0);
+
+        let dt = 1.0 / 60.0;
+        let mut tas_min = f64::INFINITY;
+        let mut tas_max = f64::NEG_INFINITY;
+        for _ in 0..3600 {
+            step(
+                &mut state,
+                &config,
+                elev_trim,
+                0.0,
+                0.0,
+                throttle_high,
+                dt,
+            );
+            tas_min = tas_min.min(state.airspeed());
+            tas_max = tas_max.max(state.airspeed());
+        }
+
+        let climb_alt = state.altitude() - 1000.0;
+        assert!(
+            climb_alt > 0.0 && climb_alt < 400.0,
+            "sustained throttle should climb steadily without runaway (gained {} m in 60 s)",
+            climb_alt
+        );
+        assert!(
+            tas_min > 45.0 && tas_max < 90.0,
+            "airspeed swung beyond the bounded phugoid envelope (TAS [{tas_min:.1}, {tas_max:.1}])"
+        );
+    }
+
+    #[test]
+    fn pitch_oscillation_damps_out() {
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+        let trim_alpha = state.angle_of_attack();
+
+        let dt = 1.0 / 60.0;
+
+        // Pull briefly (1 s, ~{pull} deg) to excite the short-period pitch
+        // oscillation (AoA, pitch rate), then release back to trim. The
+        // long-period phugoid keeps the nose slowly rising for ~38 s, so we
+        // assert on the short-period response (alpha & pitch-rate return to
+        // near-trim), not the pitch attitude.
+        for _ in 0..60 {
+            step(
+                &mut state,
+                &config,
+                elev_trim - 0.06,
+                0.0,
+                0.0,
+                throttle_trim,
+                dt,
+            );
+        }
+        assert!(
+            state.angle_of_attack().to_degrees() < 10.0,
+            "prod pushed the aircraft to stall (alpha {})",
+            state.angle_of_attack().to_degrees()
+        );
+
+        // Integrate for 3 s of released flight; the short-period oscillation
+        // (alpha, q) must damp out within this window, visible as a deep
+        // minimum in |q| shortly after release. The long-period phugoid
+        // (~38 s) makes the pitch rate slowly grow again afterwards, so we
+        // assert on the damping event, not the final rate.
+        let mut q_min = f64::INFINITY;
+        for _ in 0..180 {
+            step(
+                &mut state,
+                &config,
+                elev_trim,
+                0.0,
+                0.0,
+                throttle_trim,
+                dt,
+            );
+            q_min = q_min.min(state.q.abs());
+        }
+
+        let (_, pitch, _) = state.euler_angles();
+        assert!(
+            q_min < 0.01,
+            "short-period pitch oscillation not damped after release (min |q| in 3 s = {q_min})"
+        );
+        assert!(
+            (state.angle_of_attack() - trim_alpha).abs() < 0.02,
+            "angle of attack did not return to trim after release (alpha {})",
+            state.angle_of_attack()
+        );
+        // The pitch attitude can legitimately drift on the slow phugoid;
+        // just sanity-check we didn't diverge to vertical.
+        assert!(
+            pitch.abs() < 60.0_f64.to_radians(),
+            "pitch diverged on the phugoid: {:.1} deg",
+            pitch.to_degrees()
+        );
+    }
+
     fn aircraft_default() -> AircraftConfig {
         AircraftConfig {
             mass: 1100.0,
@@ -128,30 +276,107 @@ mod tests {
             izz: 2700.0,
             cl0: 0.3,
             cla: 5.5,
-            cd0: 0.025,
+cd0: 0.025,
             k_drag: 0.04,
             cm0: 0.0,
-            cma: -0.5,
-            cmq: -12.0,
-            cme: -1.0,
-            thrust_max: 5000.0,
+            cma: -1.1,
+            cmq: -20.0,
+            cme: -0.6,
+            thrust_max: 1800.0,
+            power_max: 119_000.0,
             oswald_e: 0.80,
             alpha_stall_pos: 16.0_f64.to_radians(),
             alpha_stall_neg: -12.0_f64.to_radians(),
             cd_max: 1.95,
             mach_crit: 0.65,
-            cy_beta: -0.31,
-            cy_dr: 0.15,
+            cm_adot: -3.0,
+            thrust_arm: 0.0,
+cy_beta: -0.31,
+            cy_dr: -0.15,
             cl_beta: -0.09,
             cl_p: -0.45,
             cl_r: 0.10,
-            cl_da: 0.16,
+            cl_da: 0.07,
             cl_dr: 0.01,
-            cn_beta: 0.06,
-            cn_p: -0.03,
-            cn_r: -0.10,
-            cn_da: -0.01,
-            cn_dr: -0.07,
+            cn_beta: 0.12,
+            cn_p: -0.02,
+            cn_r: -0.16,
+            cn_da: -0.004,
+            cn_dr: 0.05,
         }
+    }
+
+    #[test]
+    fn positive_aileron_banks_right_and_turns_right() {
+        // Positive aileron deflection must roll the right wing DOWN (positive
+        // euler roll) and the banked lift must carry the heading rightward.
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        let yaw_start = state.euler_angles().2;
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            // 2 s of sustained right aileron (~11 deg deflection).
+            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, dt);
+        }
+
+        let (roll, _, _) = state.euler_angles();
+        let heading_change = state.euler_angles().2 - yaw_start;
+        assert!(
+            roll > 5f64.to_radians() && roll < 60f64.to_radians(),
+            "right aileron should bank right-wing-down, got roll {:.1} deg",
+            roll.to_degrees()
+        );
+        assert!(
+            heading_change > 1.5f64.to_radians(),
+            "banked drone should turn right, heading changed {:.1} deg",
+            heading_change.to_degrees()
+        );
+    }
+
+    #[test]
+    fn positive_rudder_yaws_right() {
+        // Positive rudder deflection must yaw the nose RIGHT (heading up).
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        let yaw_start = state.euler_angles().2;
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            // 1.5 s of sustained right rudder.
+            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, dt);
+        }
+
+        let heading_change = state.euler_angles().2 - yaw_start;
+        assert!(
+            heading_change > 1.0f64.to_radians(),
+            "positive rudder should yaw the nose right, heading changed {:.1} deg",
+            heading_change.to_degrees()
+        );
+    }
+
+    #[test]
+    fn pull_elevator_pitches_up() {
+        // Negative elevator deflection (= stick pull, trailing edge down)
+        // must pitch the nose UP above the trimmed pitch attitude.
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            // 2 s at 0.05 rad (~3 deg) stick pull beyond trim.
+            let elevator = elev_trim - 0.05;
+            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, dt);
+        }
+
+        let (_, pitch, _) = state.euler_angles();
+        assert!(
+            pitch > 2f64.to_radians(),
+            "stick pull should pitch the nose up, got pitch {:.1} deg",
+            pitch.to_degrees()
+        );
     }
 }

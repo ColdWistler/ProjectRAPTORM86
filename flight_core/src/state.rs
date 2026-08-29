@@ -89,17 +89,22 @@ impl AircraftState {
         // 2. Required Angle of Attack (AoA)
         let alpha_trim = (cl_req - config.cl0) / cla_effective.max(1e-3);
 
-        // 3. Pitching moment = 0 -> required elevator trim
-        let elev_trim = -(config.cm0 + config.cma * alpha_trim) / config.cme;
-
-        // 4. Drag = Thrust -> required throttle
+        // 3. Drag = Thrust -> required thrust level
         let cd_req = config.cd0 + config.induced_drag_k() * cl_req * cl_req;
         let drag = q_dyn * config.wing_area * cd_req;
         let thrust_req = drag / alpha_trim.cos();
+
+        // 4. Pitching moment = 0 -> required elevator trim, including the
+        //    thrust-line pitching moment (engine offset from CG).
+        let cm_thrust = (thrust_req * config.thrust_arm)
+            / (q_dyn * config.wing_area * config.chord).max(1e-6);
+        let elev_trim = -(config.cm0 + config.cma * alpha_trim + cm_thrust) / config.cme;
+
+        // 5. Throttle setting needed to produce the required thrust.
         let thrust_avail = config.thrust_max * (atm.density / RHO0_SL);
         let throttle_trim = (thrust_req / thrust_avail.max(1.0)).clamp(0.0, 1.0);
 
-        // 5. Populate rigid-body state
+        // 6. Populate rigid-body state
         self.pos_x = 0.0;
         self.pos_y = 0.0;
         self.pos_z = -altitude;
@@ -109,11 +114,14 @@ impl AircraftState {
         self.v = 0.0;
         self.w = speed * alpha_trim.sin();
 
-        // Attitude quaternion: pitch up by alpha_trim around body Y
+        // Attitude quaternion: pitch up by alpha_trim around body Y.
+        // The quaternion is (cos, 0, -sin, 0) under nalgebra's axis-angle
+        // sense for a nose-up rotation; this makes the earth-frame velocity
+        // of a level flight state exactly horizontal.
         let half_pitch = alpha_trim * 0.5;
         self.q0 = half_pitch.cos();
         self.q1 = 0.0;
-        self.q2 = half_pitch.sin();
+        self.q2 = -half_pitch.sin();
         self.q3 = 0.0;
 
         self.p = 0.0;
@@ -186,21 +194,25 @@ impl AircraftState {
     }
 
     /// Extract the classical Tait–Bryan Euler angles (roll, pitch, yaw)
-    /// from the Earth→body quaternion. Radians.
+    /// from the Earth→body quaternion. Radians. Positive pitch is nose-up,
+    /// positive roll is right-wing-down, computed from the body axes in the
+    /// NED earth frame for a consistent convention.
     pub fn euler_angles(&self) -> (f64, f64, f64) {
-        let (w, x, y, z) = (self.q0, self.q1, self.q2, self.q3);
-        let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
-        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
-        let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+        let (fwd, right, down) = self.body_axes_in_earth();
+        let pitch = (-fwd.z).clamp(-1.0, 1.0).asin();
+        let roll = right.z.atan2(down.z);
+        let yaw = fwd.y.atan2(fwd.x);
         (roll, pitch, yaw)
     }
 
-    /// Flight-path-climb-angle proxy: the pitch of the velocity vector
-    /// relative to the horizon, computed from the vertical vs horizontal
-    /// speed components in the Earth frame. Positive = climbing.
+    /// Flight-path-climb angle: the pitch of the true velocity vector
+    /// relative to the horizon. Positive = climbing.
     pub fn flight_path_angle(&self) -> f64 {
-        let horiz = self.u.abs().max(1e-6);
-        (-self.w / horiz).atan()
+        let body = Vector3::new(self.u, self.v, self.w);
+        let earth = self.rotation_earth_to_body().inverse().transform_vector(&body);
+        let climb = -earth.z;
+        let horiz = (earth.x * earth.x + earth.y * earth.y).sqrt().max(1e-6);
+        climb.atan2(horiz)
     }
 
     /// Computes the aircraft body axes `(forward, right, down)` expressed

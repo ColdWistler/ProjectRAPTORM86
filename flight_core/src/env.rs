@@ -266,9 +266,9 @@ mod tests {
         let mut env = test_env();
         env.reset();
         env.sim.state.pos_z = -50.0;
-        env.sim.state.w = 5.0;
+        env.sim.state.w = 20.0;
         let action = ControlAction {
-            elevator: -0.35,
+            elevator: 0.5,
             aileron: 0.0,
             rudder: 0.0,
             throttle: 0.0,
