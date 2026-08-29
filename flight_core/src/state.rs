@@ -100,8 +100,14 @@ impl AircraftState {
             / (q_dyn * config.wing_area * config.chord).max(1e-6);
         let elev_trim = -(config.cm0 + config.cma * alpha_trim + cm_thrust) / config.cme;
 
-        // 5. Throttle setting needed to produce the required thrust.
-        let thrust_avail = config.thrust_max * (atm.density / RHO0_SL);
+        // 5. Throttle setting needed to produce the required thrust. This
+        //    must mirror the aero model's `min(static, power/V)` fall-off,
+        //    otherwise trims requested above the corner speed would falsely
+        //    assume more thrust than the constant-power propeller delivers.
+        let density_factor = (atm.density / RHO0_SL).clamp(0.1, 1.2);
+        let static_ceiling = config.thrust_max * density_factor;
+        let power_ceiling = config.power_max * density_factor / speed.max(6.0);
+        let thrust_avail = static_ceiling.min(power_ceiling);
         let throttle_trim = (thrust_req / thrust_avail.max(1.0)).clamp(0.0, 1.0);
 
         // 6. Populate rigid-body state

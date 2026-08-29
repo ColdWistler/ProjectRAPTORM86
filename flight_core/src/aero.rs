@@ -36,6 +36,7 @@ pub fn compute_forces(
     _aileron_deflection: f64,
     rudder_deflection: f64,
     throttle: f64,
+    flap_deflection: f64,
 ) -> Vector3<f64> {
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -52,14 +53,23 @@ pub fn compute_forces(
     let pg_factor = compressibility_factor(mach);
     let cla_effective = config.cla / pg_factor;
 
+    // --- Flap (trailing-edge) increments: lift, induced-drag factor, drag ---
+    let flap = flap_deflection.clamp(0.0, 0.7); // ~40 deg max
+    let dcl_flap = config.cl_flap * flap;
+    let dcd_flap = config.cd_flap * flap * flap.abs();
+    // Flaps lower the positive stall angle.
+    let alpha_stall_pos = config.alpha_stall_pos - config.flap_stall_shift * flap;
+    let alpha_stall_neg = config.alpha_stall_neg;
+
     // --- Nonlinear Lift Coefficient CL(alpha) via Viterna blend ---
-    let cl_linear = config.cl0 + cla_effective * alpha;
-    let cl = compute_viterna_lift(alpha, cl_linear, config);
+    let cl_linear = config.cl0 + cla_effective * alpha + dcl_flap;
+    let cl = compute_viterna_lift(alpha, cl_linear, config, alpha_stall_pos, alpha_stall_neg);
 
     // --- Nonlinear Drag Coefficient CD(alpha, Mach) ---
     let k_induced = config.induced_drag_k();
     let cd_induced = k_induced * cl * cl;
-    let cd_base = compute_viterna_drag(alpha, config.cd0 + cd_induced, config);
+    let cd_base =
+        compute_viterna_drag(alpha, config.cd0 + cd_induced, config, alpha_stall_pos, alpha_stall_neg);
 
     // Mach wave drag divergence (drag rise above Mach_crit)
     let cd_mach = if mach > config.mach_crit {
@@ -68,11 +78,7 @@ pub fn compute_forces(
     } else {
         0.0
     };
-    // Parasite drag rise with dynamic pressure: profile/compressibility drag
-    // grows well before Mach_crit once airspeed departs far from the trim
-    // speed. This is what actually damps the phugoid in a real light aircraft.
-    let speed_drag = ((v_tas - 85.0).max(0.0) / 85.0).powi(2) * 0.015;
-    let cd = cd_base + cd_mach + speed_drag;
+    let cd = cd_base + cd_mach + dcd_flap;
 
     // Lift and drag magnitudes (Newtons)
     let lift = q_dyn * config.wing_area * cl;
@@ -123,6 +129,7 @@ pub fn compute_moments(
     rudder_deflection: f64,
     throttle: f64,
     alpha_dot: f64,
+    flap_deflection: f64,
 ) -> Vector3<f64> {
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -168,9 +175,12 @@ pub fn compute_moments(
     };
 
     // --- Pitching Moment Cm with downwash-lag damping & stall break ---
-    // At post-stall, center-of-pressure shifts aft, adding a stabilizing nose-down pitch break
-    let stall_pitch_break = if alpha > config.alpha_stall_pos {
-        -0.45 * (alpha - config.alpha_stall_pos).min(0.4)
+    // At post-stall, center-of-pressure shifts aft, adding a stabilizing nose-down pitch break.
+    // Flaps lower the positive stall angle (incremental lift to the rear drops the break AoA).
+    let flap = flap_deflection.clamp(0.0, 0.7);
+    let alpha_stall_pos = config.alpha_stall_pos - config.flap_stall_shift * flap;
+    let stall_pitch_break = if alpha > alpha_stall_pos {
+        -0.45 * (alpha - alpha_stall_pos).min(0.4)
     } else if alpha < config.alpha_stall_neg {
         0.45 * (config.alpha_stall_neg - alpha).min(0.4)
     } else {
@@ -182,6 +192,7 @@ pub fn compute_moments(
         + config.cmq * q_hat
         + config.cm_adot * alpha_dot_hat
         + config.cme * elevator_deflection
+        + config.cm_flap * flap
         + stall_pitch_break;
     // Thrust line offset from CG produces a pitching moment proportional to thrust.
     let pitch_moment = q_dyn * config.wing_area * config.chord * cm + thrust * config.thrust_arm;
@@ -218,6 +229,7 @@ pub fn compute_forces_moments(
     rudder_deflection: f64,
     throttle: f64,
     alpha_dot: f64,
+    flap_deflection: f64,
 ) -> (Vector3<f64>, Vector3<f64>) {
     let forces = compute_forces(
         state,
@@ -226,6 +238,7 @@ pub fn compute_forces_moments(
         aileron_deflection,
         rudder_deflection,
         throttle,
+        flap_deflection,
     );
     let moments = compute_moments(
         state,
@@ -235,6 +248,7 @@ pub fn compute_forces_moments(
         rudder_deflection,
         throttle,
         alpha_dot,
+        flap_deflection,
     );
     (forces, moments)
 }
@@ -249,10 +263,13 @@ fn compressibility_factor(mach: f64) -> f64 {
 }
 
 /// Viterna-Corrigan post-stall lift formulation with smooth hyperbolic blending.
-fn compute_viterna_lift(alpha: f64, cl_linear: f64, config: &AircraftConfig) -> f64 {
-    let alpha_pos = config.alpha_stall_pos;
-    let alpha_neg = config.alpha_stall_neg;
-
+fn compute_viterna_lift(
+    alpha: f64,
+    cl_linear: f64,
+    config: &AircraftConfig,
+    alpha_pos: f64,
+    alpha_neg: f64,
+) -> f64 {
     if alpha >= alpha_neg && alpha <= alpha_pos {
         // Pre-stall linear/attached flow
         cl_linear
@@ -275,10 +292,13 @@ fn compute_viterna_lift(alpha: f64, cl_linear: f64, config: &AircraftConfig) -> 
 }
 
 /// Viterna-Corrigan post-stall drag formulation with smooth transition.
-fn compute_viterna_drag(alpha: f64, cd_attached: f64, config: &AircraftConfig) -> f64 {
-    let alpha_pos = config.alpha_stall_pos;
-    let alpha_neg = config.alpha_stall_neg;
-
+fn compute_viterna_drag(
+    alpha: f64,
+    cd_attached: f64,
+    config: &AircraftConfig,
+    alpha_pos: f64,
+    alpha_neg: f64,
+) -> f64 {
     if alpha >= alpha_neg && alpha <= alpha_pos {
         cd_attached
     } else {

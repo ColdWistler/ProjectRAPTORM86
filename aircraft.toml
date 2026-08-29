@@ -24,3 +24,9 @@ cme = -0.6             # elevator effectiveness (per radian), negative = trailin
 thrust_max = 1800.0    # max thrust in Newtons (Cessna-172-class engine)
 power_max = 119000.0   # max engine shaft power in Watts (~160 hp)
 thrust_arm = 0.0       # thrust-line offset from CG along body Z (m); positive = below CG
+
+# --- Trailing-edge flap increments (per radian of flap deflection) ---
+cl_flap = 1.10         # lift increment per rad (30 deg => +~0.57 dCL)
+cd_flap = 0.14         # drag increment per rad (30 deg => +~0.073 dCD)
+cm_flap = -0.20        # pitching moment per rad (negative = nose down)
+flap_stall_shift = 6.0 # deg by which positive stall angle is reduced at full flap

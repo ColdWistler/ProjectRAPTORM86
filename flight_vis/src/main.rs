@@ -346,6 +346,7 @@ fn update_aircraft(
         controls.aileron,
         controls.rudder,
         controls.throttle,
+        controls.flaps_deg.to_radians(),
         DT,
     );
 

@@ -52,13 +52,15 @@ impl Simulator {
     }
 
     /// Advance the simulation one time step of length `dt` seconds with
-    /// full 6-DOF manual controls (elevator, aileron, rudder, throttle).
+    /// full 6-DOF manual controls (elevator, aileron, rudder, throttle)
+    /// plus a trailing-edge flap deflection (radians).
     pub fn step_6dof(
         &mut self,
         elevator: f64,
         aileron: f64,
         rudder: f64,
         throttle: f64,
+        flaps: f64,
         dt: f64,
     ) -> [f64; 12] {
         step(
@@ -68,6 +70,7 @@ impl Simulator {
             aileron,
             rudder,
             throttle,
+            flaps,
             dt,
         );
         self.state.to_observation_array()
@@ -77,6 +80,7 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aero::compute_forces_moments;
     use crate::integrator::step;
 
     #[test]
@@ -90,7 +94,7 @@ mod tests {
 
         let start = state.clone();
         for _ in 0..steps {
-            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, dt);
         }
 
         let alt_start = -start.pos_z;
@@ -136,6 +140,7 @@ mod tests {
                 0.0,
                 0.0,
                 throttle_high,
+                0.0,
                 dt,
             );
         }
@@ -178,6 +183,7 @@ mod tests {
                 0.0,
                 0.0,
                 throttle_high,
+                0.0,
                 dt,
             );
             tas_min = tas_min.min(state.airspeed());
@@ -218,6 +224,7 @@ mod tests {
                 0.0,
                 0.0,
                 throttle_trim,
+                0.0,
                 dt,
             );
         }
@@ -241,6 +248,7 @@ mod tests {
                 0.0,
                 0.0,
                 throttle_trim,
+                0.0,
                 dt,
             );
             q_min = q_min.min(state.q.abs());
@@ -303,6 +311,10 @@ cy_beta: -0.31,
             cn_r: -0.16,
             cn_da: -0.004,
             cn_dr: 0.05,
+            cl_flap: 1.10,
+            cd_flap: 0.14,
+            cm_flap: -0.20,
+            flap_stall_shift: 6.0_f64.to_radians(),
         }
     }
 
@@ -318,7 +330,7 @@ cy_beta: -0.31,
         let dt = 1.0 / 60.0;
         for _ in 0..120 {
             // 2 s of sustained right aileron (~11 deg deflection).
-            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, dt);
+            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, 0.0, dt);
         }
 
         let (roll, _, _) = state.euler_angles();
@@ -346,7 +358,7 @@ cy_beta: -0.31,
         let dt = 1.0 / 60.0;
         for _ in 0..90 {
             // 1.5 s of sustained right rudder.
-            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, 0.0, dt);
         }
 
         let heading_change = state.euler_angles().2 - yaw_start;
@@ -369,7 +381,7 @@ cy_beta: -0.31,
         for _ in 0..120 {
             // 2 s at 0.05 rad (~3 deg) stick pull beyond trim.
             let elevator = elev_trim - 0.05;
-            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, dt);
+            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, 0.0, dt);
         }
 
         let (_, pitch, _) = state.euler_angles();
@@ -377,6 +389,38 @@ cy_beta: -0.31,
             pitch > 2f64.to_radians(),
             "stick pull should pitch the nose up, got pitch {:.1} deg",
             pitch.to_degrees()
+        );
+    }
+
+    #[test]
+    fn flaps_add_lift_and_nose_down_moment() {
+        // Deploying trailing-edge flaps must (a) increase the generated lift
+        // and (b) add a nose-down pitching moment at otherwise identical
+        // flight conditions. This verifies the flap effects actually reach
+        // the aerodynamics (they were previously presentational only).
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.trim_level_flight(&config, 1000.0, 40.0);
+
+        let flap = 30.0_f64.to_radians();
+        let (f_clean, m_clean) =
+            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0);
+        let (f_flap, m_flap) =
+            compute_forces_moments(&state, &config, 0.0, 0.0, 0.0, 0.5, 0.0, flap);
+
+        // Flap lift acts upward = more negative body-Z force.
+        assert!(
+            f_flap.z < f_clean.z,
+            "flaps should add lift (Fz clean {:.0} N, flap {:.0} N)",
+            f_clean.z,
+            f_flap.z
+        );
+        // Flap pitching moment is nose-down = more negative body-Y moment.
+        assert!(
+            m_flap.y < m_clean.y,
+            "flaps should pitch the nose down (My clean {:.0}, flap {:.0})",
+            m_clean.y,
+            m_flap.y
         );
     }
 }

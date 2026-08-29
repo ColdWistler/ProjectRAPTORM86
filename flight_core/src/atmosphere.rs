@@ -76,17 +76,39 @@ impl Atmosphere {
             let p = p11 * (-G0 * dh / (R_SPECIFIC * t11)).exp();
             (t11, p)
         } else if h <= 32_000.0 {
-            let t11 = 216.65;
-            let p11 = 22632.06;
-            let p20 = p11 * (-G0 * 9_000.0 / (R_SPECIFIC * t11)).exp();
-            let dh = h - 20_000.0;
-            let t = 216.65 + 0.0010 * dh;
-            let p = p20 * (t / 216.65).powf(-G0 / (0.0010 * R_SPECIFIC));
+            // Stratosphere 1: 20,000 - 32,000 m, lapse +0.0010 K/m
+            let t_base = 216.65;
+            let p20 = 5474.88; // 22,632.06 Pa * isothermal decay 11->20 km
+            let t = t_base + 0.0010 * (h - 20_000.0);
+            let p = p20 * (t / t_base).powf(-G0 / (0.0010 * R_SPECIFIC));
+            (t, p)
+        } else if h <= 47_000.0 {
+            // Stratosphere 2: 32,000 - 47,000 m, lapse +0.0028 K/m
+            let t_base = 228.65;
+            let p32 = 868.02; // ~868.02 Pa at 32 km
+            let t = t_base + 0.0028 * (h - 32_000.0);
+            let p = p32 * (t / t_base).powf(-G0 / (0.0028 * R_SPECIFIC));
+            (t, p)
+        } else if h <= 51_000.0 {
+            // Stratopause: 47,000 - 51,000 m, isothermal 270.65 K
+            let t = 270.65;
+            let p47 = 110.9; // ~110.9 Pa at 47 km
+            let p = p47 * (-G0 * (h - 47_000.0) / (R_SPECIFIC * t)).exp();
+            (t, p)
+        } else if h <= 71_000.0 {
+            // Mesosphere 1: 51,000 - 71,000 m, lapse -0.0028 K/m
+            let t_base = 270.65;
+            let p51 = 66.94; // ~66.94 Pa at 51 km
+            let t = t_base - 0.0028 * (h - 51_000.0);
+            let p = p51 * (t / t_base).powf(G0 / (0.0028 * R_SPECIFIC));
             (t, p)
         } else {
-            let t = 228.65;
-            let p = 1197.0 * (-(h - 32000.0) / 7000.0).exp();
-            (t, p)
+            // Mesosphere 2: 71,000 - 86,000 m, lapse -0.0020 K/m
+            let t_base = 214.65;
+            let p71 = 3.96; // ~3.96 Pa at 71 km
+            let t = t_base - 0.0020 * (h - 71_000.0);
+            let p = p71 * (t / t_base).powf(G0 / (0.0020 * R_SPECIFIC));
+            (t, p.max(1e-6))
         };
 
         let density = p / (R_SPECIFIC * t);

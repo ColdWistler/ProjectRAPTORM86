@@ -12,7 +12,8 @@ engine** and a real-time **Bevy 3D flight simulator** for a tactical UAV drone.
 
 ## Features
 
-- Full 6-DOF rigid-body simulation (elevator, aileron, rudder, throttle)
+- Full 6-DOF rigid-body simulation (elevator, aileron, rudder, throttle, flaps)
+- Trailing-edge flap aerodynamics: lift, drag, and nose-down pitching-moment increments with stall-angle reduction
 - Quaternion-based attitude representation
 - 1976 US Standard Atmosphere (Mach, calibrated airspeed, dynamic pressure)
 - Nonlinear post-stall aerodynamics with configurable stall angles
@@ -68,6 +69,9 @@ cla = 5.5           # lift curve slope (per radian)
 cmq = -20.0         # pitch damping derivative
 thrust_max = 1800.0 # static (low-speed) thrust, N
 power_max = 119000  # engine shaft power, W (thrust ~ P/V above corner speed)
+cl_flap = 1.10      # flap lift increment (per radian of deflection)
+cd_flap = 0.14      # flap drag increment (per radian of deflection)
+cm_flap = -0.20     # flap pitching moment (per radian, nose-down)
 ```
 
 Throttle is modeled as a constant-power propeller: above the corner speed the
@@ -83,8 +87,10 @@ let mut sim = Simulator::new("aircraft.toml");
 let (elev_trim, throttle_trim) = sim.trim_level_flight(1000.0, 60.0);
 
 // One 60 Hz physics step at current trim
-let obs = sim.step_6dof(elev_trim, 0.0, 0.0, throttle_trim, 1.0 / 60.0);
+let obs = sim.step_6dof(elev_trim, 0.0, 0.0, throttle_trim, 0.0, 1.0 / 60.0);
 ```
 
 The returned observation array contains position, velocity, attitude,
 angular rates, and more — suitable for reinforcement-learning training loops.
+`step_6dof` takes `(elevator, aileron, rudder, throttle, flaps, dt)` where
+`flaps` is the trailing-edge flap deflection in radians.

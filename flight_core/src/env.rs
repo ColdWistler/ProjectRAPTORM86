@@ -18,6 +18,8 @@ pub struct ControlAction {
     pub rudder: f64,
     /// Throttle setting, clamped internally to `[0.0, 1.0]`.
     pub throttle: f64,
+    /// Flap (trailing-edge) deflection in radians.
+    pub flaps: f64,
 }
 
 impl ControlAction {
@@ -28,6 +30,7 @@ impl ControlAction {
             aileron: 0.0,
             rudder: 0.0,
             throttle: 0.5,
+            flaps: 0.0,
         }
     }
 }
@@ -152,6 +155,7 @@ impl Environment {
             .rudder
             .clamp(-self.config.max_rudder, self.config.max_rudder);
         let throttle = action.throttle.clamp(0.0, 1.0);
+        let flaps = action.flaps.clamp(0.0, 0.7);
 
         step(
             &mut self.sim.state,
@@ -160,6 +164,7 @@ impl Environment {
             aileron,
             rudder,
             throttle,
+            flaps,
             self.config.dt,
         );
 
@@ -272,6 +277,7 @@ mod tests {
             aileron: 0.0,
             rudder: 0.0,
             throttle: 0.0,
+            flaps: 0.0,
         };
         let mut crashed = false;
         let mut total = 0.0;

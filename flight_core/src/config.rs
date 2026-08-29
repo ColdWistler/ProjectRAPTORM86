@@ -27,6 +27,14 @@ fn default_cn_r() -> f64 { -0.16 }    // Yaw damping
 fn default_cn_da() -> f64 { -0.004 }  // Aileron-to-yaw coupling (near-neutral)
 fn default_cn_dr() -> f64 { 0.05 }    // Rudder yaw authority (positive = yaw right)
 
+// Plain flap increments (per radian of trailing-edge deflection). Values are
+// tuned for a light/tactical UAV such that full flap (~30 deg) adds roughly
+// Delta_CL ~ 0.7, Delta_CD ~ 0.08, and a nose-down Delta_Cm ~ -0.25.
+fn default_cl_flap() -> f64 { 1.10 }
+fn default_cd_flap() -> f64 { 0.14 }
+fn default_cm_flap() -> f64 { -0.20 }
+fn default_flap_stall_shift() -> f64 { 6.0_f64.to_radians() }
+
 /// A fully-parameterized description of the aircraft that the flight
 /// dynamics and aerodynamic models depend on.
 ///
@@ -130,6 +138,23 @@ pub struct AircraftConfig {
     pub cn_da: f64,
     #[serde(default = "default_cn_dr")]
     pub cn_dr: f64,
+
+    // --- Flap (trailing-edge) aerodynamic increments ---
+    /// Lift increment per radian of flap deflection, sqrt-free linear
+    /// `dCL = cl_flap * delta_flap`. Fixed/plain flaps on a light aircraft.
+    #[serde(default = "default_cl_flap")]
+    pub cl_flap: f64,
+    /// Drag increment per radian of flap deflection, `dCD = cd_flap * delta_flap`.
+    #[serde(default = "default_cd_flap")]
+    pub cd_flap: f64,
+    /// Pitching-moment increment per radian of flap deflection,
+    /// `dCm = cm_flap * delta_flap`. Negative = nose-down (flaps push nose down).
+    #[serde(default = "default_cm_flap")]
+    pub cm_flap: f64,
+    /// Reduction in the positive stall angle (radians) at full flap; flaps
+    /// lower the stall AoA. `alpha_stall_pos = alpha_stall_pos - flap_stall_shift * delta_flap`.
+    #[serde(default = "default_flap_stall_shift")]
+    pub flap_stall_shift: f64,
 }
 
 impl AircraftConfig {
