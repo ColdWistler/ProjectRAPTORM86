@@ -2,17 +2,12 @@
 
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
-
-use crate::AircraftState;
 
 fn default_oswald_e() -> f64 { 0.80 }
 fn default_alpha_stall_pos() -> f64 { 16.0_f64.to_radians() } // ~0.279 rad
 fn default_alpha_stall_neg() -> f64 { (-12.0_f64).to_radians() } // ~-0.209 rad
 fn default_cd_max() -> f64 { 1.95 }
 fn default_mach_crit() -> f64 { 0.65 }
-fn default_cm_adot() -> f64 { -4.5 }
-fn default_deps_dalpha() -> f64 { 0.35 }
 
 fn default_cy_beta() -> f64 { -0.31 }
 fn default_cy_dr() -> f64 { 0.15 }
@@ -89,12 +84,6 @@ pub struct AircraftConfig {
     /// Critical drag-divergence Mach number.
     #[serde(default = "default_mach_crit")]
     pub mach_crit: f64,
-    /// Pitch damping due to downwash lag (dCm/d(alpha_dot*c/2V)).
-    #[serde(default = "default_cm_adot")]
-    pub cm_adot: f64,
-    /// Downwash gradient (d_epsilon / d_alpha).
-    #[serde(default = "default_deps_dalpha")]
-    pub deps_dalpha: f64,
 
     // --- Lateral-directional aerodynamic stability derivatives ---
     #[serde(default = "default_cy_beta")]
@@ -153,18 +142,4 @@ impl AircraftConfig {
 pub fn load_config(path: &str) -> AircraftConfig {
     AircraftConfig::from_file(path)
         .unwrap_or_else(|e| panic!("failed to load aircraft config from `{}`: {}", path, e))
-}
-
-/// Helper used internally to produce a fresh level-flight state for a
-/// given configuration.
-pub fn initial_state(config: &AircraftConfig) -> AircraftState {
-    let mut state = AircraftState::default();
-    state.reset_level_flight();
-    let _ = config;
-    state
-}
-
-/// A path-existence check used by build/test tooling.
-pub fn config_path_exists(path: &str) -> bool {
-    Path::new(path).exists()
 }

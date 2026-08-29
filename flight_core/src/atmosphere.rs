@@ -118,11 +118,6 @@ impl Atmosphere {
         true_airspeed / self.speed_of_sound.max(1.0)
     }
 
-    /// Computes Equivalent Airspeed (EAS) in m/s: V_eas = V_tas * sqrt(rho / rho_0).
-    pub fn equivalent_airspeed(&self, true_airspeed: f64) -> f64 {
-        true_airspeed * self.density_ratio.sqrt()
-    }
-
     /// Computes Impact pressure (q_c) for calibrated airspeed calculation:
     pub fn impact_pressure(&self, true_airspeed: f64) -> f64 {
         let m = self.mach_number(true_airspeed);

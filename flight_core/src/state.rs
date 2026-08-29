@@ -59,24 +59,6 @@ impl Default for AircraftState {
 }
 
 impl AircraftState {
-    /// Reset to steady, level flight at 1000 m altitude and 60 m/s
-    /// forward ground speed.
-    pub fn reset_level_flight(&mut self) {
-        self.pos_x = 0.0;
-        self.pos_y = 0.0;
-        self.pos_z = -1000.0;
-        self.u = 60.0;
-        self.v = 0.0;
-        self.w = 0.0;
-        self.q0 = 1.0;
-        self.q1 = 0.0;
-        self.q2 = 0.0;
-        self.q3 = 0.0;
-        self.p = 0.0;
-        self.q = 0.0;
-        self.r = 0.0;
-    }
-
     /// Trims the aircraft state to exact 6-DOF steady, straight, wings-level
     /// flight equilibrium (Lift = Weight, Thrust = Drag, Moments = 0) at the
     /// specified target altitude and airspeed.
@@ -176,21 +158,6 @@ impl AircraftState {
     /// Get the orientation as a nalgebra `UnitQuaternion` (Earth -> body).
     pub fn rotation_earth_to_body(&self) -> UnitQuaternion<f64> {
         UnitQuaternion::new_normalize(Quaternion::new(self.q0, self.q1, self.q2, self.q3))
-    }
-
-    /// Get the body-frame velocity as a nalgebra `Vector3`.
-    pub fn body_velocity(&self) -> Vector3<f64> {
-        Vector3::new(self.u, self.v, self.w)
-    }
-
-    /// Get the Earth-frame position as a nalgebra `Vector3` (NED).
-    pub fn earth_position(&self) -> Vector3<f64> {
-        Vector3::new(self.pos_x, self.pos_y, self.pos_z)
-    }
-
-    /// Get the body-frame angular rate vector `(p, q, r)`.
-    pub fn body_angular_rates(&self) -> Vector3<f64> {
-        Vector3::new(self.p, self.q, self.r)
     }
 
     /// Convert the full state into a flat observation array used by the

@@ -52,12 +52,6 @@ impl Simulator {
     }
 
     /// Advance the simulation one time step of length `dt` seconds with
-    /// pitch elevator deflection (radians) and `throttle` setting (0.0 – 1.0).
-    pub fn step(&mut self, elevator: f64, throttle: f64, dt: f64) -> [f64; 12] {
-        self.step_6dof(elevator, 0.0, 0.0, throttle, dt)
-    }
-
-    /// Advance the simulation one time step of length `dt` seconds with
     /// full 6-DOF manual controls (elevator, aileron, rudder, throttle).
     pub fn step_6dof(
         &mut self,
@@ -146,8 +140,6 @@ mod tests {
             alpha_stall_neg: -12.0_f64.to_radians(),
             cd_max: 1.95,
             mach_crit: 0.65,
-            cm_adot: -4.5,
-            deps_dalpha: 0.35,
             cy_beta: -0.31,
             cy_dr: 0.15,
             cl_beta: -0.09,

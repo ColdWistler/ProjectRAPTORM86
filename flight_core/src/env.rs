@@ -30,16 +30,6 @@ impl ControlAction {
             throttle: 0.5,
         }
     }
-
-    /// Construct longitudinal-only action (elevator + throttle) for backwards compatibility.
-    pub fn longitudinal(elevator: f64, throttle: f64) -> Self {
-        Self {
-            elevator,
-            aileron: 0.0,
-            rudder: 0.0,
-            throttle,
-        }
-    }
 }
 
 /// Outcome of a single [`Environment::step`].
@@ -51,13 +41,6 @@ pub struct EnvStep {
     pub terminated: bool,
     /// `true` if the episode ended because the step budget was exhausted.
     pub truncated: bool,
-}
-
-impl EnvStep {
-    /// Gymnasium-compatible shorthand: `True` when the episode is over.
-    pub fn done(&self) -> bool {
-        self.terminated || self.truncated
-    }
 }
 
 /// Tuning parameters for the reward function and episode termination.
@@ -224,16 +207,6 @@ impl Environment {
     /// Current step index within the episode (0-based).
     pub fn step_count(&self) -> usize {
         self.step_count
-    }
-
-    /// Access the underlying simulator (for debugging / external control).
-    pub fn simulator(&self) -> &Simulator {
-        &self.sim
-    }
-
-    /// Mutable access to the underlying simulator.
-    pub fn simulator_mut(&mut self) -> &mut Simulator {
-        &mut self.sim
     }
 }
 
