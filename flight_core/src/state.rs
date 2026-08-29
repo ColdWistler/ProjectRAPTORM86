@@ -1,0 +1,248 @@
+//! Rigid-body aircraft state representation.
+
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+
+use crate::atmosphere::{Atmosphere, RHO0_SL};
+use crate::config::AircraftConfig;
+
+/// The full 6-DOF state of the aircraft.
+///
+/// Position is expressed in the Earth-fixed **NED** frame
+/// (North–East–Down), while velocity and angular rates are expressed in
+/// the **body** frame attached to the aircraft.
+#[derive(Debug, Clone)]
+pub struct AircraftState {
+    /// Earth-frame position. NED: `pos_x` = North, `pos_y` = East,
+    /// `pos_z` = Down (positive downward). Altitude = `-pos_z`.
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub pos_z: f64,
+
+    /// Body-frame linear velocity components.
+    /// `u` = forward (body X), `v` = right (body Y), `w` = down (body Z).
+    pub u: f64,
+    pub v: f64,
+    pub w: f64,
+
+    /// Quaternion orientation `(w, x, y, z)` rotating Earth frame into
+    /// body frame.
+    pub q0: f64, // w
+    pub q1: f64, // x
+    pub q2: f64, // y
+    pub q3: f64, // z
+
+    /// Body-frame angular rates in radians per second.
+    /// `p` = roll rate, `q` = pitch rate, `r` = yaw rate.
+    pub p: f64,
+    pub q: f64,
+    pub r: f64,
+}
+
+impl Default for AircraftState {
+    fn default() -> Self {
+        Self {
+            pos_x: 0.0,
+            pos_y: 0.0,
+            pos_z: 0.0,
+            u: 0.0,
+            v: 0.0,
+            w: 0.0,
+            q0: 1.0,
+            q1: 0.0,
+            q2: 0.0,
+            q3: 0.0,
+            p: 0.0,
+            q: 0.0,
+            r: 0.0,
+        }
+    }
+}
+
+impl AircraftState {
+    /// Reset to steady, level flight at 1000 m altitude and 60 m/s
+    /// forward ground speed.
+    pub fn reset_level_flight(&mut self) {
+        self.pos_x = 0.0;
+        self.pos_y = 0.0;
+        self.pos_z = -1000.0;
+        self.u = 60.0;
+        self.v = 0.0;
+        self.w = 0.0;
+        self.q0 = 1.0;
+        self.q1 = 0.0;
+        self.q2 = 0.0;
+        self.q3 = 0.0;
+        self.p = 0.0;
+        self.q = 0.0;
+        self.r = 0.0;
+    }
+
+    /// Trims the aircraft state to exact 6-DOF steady, straight, wings-level
+    /// flight equilibrium (Lift = Weight, Thrust = Drag, Moments = 0) at the
+    /// specified target altitude and airspeed.
+    ///
+    /// Returns the required control trims: `(elevator_trim_rad, throttle_trim)`.
+    pub fn trim_level_flight(
+        &mut self,
+        config: &AircraftConfig,
+        altitude: f64,
+        speed: f64,
+    ) -> (f64, f64) {
+        let atm = Atmosphere::at_altitude(altitude);
+        let q_dyn = atm.dynamic_pressure(speed);
+        let weight = config.mass * 9.80665;
+
+        // Account for Prandtl-Glauert compressibility slope increase at cruise Mach
+        let mach = atm.mach_number(speed);
+        let pg_factor = if mach < 0.85 {
+            f64::sqrt(f64::max(1.0 - mach * mach, 0.04))
+        } else {
+            0.20
+        };
+        let cla_effective = config.cla / pg_factor;
+
+        // 1. Lift = Weight -> required CL
+        let cl_req = weight / (q_dyn * config.wing_area);
+
+        // 2. Required Angle of Attack (AoA)
+        let alpha_trim = (cl_req - config.cl0) / cla_effective.max(1e-3);
+
+        // 3. Pitching moment = 0 -> required elevator trim
+        let elev_trim = -(config.cm0 + config.cma * alpha_trim) / config.cme;
+
+        // 4. Drag = Thrust -> required throttle
+        let cd_req = config.cd0 + config.induced_drag_k() * cl_req * cl_req;
+        let drag = q_dyn * config.wing_area * cd_req;
+        let thrust_req = drag / alpha_trim.cos();
+        let thrust_avail = config.thrust_max * (atm.density / RHO0_SL);
+        let throttle_trim = (thrust_req / thrust_avail.max(1.0)).clamp(0.0, 1.0);
+
+        // 5. Populate rigid-body state
+        self.pos_x = 0.0;
+        self.pos_y = 0.0;
+        self.pos_z = -altitude;
+
+        // Body velocities: nose pitched up by alpha_trim relative to horizontal airflow
+        self.u = speed * alpha_trim.cos();
+        self.v = 0.0;
+        self.w = speed * alpha_trim.sin();
+
+        // Attitude quaternion: pitch up by alpha_trim around body Y
+        let half_pitch = alpha_trim * 0.5;
+        self.q0 = half_pitch.cos();
+        self.q1 = 0.0;
+        self.q2 = half_pitch.sin();
+        self.q3 = 0.0;
+
+        self.p = 0.0;
+        self.q = 0.0;
+        self.r = 0.0;
+
+        (elev_trim, throttle_trim)
+    }
+
+    /// Angle of attack (AoA), the angle between the body X axis and the
+    /// relative wind projected into the body X–Z plane. Positive AoA means
+    /// the nose is above the airflow direction.
+    pub fn angle_of_attack(&self) -> f64 {
+        (self.w).atan2(self.u)
+    }
+
+    /// Sideslip angle (beta) in radians, the angle between the relative wind
+    /// and the body X axis in the body X–Y plane.
+    pub fn sideslip_angle(&self) -> f64 {
+        (self.v).atan2(self.u.max(1e-6))
+    }
+
+    /// Total airspeed magnitude, sqrt(u² + v² + w²) in m/s.
+    pub fn airspeed(&self) -> f64 {
+        (self.u * self.u + self.v * self.v + self.w * self.w).sqrt()
+    }
+
+    /// Normalize the orientation quaternion back to unit length. Called
+    /// after every integration step to prevent drift.
+    pub fn normalize_quaternion(&mut self) {
+        let norm = (self.q0 * self.q0 + self.q1 * self.q1 + self.q2 * self.q2 + self.q3 * self.q3)
+            .sqrt();
+        if norm > 1e-12 {
+            let inv = 1.0 / norm;
+            self.q0 *= inv;
+            self.q1 *= inv;
+            self.q2 *= inv;
+            self.q3 *= inv;
+        }
+    }
+
+    /// Get the orientation as a nalgebra `UnitQuaternion` (Earth -> body).
+    pub fn rotation_earth_to_body(&self) -> UnitQuaternion<f64> {
+        UnitQuaternion::new_normalize(Quaternion::new(self.q0, self.q1, self.q2, self.q3))
+    }
+
+    /// Get the body-frame velocity as a nalgebra `Vector3`.
+    pub fn body_velocity(&self) -> Vector3<f64> {
+        Vector3::new(self.u, self.v, self.w)
+    }
+
+    /// Get the Earth-frame position as a nalgebra `Vector3` (NED).
+    pub fn earth_position(&self) -> Vector3<f64> {
+        Vector3::new(self.pos_x, self.pos_y, self.pos_z)
+    }
+
+    /// Get the body-frame angular rate vector `(p, q, r)`.
+    pub fn body_angular_rates(&self) -> Vector3<f64> {
+        Vector3::new(self.p, self.q, self.r)
+    }
+
+    /// Convert the full state into a flat observation array used by the
+    /// reinforcement-learning agent.
+    pub fn to_observation_array(&self) -> [f64; 12] {
+        [
+            self.pos_x,
+            self.pos_z,
+            self.u,
+            self.v,
+            self.w,
+            self.q0,
+            self.q1,
+            self.q2,
+            self.q3,
+            self.p,
+            self.q,
+            self.r,
+        ]
+    }
+
+    /// Altitude above the reference (sea-level) ground plane in meters.
+    /// NED `pos_z` is positive downward, so altitude is `-pos_z`.
+    pub fn altitude(&self) -> f64 {
+        -self.pos_z
+    }
+
+    /// Extract the classical Tait–Bryan Euler angles (roll, pitch, yaw)
+    /// from the Earth→body quaternion. Radians.
+    pub fn euler_angles(&self) -> (f64, f64, f64) {
+        let (w, x, y, z) = (self.q0, self.q1, self.q2, self.q3);
+        let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+        let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+        (roll, pitch, yaw)
+    }
+
+    /// Flight-path-climb-angle proxy: the pitch of the velocity vector
+    /// relative to the horizon, computed from the vertical vs horizontal
+    /// speed components in the Earth frame. Positive = climbing.
+    pub fn flight_path_angle(&self) -> f64 {
+        let horiz = self.u.abs().max(1e-6);
+        (-self.w / horiz).atan()
+    }
+
+    /// Computes the aircraft body axes `(forward, right, down)` expressed
+    /// in the Earth NED coordinate frame.
+    pub fn body_axes_in_earth(&self) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+        let rot_body_to_earth = self.rotation_earth_to_body().inverse();
+        let fwd = rot_body_to_earth.transform_vector(&Vector3::new(1.0, 0.0, 0.0));
+        let right = rot_body_to_earth.transform_vector(&Vector3::new(0.0, 1.0, 0.0));
+        let down = rot_body_to_earth.transform_vector(&Vector3::new(0.0, 0.0, 1.0));
+        (fwd, right, down)
+    }
+}

@@ -1,0 +1,8 @@
+[package]
+name = "flight_vis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flight_core = { path = "../flight_core" }
+bevy = "0.15"
