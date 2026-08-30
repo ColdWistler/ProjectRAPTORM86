@@ -9,13 +9,15 @@
 mod aircraft;
 mod environment;
 mod menu;
+mod wind_tunnel;
 
 use bevy::prelude::*;
 use flight_core::Simulator;
 
 use aircraft::{animate_control_surfaces, spawn_aircraft, spin_propeller, AircraftRoot};
-use environment::{animate_wind_turbines, spawn_environment};
+use environment::{animate_wind_turbines, spawn_environment, EnvironmentRoot};
 use menu::MainMenuPlugin;
+use wind_tunnel::WindTunnelPlugin;
 
 /// Top-level application screen. Each variant is a separate, independently
 /// schedulable mode; add new component-simulator screens here as tabs.
@@ -24,6 +26,7 @@ pub enum AppState {
     #[default]
     MainMenu,
     FlightSim,
+    WindTunnel,
 }
 
 /// Candidate paths for the aircraft configuration file.
@@ -98,7 +101,10 @@ fn main() {
         .init_state::<AppState>()
         .enable_state_scoped_entities::<AppState>()
         .add_plugins(MainMenuPlugin)
+        .add_plugins(WindTunnelPlugin)
         .add_systems(Startup, menu_env_setup)
+        .add_systems(OnEnter(AppState::WindTunnel), hide_environment)
+        .add_systems(OnExit(AppState::WindTunnel), show_environment)
         .add_systems(OnEnter(AppState::FlightSim), setup)
         .add_systems(OnExit(AppState::FlightSim), cleanup_sim_screen)
         .add_systems(
@@ -260,7 +266,6 @@ fn menu_env_setup(
 
     // --- Spawn Environment (Terrain, Airport, City, Mountains, Clouds) ---
     spawn_environment(&mut commands, &mut meshes, &mut materials, &asset_server);
-
     // --- Single Persistent Camera -------------------------------------
     // One camera for the entire app. It is spawned here sitting at the raw
     // menu/environment view; while the simulator is active, `update_aircraft`
@@ -290,6 +295,22 @@ fn menu_env_setup(
         },
         position,
     ));
+}
+
+/// Hide the whole environment while in the wind tunnel so the mode shows an
+/// empty test chamber instead of the airport/terrain that surrounds the
+/// origin.
+fn hide_environment(mut env: Query<&mut Visibility, With<EnvironmentRoot>>) {
+    if let Ok(mut vis) = env.get_single_mut() {
+        *vis = Visibility::Hidden;
+    }
+}
+
+/// Restore the environment when leaving the wind tunnel.
+fn show_environment(mut env: Query<&mut Visibility, With<EnvironmentRoot>>) {
+    if let Ok(mut vis) = env.get_single_mut() {
+        *vis = Visibility::Inherited;
+    }
 }
 
 /// Runs when leaving the simulator back to the menu: despawns the aircraft

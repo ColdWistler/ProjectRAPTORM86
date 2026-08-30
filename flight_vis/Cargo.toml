@@ -5,4 +5,4 @@ edition.workspace = true
 
 [dependencies]
 flight_core = { path = "../flight_core" }
-bevy = "0.15"
+bevy = { version = "0.15", features = ["wayland"] }

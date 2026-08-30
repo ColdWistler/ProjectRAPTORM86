@@ -6,6 +6,13 @@ pub struct WindTurbineRotor {
     pub speed: f32,
 }
 
+/// Marker for the root of the entire environment scene. Everything spawned by
+/// [`spawn_environment`] is a descendant of this single entity, so the whole
+/// world can be shown/hidden as one unit (e.g. hidden while in the wind
+/// tunnel).
+#[derive(Component)]
+pub struct EnvironmentRoot;
+
 /// Spawns the entire flight simulator environment:
 /// - Real-world custom 3D terrain (if placed in `assets/models/terrain.glb` or `landscape.glb`)
 /// - Satellite imagery ground texture (if placed in `assets/textures/satellite.png`)
@@ -17,52 +24,68 @@ pub struct WindTurbineRotor {
 /// - Pine forests and tree groves
 /// - Wind turbine farm with animated rotors
 /// - 3D low-poly cloud formations at flight altitude
+///
+/// Returns the root [`EnvironmentRoot`] entity so callers can toggle its
+/// [`Visibility`].
 pub fn spawn_environment(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     asset_server: &Res<AssetServer>,
-) {
-    // 1. Check if user provided a real-world 3D terrain model (e.g. from BlenderGIS / QGIS)
-    let custom_terrain_candidates = [
-        "models/terrain.glb",
-        "models/landscape.glb",
-        "models/mountains.glb",
-        "models/real_world_terrain.glb",
-        "models/terrain.gltf",
-    ];
+) -> Entity {
+    commands
+        .spawn((
+            EnvironmentRoot,
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            // 1. Check if user provided a real-world 3D terrain model.
+            let mut custom_terrain_loaded = false;
+            for rel_path in [
+                "models/terrain.glb",
+                "models/landscape.glb",
+                "models/mountains.glb",
+                "models/real_world_terrain.glb",
+                "models/terrain.gltf",
+            ] {
+                let full_path = format!("assets/{}", rel_path);
+                if std::path::Path::new(&full_path).exists() {
+                    println!("-> Loading real-world 3D terrain from {}", full_path);
+                    parent.spawn((
+                        SceneRoot(asset_server.load(format!("{}#Scene0", rel_path))),
+                        Transform::from_xyz(0.0, 0.0, 0.0),
+                    ));
+                    custom_terrain_loaded = true;
+                    break;
+                }
+            }
 
-    let mut custom_terrain_loaded = false;
-    for rel_path in custom_terrain_candidates {
-        let full_path = format!("assets/{}", rel_path);
-        if std::path::Path::new(&full_path).exists() {
-            println!("-> Loading real-world 3D terrain from {}", full_path);
-            commands.spawn((
-                SceneRoot(asset_server.load(format!("{}#Scene0", rel_path))),
-                Transform::from_xyz(0.0, 0.0, 0.0),
-            ));
-            custom_terrain_loaded = true;
-            break;
-        }
-    }
-
-    spawn_terrain_and_fields(commands, meshes, materials, asset_server, custom_terrain_loaded);
-    spawn_river(commands, meshes, materials);
-    spawn_airport(commands, meshes, materials);
-    spawn_city(commands, meshes, materials);
-    if !custom_terrain_loaded {
-        spawn_mountains(commands, meshes, materials);
-    }
-    spawn_forests(commands, meshes, materials);
-    spawn_wind_turbines(commands, meshes, materials);
-    spawn_clouds(commands, meshes, materials);
+            spawn_terrain_and_fields(
+                parent,
+                meshes,
+                materials,
+                asset_server,
+                custom_terrain_loaded,
+            );
+            spawn_river(parent, meshes, materials);
+            spawn_airport(parent, meshes, materials);
+            spawn_city(parent, meshes, materials);
+            if !custom_terrain_loaded {
+                spawn_mountains(parent, meshes, materials);
+            }
+            spawn_forests(parent, meshes, materials);
+            spawn_wind_turbines(parent, meshes, materials);
+            spawn_clouds(parent, meshes, materials);
+        })
+        .id()
 }
 
 // ---------------------------------------------------------------------------
 // 1. Terrain & Farmland
 // ---------------------------------------------------------------------------
 fn spawn_terrain_and_fields(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     asset_server: &Res<AssetServer>,
@@ -100,7 +123,7 @@ fn spawn_terrain_and_fields(
         ..default()
     });
 
-    commands.spawn((
+    parent.spawn((
         Mesh3d(ground_mesh),
         MeshMaterial3d(ground_mat),
         Transform::from_xyz(10000.0, 0.0, 0.0),
@@ -140,7 +163,7 @@ fn spawn_terrain_and_fields(
             let mat_idx = i % field_materials.len();
 
             let field_mesh = meshes.add(Plane3d::default().mesh().size(width, length));
-            commands.spawn((
+            parent.spawn((
                 Mesh3d(field_mesh),
                 MeshMaterial3d(field_materials[mat_idx].clone()),
                 Transform::from_xyz(x, 0.2, z),
@@ -153,7 +176,7 @@ fn spawn_terrain_and_fields(
 // 2. River
 // ---------------------------------------------------------------------------
 fn spawn_river(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -177,7 +200,7 @@ fn spawn_river(
 
     for (x, z, len, width, rot) in segments {
         let river_mesh = meshes.add(Plane3d::default().mesh().size(len, width));
-        commands.spawn((
+        parent.spawn((
             Mesh3d(river_mesh),
             MeshMaterial3d(water_mat.clone()),
             Transform::from_xyz(x, 0.4, z).with_rotation(Quat::from_rotation_y(rot)),
@@ -189,7 +212,7 @@ fn spawn_river(
 // 3. Airport Complex
 // ---------------------------------------------------------------------------
 fn spawn_airport(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -262,7 +285,7 @@ fn spawn_airport(
     let runway_len = 3200.0;
     let runway_width = 60.0;
     let runway_mesh = meshes.add(Plane3d::default().mesh().size(runway_len, runway_width));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(runway_mesh),
         MeshMaterial3d(asphalt_mat),
         Transform::from_xyz(airport_x, 0.5, airport_z),
@@ -272,7 +295,7 @@ fn spawn_airport(
     let stripe_mesh = meshes.add(Plane3d::default().mesh().size(30.0, 3.0));
     for i in -28..29 {
         let x = airport_x + (i as f32) * 50.0;
-        commands.spawn((
+        parent.spawn((
             Mesh3d(stripe_mesh.clone()),
             MeshMaterial3d(marking_white.clone()),
             Transform::from_xyz(x, 0.52, airport_z),
@@ -283,12 +306,12 @@ fn spawn_airport(
     let bulb_mesh = meshes.add(Sphere::new(0.4));
     for i in -32..=32 {
         let x = airport_x + (i as f32) * 50.0;
-        commands.spawn((
+        parent.spawn((
             Mesh3d(bulb_mesh.clone()),
             MeshMaterial3d(runway_light_white.clone()),
             Transform::from_xyz(x, 0.8, airport_z - 31.0),
         ));
-        commands.spawn((
+        parent.spawn((
             Mesh3d(bulb_mesh.clone()),
             MeshMaterial3d(runway_light_white.clone()),
             Transform::from_xyz(x, 0.8, airport_z + 31.0),
@@ -298,12 +321,12 @@ fn spawn_airport(
     // Threshold Lights (Green for Approach, Red for End)
     for j in -5..=5 {
         let z = airport_z + (j as f32) * 5.0;
-        commands.spawn((
+        parent.spawn((
             Mesh3d(bulb_mesh.clone()),
             MeshMaterial3d(runway_light_green.clone()),
             Transform::from_xyz(airport_x - 1600.0, 0.8, z),
         ));
-        commands.spawn((
+        parent.spawn((
             Mesh3d(bulb_mesh.clone()),
             MeshMaterial3d(runway_light_red.clone()),
             Transform::from_xyz(airport_x + 1600.0, 0.8, z),
@@ -313,7 +336,7 @@ fn spawn_airport(
     // Parallel Taxiway
     let taxiway_z = airport_z - 110.0;
     let taxiway_mesh = meshes.add(Plane3d::default().mesh().size(3200.0, 26.0));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(taxiway_mesh),
         MeshMaterial3d(taxiway_mat.clone()),
         Transform::from_xyz(airport_x, 0.48, taxiway_z),
@@ -321,7 +344,7 @@ fn spawn_airport(
 
     // Taxiway Centerline (Yellow)
     let taxiline_mesh = meshes.add(Plane3d::default().mesh().size(3200.0, 1.2));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(taxiline_mesh),
         MeshMaterial3d(marking_yellow),
         Transform::from_xyz(airport_x, 0.49, taxiway_z),
@@ -330,7 +353,7 @@ fn spawn_airport(
     // Taxiway Connectors
     for offset_x in [-1000.0, 0.0, 1000.0] {
         let connector_mesh = meshes.add(Plane3d::default().mesh().size(26.0, 110.0));
-        commands.spawn((
+        parent.spawn((
             Mesh3d(connector_mesh),
             MeshMaterial3d(taxiway_mat.clone()),
             Transform::from_xyz(airport_x + offset_x, 0.48, airport_z - 55.0),
@@ -339,7 +362,7 @@ fn spawn_airport(
 
     // Apron / Tarmac
     let apron_mesh = meshes.add(Plane3d::default().mesh().size(700.0, 180.0));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(apron_mesh),
         MeshMaterial3d(taxiway_mat),
         Transform::from_xyz(airport_x, 0.46, taxiway_z - 100.0),
@@ -353,22 +376,22 @@ fn spawn_airport(
     let tower_x = airport_x - 200.0;
     let tower_z = taxiway_z - 160.0;
 
-    commands.spawn((
+    parent.spawn((
         Mesh3d(tower_base),
         MeshMaterial3d(building_concrete.clone()),
         Transform::from_xyz(tower_x, 7.5, tower_z),
     ));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(tower_shaft),
         MeshMaterial3d(building_concrete.clone()),
         Transform::from_xyz(tower_x, 47.5, tower_z),
     ));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(tower_cab),
         MeshMaterial3d(glass_mat.clone()),
         Transform::from_xyz(tower_x, 82.0, tower_z),
     ));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(tower_radome),
         MeshMaterial3d(marking_white.clone()),
         Transform::from_xyz(tower_x, 90.0, tower_z),
@@ -381,12 +404,12 @@ fn spawn_airport(
         let hangar_body = meshes.add(Cuboid::new(120.0, 25.0, 80.0));
         let hangar_roof = meshes.add(Cylinder::new(42.0, 120.0));
 
-        commands.spawn((
+        parent.spawn((
             Mesh3d(hangar_body),
             MeshMaterial3d(building_concrete.clone()),
             Transform::from_xyz(h_x, 12.5, h_z),
         ));
-        commands.spawn((
+        parent.spawn((
             Mesh3d(hangar_roof),
             MeshMaterial3d(metal_roof.clone()),
             Transform::from_xyz(h_x, 25.0, h_z)
@@ -398,7 +421,7 @@ fn spawn_airport(
     let term_x = airport_x - 50.0;
     let term_z = taxiway_z - 220.0;
     let term_mesh = meshes.add(Cuboid::new(260.0, 22.0, 70.0));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(term_mesh),
         MeshMaterial3d(building_concrete),
         Transform::from_xyz(term_x, 11.0, term_z),
@@ -417,12 +440,12 @@ fn spawn_airport(
 
     let sock_x = airport_x - 600.0;
     let sock_z = airport_z + 60.0;
-    commands.spawn((
+    parent.spawn((
         Mesh3d(pole_mesh),
         MeshMaterial3d(marking_white),
         Transform::from_xyz(sock_x, 7.0, sock_z),
     ));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(sock_mesh),
         MeshMaterial3d(orange_mat),
         Transform::from_xyz(sock_x + 2.0, 14.0, sock_z)
@@ -434,7 +457,7 @@ fn spawn_airport(
 // 4. Downtown City / Skyscrapers
 // ---------------------------------------------------------------------------
 fn spawn_city(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -487,7 +510,7 @@ fn spawn_city(
     let city_center_z = -1800.0;
 
     let city_base = meshes.add(Plane3d::default().mesh().size(3200.0, 2400.0));
-    commands.spawn((
+    parent.spawn((
         Mesh3d(city_base),
         MeshMaterial3d(road_mat),
         Transform::from_xyz(city_center_x, 0.3, city_center_z),
@@ -509,7 +532,7 @@ fn spawn_city(
             let mat_idx = ((seed as usize) + row + col) % bldg_materials.len();
 
             let bldg_mesh = meshes.add(Cuboid::new(width, height, depth));
-            commands.spawn((
+            parent.spawn((
                 Mesh3d(bldg_mesh),
                 MeshMaterial3d(bldg_materials[mat_idx].clone()),
                 Transform::from_xyz(bx, height * 0.5, bz),
@@ -521,12 +544,12 @@ fn spawn_city(
                     radius: 2.0,
                     height: spire_height,
                 });
-                commands.spawn((
+                parent.spawn((
                     Mesh3d(spire_mesh),
                     MeshMaterial3d(bldg_materials[0].clone()),
                     Transform::from_xyz(bx, height + spire_height * 0.5, bz),
                 ));
-                commands.spawn((
+                parent.spawn((
                     Mesh3d(beacon_mesh.clone()),
                     MeshMaterial3d(beacon_red.clone()),
                     Transform::from_xyz(bx, height + spire_height + 1.0, bz),
@@ -540,7 +563,7 @@ fn spawn_city(
 // 5. Alpine Mountain Ranges
 // ---------------------------------------------------------------------------
 fn spawn_mountains(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -567,7 +590,7 @@ fn spawn_mountains(
             radius: base_radius,
             height,
         });
-        commands.spawn((
+        parent.spawn((
             Mesh3d(cone_mesh),
             MeshMaterial3d(rock_mat.clone()),
             Transform::from_xyz(mx, height * 0.5, mz),
@@ -579,7 +602,7 @@ fn spawn_mountains(
             radius: snow_radius,
             height: snow_height,
         });
-        commands.spawn((
+        parent.spawn((
             Mesh3d(snow_mesh),
             MeshMaterial3d(snow_mat.clone()),
             Transform::from_xyz(mx, height - snow_height * 0.5, mz),
@@ -597,7 +620,7 @@ fn spawn_mountains(
             radius: base_radius,
             height,
         });
-        commands.spawn((
+        parent.spawn((
             Mesh3d(cone_mesh),
             MeshMaterial3d(rock_mat.clone()),
             Transform::from_xyz(mx, height * 0.5, mz),
@@ -609,7 +632,7 @@ fn spawn_mountains(
             radius: snow_radius,
             height: snow_height,
         });
-        commands.spawn((
+        parent.spawn((
             Mesh3d(snow_mesh),
             MeshMaterial3d(snow_mat.clone()),
             Transform::from_xyz(mx, height - snow_height * 0.5, mz),
@@ -621,7 +644,7 @@ fn spawn_mountains(
 // 6. Pine Forests & Trees
 // ---------------------------------------------------------------------------
 fn spawn_forests(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -666,7 +689,7 @@ fn spawn_forests(
             let tz = gz + ((t * 137) % 400) as f32 - 200.0;
             let scale = 0.8 + ((t as f32 * 19.0) % 40.0) / 100.0;
 
-            commands.spawn((
+            parent.spawn((
                 Mesh3d(trunk_mesh.clone()),
                 MeshMaterial3d(trunk_mat.clone()),
                 Transform::from_xyz(tx, 5.0 * scale, tz).with_scale(Vec3::splat(scale)),
@@ -683,7 +706,7 @@ fn spawn_forests(
                 foliage_mat_2.clone()
             };
 
-            commands.spawn((
+            parent.spawn((
                 Mesh3d(fol_mesh),
                 MeshMaterial3d(fol_mat),
                 Transform::from_xyz(tx, (10.0 + 9.0) * scale, tz).with_scale(Vec3::splat(scale)),
@@ -696,7 +719,7 @@ fn spawn_forests(
 // 7. Wind Turbines
 // ---------------------------------------------------------------------------
 fn spawn_wind_turbines(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -720,14 +743,14 @@ fn spawn_wind_turbines(
         let tz = 1600.0 + if i % 2 == 0 { 0.0 } else { 350.0 };
 
         // Tower
-        commands.spawn((
+        parent.spawn((
             Mesh3d(tower_mesh.clone()),
             MeshMaterial3d(white_mat.clone()),
             Transform::from_xyz(tx, 45.0, tz),
         ));
 
         // Nacelle (generator housing)
-        commands.spawn((
+        parent.spawn((
             Mesh3d(nacelle_mesh.clone()),
             MeshMaterial3d(white_mat.clone()),
             Transform::from_xyz(tx, 90.0, tz),
@@ -735,7 +758,7 @@ fn spawn_wind_turbines(
 
         // Rotating 3-blade rotor hub
         let speed = 0.8 + ((i as f32 * 0.13) % 0.4);
-        commands
+        parent
             .spawn((
                 WindTurbineRotor { speed },
                 Transform::from_xyz(tx - 6.5, 90.0, tz),
@@ -776,7 +799,7 @@ pub fn animate_wind_turbines(
 // 8. 3D Clouds
 // ---------------------------------------------------------------------------
 fn spawn_clouds(
-    commands: &mut Commands,
+    parent: &mut ChildBuilder,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
@@ -794,7 +817,7 @@ fn spawn_clouds(
         let cy = 1600.0 + ((c * 311) % 800) as f32;
         let cz = ((c * 2371) % 36000) as f32 - 18000.0;
 
-        commands
+        parent
             .spawn((
                 Transform::from_xyz(cx, cy, cz),
                 Visibility::default(),

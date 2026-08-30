@@ -58,6 +58,33 @@ The simulator loads its aircraft configuration from `aircraft.toml`
 | Autopilot   | `H` or `T` toggle level-flight hold        |
 | Reset       | `R` reset to trimmed cruise flight         |
 
+## Wind Tunnel Mode
+
+Pick **Wind Tunnel Simulator** from the main menu. The surrounding world is
+hidden and the aircraft is held fixed at the center of an empty test chamber
+while a field of streak particles flows over and around it, visualizing how
+the airstream deflects around the airframe — like a real wind tunnel. The HUD
+reports the aerodynamic lift, drag, side force, and moments computed by
+`flight_core` for the current attitude.
+
+| Action         | Control               |
+| -------------- | --------------------- |
+| Orbit camera   | Click + drag mouse    |
+| Zoom camera    | Mouse scroll wheel    |
+| Pitch          | `W` up / `S` down     |
+| Yaw (sideslip) | `A` / `D`             |
+| Roll           | `↑` / `↓`             |
+| Aileron        | `Q` left / `E` right  |
+| Rudder         | `Z` left / `C` right  |
+| Flaps          | `F` cycle             |
+| Wind speed     | `Shift` up / `Ctrl` down |
+| Wind direction | `R` / `T`             |
+| Reset          | `Space`               |
+| Exit           | `Esc`                 |
+
+The airstream direction/speed shown by the particles and the resulting forces
+react to the aircraft's orientation relative to the fixed flow.
+
 ## Aircraft Configuration
 
 Mass properties, moments of inertia, and aerodynamic coefficients live in

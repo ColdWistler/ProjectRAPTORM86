@@ -23,6 +23,7 @@ struct MenuButton(Target);
 /// The simulation/mode a menu button launches.
 enum Target {
     FlightSim,
+    WindTunnel,
     /// Placeholder for future individual component simulators (wing, rotor,
     /// avionics, etc.). Selecting it currently announces that it is not yet
     /// implemented rather than switching state, so the simulator menu stays
@@ -81,6 +82,7 @@ fn spawn_main_menu(mut commands: Commands) {
                 });
 
             spawn_button(parent, "6-DOF Flight Simulator", Target::FlightSim);
+            spawn_button(parent, "Wind Tunnel Simulator", Target::WindTunnel);
             spawn_button(
                 parent,
                 "Wing / Airfoil Simulation       (coming soon)",
@@ -138,6 +140,9 @@ fn menu_button_system(
             Interaction::Pressed => match button.0 {
                 Target::FlightSim => {
                     next_state.set(AppState::FlightSim);
+                }
+                Target::WindTunnel => {
+                    next_state.set(AppState::WindTunnel);
                 }
                 Target::Placeholder(name) => {
                     info!("{name} simulation: not implemented yet. Select the simulator to fly.");
