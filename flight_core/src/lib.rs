@@ -11,6 +11,7 @@ pub mod atmosphere;
 pub mod config;
 pub mod env;
 pub mod integrator;
+pub mod shape;
 pub mod state;
 pub mod wind;
 
@@ -26,7 +27,7 @@ use crate::integrator::step;
 
 /// A high-level convenience wrapper bundling the aircraft configuration
 /// with its current dynamic state and providing the primary integration
-/// API used by the Python and Bevy front-ends.
+/// API used by the Godot GDExtension front-end.
 pub struct Simulator {
     pub config: AircraftConfig,
     pub state: AircraftState,
@@ -326,6 +327,7 @@ cy_beta: -0.31,
             cm_flap: -0.20,
             flap_stall_shift: 6.0_f64.to_radians(),
             spiral_nose_drop_cm: 0.10,
+            collision_panels: Vec::new(),
         }
     }
 

@@ -184,14 +184,12 @@ impl WindEnvironment {
         if self.config.wind_shear && self.config.wind_speed > 0.0 {
             let alt = altitude.max(1.0);
             let z_ref = self.config.reference_altitude.max(1.0);
-            let ratio = alt / z_ref;
             if alt < z_ref {
                 // Below reference: scale down as ~sqrt or log; use a physically
                 // credible power-law boundary layer profile.
                 mag *= (alt / z_ref).powf(0.2);
             }
             // Above reference: keep the reference wind.
-            let _ = ratio;
         }
 
         // Wind direction is the true heading the wind blows *toward*.

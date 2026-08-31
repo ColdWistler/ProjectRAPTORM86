@@ -16,11 +16,22 @@ var flaps_deg := 0.0
 var throttle := 0.0
 var auto_level := false
 
+const AIRCRAFT_NAMES := ["TwinEngine", "MQI"]
+const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
+
 var _propeller: Node3D = null
 var _flaps: Array = []
 var _ailerons: Array = []
+var _aircraft_index := 0
 var _telemetry := PackedFloat64Array()
 var _hud_timer := 0.0
+var _aircraft_btn: Button = null
+
+var cam_orbit := false
+var cam_yaw := 0.0
+var cam_pitch := 0.3
+var cam_dist := 40.0
+var cam_center := Vector3.ZERO
 
 @onready var _physics = $Physics
 @onready var _drone: Node3D = $DroneView
@@ -28,22 +39,39 @@ var _hud_timer := 0.0
 @onready var _label: Label = _build_hud()
 
 func _ready() -> void:
-	if not _physics.start(""):
-		push_error("FlightSimNode failed to load aircraft.toml")
+	if not _physics.start("TwinEngine.toml"):
+		if not _physics.start("aircraft.toml"):
+			push_error("FlightSimNode failed to load any aircraft config")
 		# Trim still works on the built-in defaults, so continue anyway.
 	var tr: Vector2 = _physics.trim(1000.0, 60.0)
 	elevator = 0.0
 	elevator_trim = tr.x
 	throttle = clampf(tr.y, 0.0, 1.0)
 
-	var parts := DroneFactory.build(_drone)
-	_propeller = parts["propeller"]
-	_flaps = parts["flaps"]
-	_ailerons = parts["ailerons"]
+	# Use the imported GLB aircraft models rather than the procedural drone.
+	var view: Node3D = _AircraftViewScript.new()
+	view.name = "Model"
+	_drone.add_child(view)
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 
 	_build_world()
 	_camera.global_position = Vector3(-60, 1060, -120)
 	_camera.look_at(Vector3(0, 1000, 0), Vector3.UP)
+
+## Switch the active aircraft (visual model + physics config) and re-trim.
+func _load_aircraft(name: String) -> void:
+	var ok: bool = _physics.switch_aircraft(name)
+	var view := _drone.get_node_or_null("Model")
+	if view:
+		view.set_model(name)
+	if ok:
+		var tr: Vector2 = _physics.trim(1000.0, 60.0)
+		elevator = 0.0
+		elevator_trim = tr.x
+		aileron = 0.0
+		rudder = 0.0
+		flaps_deg = 0.0
+		throttle = clampf(tr.y, 0.0, 1.0)
 
 ## Build sky, sun, terrain and a runway + distance markers for motion cues.
 func _build_world() -> void:
@@ -117,7 +145,35 @@ func _build_hud() -> Label:
 	label.add_theme_font_size_override("font_size", 13)
 	label.text = "Initializing..."
 	panel.add_child(label)
+
+	_aircraft_btn = Button.new()
+	_aircraft_btn.position = Vector2(12, 620)
+	_aircraft_btn.custom_minimum_size = Vector2(140, 28)
+	_aircraft_btn.add_theme_font_size_override("font_size", 12)
+	var btn_style := StyleBoxFlat.new()
+	btn_style.bg_color = Color(0.04, 0.07, 0.11, 0.85)
+	btn_style.set_corner_radius_all(6)
+	btn_style.set_content_margin_all(6)
+	_aircraft_btn.add_theme_stylebox_override("normal", btn_style)
+	var btn_hover := btn_style.duplicate()
+	btn_hover.bg_color = Color(0.10, 0.18, 0.28, 0.9)
+	_aircraft_btn.add_theme_stylebox_override("hover", btn_hover)
+	_aircraft_btn.pressed.connect(_on_aircraft_swap)
+	hud.add_child(_aircraft_btn)
+	_update_aircraft_btn_text()
+
 	return label
+
+func _on_aircraft_swap() -> void:
+	_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+	_update_aircraft_btn_text()
+
+func _update_aircraft_btn_text() -> void:
+	if _aircraft_btn:
+		var next: String = AIRCRAFT_NAMES[(_aircraft_index + 1) % AIRCRAFT_NAMES.size()]
+		_aircraft_btn.text = "Aircraft: %s  [Swap]" % AIRCRAFT_NAMES[_aircraft_index]
+		_aircraft_btn.tooltip_text = "Click or press [M] to switch to %s" % next
 
 func _physics_process(delta: float) -> void:
 	_handle_input(delta)
@@ -191,6 +247,22 @@ func _handle_input(delta: float) -> void:
 		auto_level = not auto_level
 		_physics.set_auto_level(auto_level)
 
+	# Camera view toggle: V
+	if _just_pressed(KEY_V):
+		cam_orbit = not cam_orbit
+		if cam_orbit:
+			cam_center = _drone.global_position
+			var offset := _camera.global_position - cam_center
+			cam_dist = offset.length()
+			cam_yaw = atan2(offset.z, offset.x)
+			cam_pitch = asin(clampf(offset.y / cam_dist, -1.0, 1.0))
+
+	# Switch aircraft: M
+	if _just_pressed(KEY_M):
+		_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
+		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+		_update_aircraft_btn_text()
+
 	# Reset: R
 	if _just_pressed(KEY_R):
 		var tr: Vector2 = _physics.reset()
@@ -230,11 +302,30 @@ func _update_control_surfaces() -> void:
 		ail.rotation.x = -aileron * 0.6
 
 func _chase_camera() -> void:
-	var tf: Transform3D = _drone.global_transform
-	var pos := tf * Vector3(-38, 8.5, 0)
-	var look := tf * Vector3(25, 1.5, 0)
-	_camera.global_position = pos
-	_camera.look_at(look, tf.basis.y)
+	if cam_orbit:
+		var sp := sin(cam_pitch)
+		var cp := cos(cam_pitch)
+		var offset := Vector3(cam_dist * cp * cos(cam_yaw), cam_dist * sp, cam_dist * cp * sin(cam_yaw))
+		var target := _drone.global_position
+		cam_center = cam_center.lerp(target, 8.0 * get_physics_process_delta_time())
+		_camera.global_position = cam_center + offset
+		_camera.look_at(cam_center, Vector3.UP)
+	else:
+		var tf: Transform3D = _drone.global_transform
+		var pos := tf * Vector3(-38, 8.5, 0)
+		var look := tf * Vector3(25, 1.5, 0)
+		_camera.global_position = pos
+		_camera.look_at(look, tf.basis.y)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			cam_dist = clampf(cam_dist - 3.0, 8.0, 120.0)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			cam_dist = clampf(cam_dist + 3.0, 8.0, 120.0)
+	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		cam_yaw -= event.relative.x * 0.006
+		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
 
 func _update_hud() -> void:
 	if _telemetry.size() < 25:
@@ -247,7 +338,9 @@ func _update_hud() -> void:
 		flap_str = "LANDING (30deg)"
 	var ap := " [AUTOPILOT ON]" if auto_level else ""
 	var stall := " [! STALL !]" if t[23] > 0.5 else ""
+	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
 	_label.text = """TACTICAL UAV DRONE TELEMETRY%s%s
+Aircraft:       %s (model: %s, press [M] to switch)
 ------------------------------------
 Altitude:       %6.0f m (%6.0f ft)
 Airspeed (TAS): %6.1f m/s (%5.0f kts)
@@ -269,9 +362,11 @@ Rudder:    [Q] Left / [E] Right (or [Z]/[C])
 Flaps:     [F] 0 -> 15 -> 30
 Trim:      [[] Down / []] Up
 Throttle:  [Shift] Up / [Ctrl] Down
-Autopilot: [H]/[T] Hold    Reset: [R]
+	Autopilot: [H]/[T] Hold    Reset: [R]
+	Camera:   [V] Chase/Orbit  [RMB-drag] [Scroll]
 Menu: [Esc]""" % [
 		ap, stall,
+		ac_name, ac_name,
 		t[0], t[1],
 		t[2], t[3],
 		t[4],

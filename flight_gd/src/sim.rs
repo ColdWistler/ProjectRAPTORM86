@@ -14,24 +14,31 @@ use godot::builtin::{PackedFloat64Array, Transform3D, Vector2, Vector3};
 use godot::classes::Node3D;
 use godot::prelude::*;
 
-/// Candidate aircraft configuration locations relative to the CWD. Godot runs
-/// from inside `godot/`, so the workspace-root `aircraft.toml` is two levels up.
-const CONFIG_PATHS: [&str; 4] = [
-    "aircraft.toml",
-    "../aircraft.toml",
-    "../../aircraft.toml",
-    "../../../aircraft.toml",
-];
+/// Candidate directories (relative to the Godot working directory) that may
+/// contain aircraft config TOML files. When launched via `godot --path godot`
+/// the CWD is `godot/`, so the workspace root is two levels up. When run from
+/// the editor the CWD is the project root, so `..` and `../..` cover that too.
+const CONFIG_PATHS: [&str; 6] = ["", "..", "../..", "../../..", "../../...", "../../../.."];
 /// Max elevator/aileron/rudder deflection (radians).
 const MAX_ELEVATOR: f64 = 0.35;
 const MAX_AILERON: f64 = 0.35;
 const MAX_RUDDER: f64 = 0.35;
 
-fn resolve_config_path() -> Option<String> {
-    CONFIG_PATHS
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .map(|p| p.to_string())
+/// Search the known candidate directories (relative to the Godot working
+/// directory) for a config file called `file_name`, returning its path if
+/// found.
+fn resolve_config_in(file_name: &str) -> Option<String> {
+    for p in CONFIG_PATHS {
+        let candidate = if p.is_empty() {
+            file_name.to_string()
+        } else {
+            format!("{p}/{file_name}")
+        };
+        if std::path::Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Build a [`WindConfig`] from environment variables so the air model can be
@@ -94,19 +101,20 @@ impl FlightSimNode {
     /// 1000 m, 60 m/s. Returns `false` if the config file could not be loaded.
     #[func]
     fn start(&mut self, config_path: GString) -> bool {
-        let path = if !config_path.is_empty() {
+        let file_name = if !config_path.is_empty() {
             config_path.to_string()
         } else {
-            let Ok(cwd) = std::env::current_dir() else {
+            "aircraft.toml".to_string()
+        };
+        godot_warn!("FlightSimNode: searching for '{file_name}' in {:?}", CONFIG_PATHS);
+        let path = match resolve_config_in(&file_name) {
+            Some(p) => {
+                godot_warn!("FlightSimNode: found '{file_name}' at '{p}'");
+                p
+            }
+            None => {
+                godot_error!("FlightSimNode: '{file_name}' not found in search paths");
                 return false;
-            };
-            let _ = cwd;
-            match resolve_config_path() {
-                Some(p) => p,
-                None => {
-                    godot_error!("FlightSimNode: aircraft.toml not found near {:?}", cwd);
-                    return false;
-                }
             }
         };
         let Ok(config) = AircraftConfig::from_file(&path) else {
@@ -184,6 +192,36 @@ impl FlightSimNode {
         self.rudder = rudder.clamp(-MAX_RUDDER, MAX_RUDDER);
         self.throttle = throttle.clamp(0.0, 1.0);
         self.flaps_deg = flaps_deg;
+    }
+
+    /// Switch the active aircraft configuration by name (e.g. `"MQI"` or
+    /// `"TwinEngine"`) and re-trim to level flight. Returns `true` on success.
+    /// The name is mapped to a `<name>.toml` in the same search locations as
+    /// the default `aircraft.toml`.
+    #[func]
+    fn switch_aircraft(&mut self, name: GString) -> bool {
+        let name = name.to_string();
+        let file_name = format!("{name}.toml");
+        let Some(path) = resolve_config_in(&file_name) else {
+            godot_error!("FlightSimNode: no config for aircraft '{name}'");
+            return false;
+        };
+        let Ok(config) = AircraftConfig::from_file(&path) else {
+            godot_error!("FlightSimNode: failed to parse config {path}");
+            return false;
+        };
+        let mut state = AircraftState::default();
+        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 1000.0, 60.0);
+        self.sim = Some((Simulator { config, state }, self.wind_environment()));
+        self.elevator = 0.0;
+        self.elevator_trim = trim_elev;
+        self.aileron = 0.0;
+        self.rudder = 0.0;
+        self.flaps_deg = 0.0;
+        self.throttle = trim_throttle;
+        self.auto_level = false;
+        self.target_alt = 1000.0;
+        true
     }
 
     #[func]

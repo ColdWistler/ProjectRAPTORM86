@@ -10,6 +10,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::aero::{compute_forces, compute_moments};
 use crate::config::AircraftConfig;
+use crate::shape::compute_shape_wind;
 use crate::state::AircraftState;
 
 /// Compressed state used for RK4 derivative evaluation.
@@ -93,7 +94,13 @@ fn derivatives(
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let forces = compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
+    let mut forces =
+        compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
+
+    // Shape-based wind interaction: the imposed wind pushes on the aircraft's
+    // flat-plate collision-shape panels, adding a geometry-dependent force.
+    let (shape_force, shape_moment) = compute_shape_wind(&aircraft, &config.collision_panels, wind_earth);
+    forces += shape_force;
 
     // --- Translational kinematics ---------------------------------------
     let rot_earth_to_body: UnitQuaternion<f64> = s.rotation();
@@ -121,8 +128,9 @@ fn derivatives(
     let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
-    let moments =
+    let mut moments =
         compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap, wind_earth);
+    moments += shape_moment;
     let ixx = config.ixx;
     let iyy = config.iyy;
     let izz = config.izz;

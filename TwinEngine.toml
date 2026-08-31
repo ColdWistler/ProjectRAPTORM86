@@ -1,0 +1,57 @@
+# --- General / Mass properties (TwinEngine: larger twin) ---
+mass = 2100.0          # kg
+wing_area = 28.0       # m^2
+wing_span = 15.5       # m
+chord = 1.81           # m
+
+# --- Moments of inertia (kg*m^2) ---
+ixx = 3600.0
+iyy = 5200.0
+izz = 7200.0
+
+# --- Aerodynamic coefficients ---
+cl0 = 0.28
+cla = 5.3
+cd0 = 0.030
+k_drag = 0.04
+
+cm0 = 0.0
+cma = -1.05
+cmq = -22.0
+cm_adot = -3.0
+cme = -0.65
+
+thrust_max = 4200.0
+power_max = 320000.0
+thrust_arm = 0.0
+
+# --- Flap increments ---
+cl_flap = 1.15
+cd_flap = 0.15
+cm_flap = -0.22
+flap_stall_shift = 6.0
+
+# --- Steep-bank spiral nose-drop ---
+spiral_nose_drop_cm = 0.11
+
+# --- Collision-shape wind interaction (sized for the TwinEngine) ---
+[[collision_panels]]
+area = 2.6              # fuselage frontal area
+normal = [1.0, 0.0, 0.0]
+cp = [3.0, 0.0, 0.0]
+cd = 1.9
+
+[[collision_panels]]
+area = 1.3              # vertical fin
+normal = [0.0, 0.0, 1.0]
+cp = [-2.8, 0.0, 0.7]
+
+[[collision_panels]]
+area = 2.2              # right wing underside (vertical gust surface)
+normal = [0.0, -1.0, 0.0]
+cp = [0.5, 6.0, -0.2]
+
+[[collision_panels]]
+area = 2.2              # left wing underside
+normal = [0.0, -1.0, 0.0]
+cp = [0.5, -6.0, -0.2]

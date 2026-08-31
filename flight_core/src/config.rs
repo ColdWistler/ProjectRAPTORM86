@@ -168,7 +168,34 @@ pub struct AircraftConfig {
     /// ~45 deg of bank. Negative = nose-down, acting about body Y.
     #[serde(default = "default_spiral_nose_drop_cm")]
     pub spiral_nose_drop_cm: f64,
+
+    /// Flat-plate panels that make up the aircraft's collision shape. Each
+    /// panel is a surface with a centre of pressure, body-frame normal and
+    /// area; the imposed wind pours onto every panel and produces a
+    /// shape-dependent force + moment (a flat-plate pressure model). This is
+    /// what lets the two aircraft models feel different in the wind.
+    #[serde(default)]
+    pub collision_panels: Vec<CollisionPanel>,
 }
+
+/// One flat-plate surface of the aircraft's collision shape, defined in the
+/// **body** frame (nose +X, up +Y, right +Z) — the same convention as the
+/// aerodynamics and the visual model.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CollisionPanel {
+    /// Surface area in square metres (m²).
+    pub area: f64,
+    /// Unit normal of the panel in the body frame (components `[nx, ny, nz]`).
+    pub normal: [f64; 3],
+    /// Centre of pressure relative to the CG in the body frame, `[x, y, z]` m.
+    pub cp: [f64; 3],
+    /// Flat-plate drag coefficient for this panel (typical 1.2 – 2.0).
+    #[serde(default = "default_panel_cd")]
+    pub cd: f64,
+}
+
+fn default_panel_cd() -> f64 { 1.5 }
 
 impl AircraftConfig {
     /// Wing aspect ratio AR = b² / S.
