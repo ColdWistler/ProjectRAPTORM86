@@ -1,13 +1,15 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://c1lsmf2ujgi2y"]
 
-[ext_resource type="Script" path="res://scripts/flight_sim.gd" id="1_fsim"]
+[ext_resource type="Script" uid="uid://c4vhox1gd6dj1" path="res://scripts/flight_sim.gd" id="1_fsim"]
 
-[node name="FlightSim" type="Node3D"]
+[node name="FlightSim" type="Node3D" unique_id=261454407]
 script = ExtResource("1_fsim")
 
-[node name="DroneView" type="Node3D" parent="."]
+[node name="DroneView" type="Node3D" parent="." unique_id=1877615726]
+transform = Transform3D(-4.3711385e-08, 0, 0.99999994, 0, 1, 0, -0.99999994, 0, -4.3711385e-08, 0, 0, 0)
 
-[node name="Physics" type="FlightSimNode" parent="."]
+[node name="Physics" type="FlightSimNode" parent="." unique_id=172234283]
 
-[node name="Camera" type="Camera3D" parent="."]
+[node name="Camera" type="Camera3D" parent="." unique_id=1836501567]
+transform = Transform3D(1, 0, 0, 0, 0.99126756, 0.1318662, 0, -0.1318662, 0.99126756, 0, 0.2966885, 1.8003589)
 far = 40000.0

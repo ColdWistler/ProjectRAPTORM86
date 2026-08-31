@@ -1,3 +1,4 @@
+@tool
 extends Node3D
 ## Interactive 6-DOF flight simulation. All physics live in `flight_core`
 ## (via the FlightSimNode GDExtension); this script only reads input, feeds
@@ -39,14 +40,19 @@ var cam_center := Vector3.ZERO
 @onready var _label: Label = _build_hud()
 
 func _ready() -> void:
-	if not _physics.start("TwinEngine.toml"):
-		if not _physics.start("aircraft.toml"):
-			push_error("FlightSimNode failed to load any aircraft config")
-		# Trim still works on the built-in defaults, so continue anyway.
-	var tr: Vector2 = _physics.trim(50.0, 60.0)
-	elevator = 0.0
-	elevator_trim = tr.x
-	throttle = clampf(tr.y, 0.0, 1.0)
+	var is_editor := Engine.is_editor_hint()
+
+	# In the editor we only want the static visuals; the physics (Rust) node
+	# and input/HUD handling are runtime-only.
+	if not is_editor:
+		if not _physics.start("TwinEngine.toml"):
+			if not _physics.start("aircraft.toml"):
+				push_error("FlightSimNode failed to load any aircraft config")
+			# Trim still works on the built-in defaults, so continue anyway.
+		var tr: Vector2 = _physics.trim(50.0, 60.0)
+		elevator = 0.0
+		elevator_trim = tr.x
+		throttle = clampf(tr.y, 0.0, 1.0)
 
 	# Use the imported GLB aircraft models rather than the procedural drone.
 	var view: Node3D = _AircraftViewScript.new()
@@ -54,20 +60,25 @@ func _ready() -> void:
 	_drone.add_child(view)
 	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 
-	_build_world()
-	_camera.global_position = Vector3(-30, 58, 0)
-	_camera.look_at(Vector3(0, 52, 0), Vector3.UP)
+	if not is_editor:
+		_build_world()
+		cam_center = _drone.global_position
+		_camera.global_position = cam_center + Vector3(-30, 8, 0)
+		_camera.look_at(cam_center, Vector3.UP)
 
 ## Switch the active aircraft (visual model + physics config) and re-trim.
 func _load_aircraft(name: String) -> void:
-	var ok: bool = _physics.switch_aircraft(name)
+	var is_editor := Engine.is_editor_hint()
+	var ok := true
+	if not is_editor:
+		ok = _physics.switch_aircraft(name)
 	var view := _drone.get_node_or_null("Model")
 	if view:
 		view.set_model(name)
 		_propellers = view.propellers
 		_ailerons = view.ailerons
 		_flaps = view.flaps
-	if ok:
+	if ok and not is_editor:
 		var tr: Vector2 = _physics.trim(50.0, 60.0)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -179,6 +190,9 @@ func _update_aircraft_btn_text() -> void:
 		_aircraft_btn.tooltip_text = "Click or press [M] to switch to %s" % next
 
 func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
+
 	_handle_input(delta)
 
 	_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
@@ -257,7 +271,7 @@ func _handle_input(delta: float) -> void:
 		if cam_orbit:
 			cam_center = _drone.global_position
 			var offset := _camera.global_position - cam_center
-			cam_dist = offset.length()
+			cam_dist = maxf(offset.length(), 1.0)
 			cam_yaw = atan2(offset.z, offset.x)
 			cam_pitch = asin(clampf(offset.y / cam_dist, -1.0, 1.0))
 
@@ -330,9 +344,8 @@ func _chase_camera() -> void:
 		_camera.look_at(cam_center, Vector3.UP)
 	else:
 		var tf: Transform3D = _drone.global_transform
-		var pos := tf * Vector3(-38, 8.5, 0)
-		_camera.global_position = pos
-		_camera.look_at(tf.origin + Vector3.UP * 2.0, tf.basis.y)
+		_camera.global_position = tf * Vector3(-32, 7.0, 0)
+		_camera.look_at(tf.origin, Vector3.UP)
 
 func _update_hud() -> void:
 	if _telemetry.size() < 25:
