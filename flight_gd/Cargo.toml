@@ -1,8 +1,11 @@
 [package]
-name = "flight_vis"
+name = "flight_gd"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 flight_core = { path = "../flight_core" }
-bevy = { version = "0.15", features = ["wayland"] }
+godot = { version = "0.5", features = ["api-4-7"] }

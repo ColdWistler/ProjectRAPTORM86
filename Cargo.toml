@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "flight_core",
-    "flight_vis",
+    "flight_gd",
 ]
 
 [workspace.package]

@@ -1,0 +1,13 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/flight_sim.gd" id="1_fsim"]
+
+[node name="FlightSim" type="Node3D"]
+script = ExtResource("1_fsim")
+
+[node name="DroneView" type="Node3D" parent="."]
+
+[node name="Physics" type="FlightSimNode" parent="."]
+
+[node name="Camera" type="Camera3D" parent="."]
+far = 40000.0
