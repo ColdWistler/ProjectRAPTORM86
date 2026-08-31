@@ -19,7 +19,7 @@ var auto_level := false
 const AIRCRAFT_NAMES := ["TwinEngine", "MQI"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 
-var _propeller: Node3D = null
+var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
 var _aircraft_index := 0
@@ -43,7 +43,7 @@ func _ready() -> void:
 		if not _physics.start("aircraft.toml"):
 			push_error("FlightSimNode failed to load any aircraft config")
 		# Trim still works on the built-in defaults, so continue anyway.
-	var tr: Vector2 = _physics.trim(1000.0, 60.0)
+	var tr: Vector2 = _physics.trim(50.0, 60.0)
 	elevator = 0.0
 	elevator_trim = tr.x
 	throttle = clampf(tr.y, 0.0, 1.0)
@@ -55,8 +55,8 @@ func _ready() -> void:
 	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 
 	_build_world()
-	_camera.global_position = Vector3(-60, 1060, -120)
-	_camera.look_at(Vector3(0, 1000, 0), Vector3.UP)
+	_camera.global_position = Vector3(-30, 58, 0)
+	_camera.look_at(Vector3(0, 52, 0), Vector3.UP)
 
 ## Switch the active aircraft (visual model + physics config) and re-trim.
 func _load_aircraft(name: String) -> void:
@@ -64,8 +64,11 @@ func _load_aircraft(name: String) -> void:
 	var view := _drone.get_node_or_null("Model")
 	if view:
 		view.set_model(name)
+		_propellers = view.propellers
+		_ailerons = view.ailerons
+		_flaps = view.flaps
 	if ok:
-		var tr: Vector2 = _physics.trim(1000.0, 60.0)
+		var tr: Vector2 = _physics.trim(50.0, 60.0)
 		elevator = 0.0
 		elevator_trim = tr.x
 		aileron = 0.0
@@ -186,8 +189,9 @@ func _physics_process(delta: float) -> void:
 	_update_control_surfaces()
 	_chase_camera()
 
-	if _propeller:
-		_propeller.rotate_x(delta * (throttle * 45.0 + 3.0))
+	for prop in _propellers:
+		if prop is Node3D:
+			prop.rotate_x(delta * (throttle * 60.0 + 3.0))
 
 	_hud_timer += delta
 	if _hud_timer >= 0.2:
@@ -295,11 +299,25 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventKey and not event.pressed:
 		_held[event.physical_keycode] = false
 
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			cam_dist = clampf(cam_dist - 3.0, 8.0, 120.0)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			cam_dist = clampf(cam_dist + 3.0, 8.0, 120.0)
+	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		if not cam_orbit:
+			cam_orbit = true
+			cam_center = _drone.global_position
+		cam_yaw -= event.relative.x * 0.006
+		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
+
 func _update_control_surfaces() -> void:
 	for flap in _flaps:
-		flap.rotation.x = flaps_deg * PI / 180.0
+		if flap is Node3D:
+			flap.rotation.x = flaps_deg * PI / 180.0
 	for ail in _ailerons:
-		ail.rotation.x = -aileron * 0.6
+		if ail is Node3D:
+			ail.rotation.x = -aileron * 0.6
 
 func _chase_camera() -> void:
 	if cam_orbit:
@@ -313,19 +331,8 @@ func _chase_camera() -> void:
 	else:
 		var tf: Transform3D = _drone.global_transform
 		var pos := tf * Vector3(-38, 8.5, 0)
-		var look := tf * Vector3(25, 1.5, 0)
 		_camera.global_position = pos
-		_camera.look_at(look, tf.basis.y)
-
-func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed:
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			cam_dist = clampf(cam_dist - 3.0, 8.0, 120.0)
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			cam_dist = clampf(cam_dist + 3.0, 8.0, 120.0)
-	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
-		cam_yaw -= event.relative.x * 0.006
-		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
+		_camera.look_at(tf.origin + Vector3.UP * 2.0, tf.basis.y)
 
 func _update_hud() -> void:
 	if _telemetry.size() < 25:

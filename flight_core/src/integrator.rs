@@ -193,6 +193,31 @@ pub fn step(
 
     *state = next.into_state();
     state.normalize_quaternion();
+
+    // --- Ground plane collision (simple hard floor) ----------------------
+    // NED frame: altitude = -pos_z, so the ground is at pos_z = 0. Clamp the
+    // position to the surface and kill the descent so the aircraft "lands"
+    // rather than passing through the floor. The RL environment treats
+    // altitude <= 0 as a crash, so keep the floor at exactly ground level.
+    const GROUND_Z_NED: f64 = 0.0;
+    if state.pos_z > GROUND_Z_NED {
+        state.pos_z = GROUND_Z_NED;
+        // Project out the downward component of the earth-frame velocity by
+        // removing it from the body-frame velocity. NED up is -z.
+        let rot_earth_to_body = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+            state.q0, state.q1, state.q2, state.q3,
+        ));
+        let up_earth = Vector3::new(0.0, 0.0, -1.0); // NED up is -z
+        let up_body = rot_earth_to_body.transform_vector(&up_earth);
+        let bv = Vector3::new(state.u, state.v, state.w);
+        let velocity_along_up = bv.dot(&up_body);
+        if velocity_along_up < 0.0 {
+            let corrected = bv - up_body * velocity_along_up;
+            state.u = corrected.x;
+            state.v = corrected.y;
+            state.w = corrected.z;
+        }
+    }
 }
 
 /// `a + b * scale` element-wise, used for RK4 stage construction.

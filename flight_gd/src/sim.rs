@@ -122,7 +122,7 @@ impl FlightSimNode {
             return false;
         };
         let mut state = AircraftState::default();
-        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 1000.0, 60.0);
+        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
         self.elevator = 0.0;
         self.elevator_trim = trim_elev;
@@ -131,7 +131,7 @@ impl FlightSimNode {
         self.flaps_deg = 0.0;
         self.throttle = trim_throttle;
         self.auto_level = false;
-        self.target_alt = 1000.0;
+        self.target_alt = 50.0;
         self.last_wind = NVec3::zeros();
         true
     }
@@ -211,7 +211,7 @@ impl FlightSimNode {
             return false;
         };
         let mut state = AircraftState::default();
-        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 1000.0, 60.0);
+        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
         self.elevator = 0.0;
         self.elevator_trim = trim_elev;
@@ -220,7 +220,7 @@ impl FlightSimNode {
         self.flaps_deg = 0.0;
         self.throttle = trim_throttle;
         self.auto_level = false;
-        self.target_alt = 1000.0;
+        self.target_alt = 50.0;
         true
     }
 
@@ -271,7 +271,7 @@ impl FlightSimNode {
         let Some((sim, _)) = self.sim.as_mut() else {
             return Vector2::ZERO;
         };
-        let (e, t) = sim.reset();
+        let (e, t) = sim.trim_level_flight(50.0, 60.0);
         self.elevator = 0.0;
         self.elevator_trim = e;
         self.aileron = 0.0;
@@ -279,7 +279,7 @@ impl FlightSimNode {
         self.flaps_deg = 0.0;
         self.throttle = t;
         self.auto_level = false;
-        self.target_alt = 1000.0;
+        self.target_alt = 50.0;
         Vector2::new(e as f32, t as f32)
     }
 

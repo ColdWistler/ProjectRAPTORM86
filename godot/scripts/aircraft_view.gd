@@ -17,20 +17,47 @@ const ALIGN := {
 		"scene": "MQI.glb",
 		"rotation_deg": Vector3(0, 90, 0),
 		"scale": Vector3(0.35, 0.35, 0.35),
+		"propellers": ["PROPELLER"],
+		"ailerons": ["AILERON"],
+		"flaps": [],
 	},
 	"TwinEngine": {
 		"scene": "TwinEngine.glb",
 		"rotation_deg": Vector3(0, 0, 0),
 		"scale": Vector3(0.16, 0.16, 0.16),
+		"propellers": ["Cylinder", "Cone"],
+		"ailerons": [],
+		"flaps": [],
 	},
 }
 
 var _current_name := ""
 var _instance: Node3D = null
 var _align_root: Node3D = null
+var propellers: Array = []
+var ailerons: Array = []
+var flaps: Array = []
 
 func _ready() -> void:
 	pass
+
+## Depth-first search for geometry (MeshInstance3D) nodes whose name matches a
+## substring pattern (case-insensitive). Only leaf mesh nodes are returned so we
+## animate the actual geometry rather than rotating a parent transform that
+## already contains the child (which would double-rotate it).
+func _find_nodes(root: Node, patterns: Array) -> Array:
+	var out: Array = []
+	if root == null:
+		return out
+	for child in root.get_children():
+		if child is MeshInstance3D:
+			var lower := child.name.to_lower()
+			for p in patterns:
+				if p.to_lower() in lower:
+					out.append(child)
+					break
+		out.append_array(_find_nodes(child, patterns))
+	return out
 
 ## Replace the currently displayed aircraft with `name`'s model. Returns `false`
 ## if the model could not be loaded.
@@ -69,6 +96,11 @@ func set_model(name: String) -> bool:
 	_align_root.add_child(_instance)
 
 	_current_name = name
+
+	# Re-discover the animated sub-parts (propellers / ailerons / flaps).
+	propellers = _find_nodes(_instance, align.get("propellers", []))
+	ailerons = _find_nodes(_instance, align.get("ailerons", []))
+	flaps = _find_nodes(_instance, align.get("flaps", []))
 	return true
 
 func current_name() -> String:

@@ -21,7 +21,9 @@ var flaps_deg := 0.0
 var _particles: int = 0
 var _multimesh: MultiMesh = null
 var _material: Material = null
-var _propeller: Node3D = null
+var _propellers: Array = []
+var _flaps: Array = []
+var _ailerons: Array = []
 var _aircraft_index := 0
 const AIRCRAFT_NAMES := ["MQI", "TwinEngine"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
@@ -67,6 +69,9 @@ func _load_aircraft(name: String) -> void:
 		var view := _drone.get_node_or_null("Model")
 		if view:
 			view.set_model(name)
+			_propellers = view.propellers
+			_ailerons = view.ailerons
+			_flaps = view.flaps
 		# Resize the Godot flow-collision box to roughly match the airframe.
 		var cs := _drone.get_node_or_null("FlowCollision") as CollisionShape3D
 		if cs and cs.shape is BoxShape3D:
@@ -180,9 +185,16 @@ func _physics_process(delta: float) -> void:
 	_update_flow_uniform()
 	_tunnel.step(delta)
 	_drone.transform = _tunnel.get_drone_transform()
-	if _propeller != null:
-		var spin_speed = wind_speed * 0.5
-		_propeller.rotate_y(spin_speed * delta)
+	# Propellers spin with the wind; ailerons/flaps deflect with their controls.
+	for prop in _propellers:
+		if prop is Node3D:
+			prop.rotate_x(wind_speed * 0.5 * delta)
+	for ail in _ailerons:
+		if ail is Node3D:
+			ail.rotation.x = -aileron * 0.6
+	for flap in _flaps:
+		if flap is Node3D:
+			flap.rotation.x = flaps_deg * PI / 180.0
 	_rebuild_smoke(true)
 	_camera_orbit()
 	_update_hud()
