@@ -61,10 +61,8 @@ func _ready() -> void:
 	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 
 	if not is_editor:
-		_build_world()
 		cam_center = _drone.global_position
-		_camera.global_position = cam_center + Vector3(-30, 8, 0)
-		_camera.look_at(cam_center, Vector3.UP)
+		_chase_camera()
 
 ## Switch the active aircraft (visual model + physics config) and re-trim.
 func _load_aircraft(name: String) -> void:
@@ -87,62 +85,7 @@ func _load_aircraft(name: String) -> void:
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
 
-## Build sky, sun, terrain and a runway + distance markers for motion cues.
-func _build_world() -> void:
-	var we := WorldEnvironment.new()
-	var env := Environment.new()
-	env.background_mode = Environment.BG_SKY
-	var sky := Sky.new()
-	var psky := ProceduralSkyMaterial.new()
-	psky.sky_top_color = Color(0.35, 0.55, 0.90)
-	psky.sky_horizon_color = Color(0.72, 0.78, 0.85)
-	psky.ground_bottom_color = Color(0.18, 0.24, 0.22)
-	psky.ground_horizon_color = Color(0.55, 0.62, 0.60)
-	sky.sky_material = psky
-	env.sky = sky
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	we.environment = env
-	add_child(we)
-
-	var sun := DirectionalLight3D.new()
-	sun.shadow_enabled = true
-	sun.rotation_degrees = Vector3(-55, 45, 0)
-	add_child(sun)
-
-	var ground := MeshInstance3D.new()
-	var gm := BoxMesh.new()
-	gm.size = Vector3(6000, 2, 6000)
-	var ground_mat := StandardMaterial3D.new()
-	ground_mat.albedo_color = Color(0.36, 0.46, 0.30)
-	ground.mesh = gm
-	ground.material_override = ground_mat
-	ground.position = Vector3(0, -1.0, 0)
-	add_child(ground)
-
-	var runway := MeshInstance3D.new()
-	var rm := BoxMesh.new()
-	rm.size = Vector3(1000, 0.3, 42)
-	var rw_mat := StandardMaterial3D.new()
-	rw_mat.albedo_color = Color(0.25, 0.26, 0.28)
-	runway.mesh = rm
-	runway.material_override = rw_mat
-	runway.position = Vector3(0, -0.05, 0)
-	add_child(runway)
-
-	var i := 0
-	for x in [-400.0, -200.0, 200.0, 400.0]:
-		for color in [Color(0.9, 0.25, 0.2), Color(0.9, 0.8, 0.2)]:
-			var marker := MeshInstance3D.new()
-			var bm := BoxMesh.new()
-			bm.size = Vector3(6, 30, 6)
-			marker.mesh = bm
-			var mm := StandardMaterial3D.new()
-			mm.albedo_color = color
-			marker.material_override = mm
-			marker.position = Vector3(x, 14, -60.0 if i % 2 == 0 else 60.0)
-			add_child(marker)
-			i += 1
-
+## Build the on-screen HUD (telemetry panel + aircraft-swap button).
 func _build_hud() -> Label:
 	var hud := CanvasLayer.new()
 	hud.name = "HUDCanvas"
@@ -334,12 +277,15 @@ func _update_control_surfaces() -> void:
 			ail.rotation.x = -aileron * 0.6
 
 func _chase_camera() -> void:
+	# Follow the drone from a fixed offset each frame in GLOBAL space. The
+	# camera is NOT a child of the drone so it keeps a horizon-stable up while
+	# tracking the aircraft (prevents the "locked to ground" pitching bug).
+	var target := _drone.global_position
 	if cam_orbit:
 		var sp := sin(cam_pitch)
 		var cp := cos(cam_pitch)
 		var offset := Vector3(cam_dist * cp * cos(cam_yaw), cam_dist * sp, cam_dist * cp * sin(cam_yaw))
-		var target := _drone.global_position
-		cam_center = cam_center.lerp(target, 8.0 * get_physics_process_delta_time())
+		cam_center = target
 		_camera.global_position = cam_center + offset
 		_camera.look_at(cam_center, Vector3.UP)
 	else:

@@ -1,15 +1,87 @@
 [gd_scene format=3 uid="uid://c1lsmf2ujgi2y"]
 
 [ext_resource type="Script" uid="uid://c4vhox1gd6dj1" path="res://scripts/flight_sim.gd" id="1_fsim"]
+[ext_resource type="PackedScene" uid="uid://b8ujoo3gmxoj2" path="res://assets/snowy_mountain_landscape.glb" id="3_2rvtq"]
+[ext_resource type="Environment" uid="uid://c1f6b7fw4cu4" path="res://environments/flight_env.tres" id="3_env"]
+
+[sub_resource type="StandardMaterial3D" id="Mat_runway"]
+albedo_color = Color(0.25, 0.26, 0.28, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_runway"]
+size = Vector3(1000, 0.3, 42)
+
+[sub_resource type="StandardMaterial3D" id="Mat_marker_red"]
+albedo_color = Color(0.9, 0.25, 0.2, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_marker"]
+size = Vector3(6, 30, 6)
+
+[sub_resource type="StandardMaterial3D" id="Mat_marker_yellow"]
+albedo_color = Color(0.9, 0.8, 0.2, 1)
 
 [node name="FlightSim" type="Node3D" unique_id=261454407]
 script = ExtResource("1_fsim")
 
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1769901294]
+environment = ExtResource("3_env")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=1682711154]
+transform = Transform3D(0.70710677, -0.579228, 0.4055798, 0, 0.57357645, 0.81915206, -0.70710677, -0.579228, 0.4055798, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Runway" type="MeshInstance3D" parent="." unique_id=1656802888]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
+material_override = SubResource("Mat_runway")
+mesh = SubResource("BoxMesh_runway")
+
+[node name="Marker_400E" type="MeshInstance3D" parent="." unique_id=1274612183]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -400, 14, -60)
+material_override = SubResource("Mat_marker_red")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_400W" type="MeshInstance3D" parent="." unique_id=1971931735]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -400, 14, 60)
+material_override = SubResource("Mat_marker_yellow")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_200E" type="MeshInstance3D" parent="." unique_id=1641476663]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -200, 14, -60)
+material_override = SubResource("Mat_marker_yellow")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_200W" type="MeshInstance3D" parent="." unique_id=101238140]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -200, 14, 60)
+material_override = SubResource("Mat_marker_red")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_200E2" type="MeshInstance3D" parent="." unique_id=457601718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 200, 14, -60)
+material_override = SubResource("Mat_marker_red")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_200W2" type="MeshInstance3D" parent="." unique_id=1932218555]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 200, 14, 60)
+material_override = SubResource("Mat_marker_yellow")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_400E2" type="MeshInstance3D" parent="." unique_id=2070209155]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 400, 14, -60)
+material_override = SubResource("Mat_marker_yellow")
+mesh = SubResource("BoxMesh_marker")
+
+[node name="Marker_400W2" type="MeshInstance3D" parent="." unique_id=1386830573]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 400, 14, 60)
+material_override = SubResource("Mat_marker_red")
+mesh = SubResource("BoxMesh_marker")
+
 [node name="DroneView" type="Node3D" parent="." unique_id=1877615726]
-transform = Transform3D(-4.3711385e-08, 0, 0.99999994, 0, 1, 0, -0.99999994, 0, -4.3711385e-08, 0, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5022564, 0.36547887, 0)
 
 [node name="Physics" type="FlightSimNode" parent="." unique_id=172234283]
 
 [node name="Camera" type="Camera3D" parent="." unique_id=1836501567]
-transform = Transform3D(1, 0, 0, 0, 0.99126756, 0.1318662, 0, -0.1318662, 0.99126756, 0, 0.2966885, 1.8003589)
+transform = Transform3D(-0.016718686, 0.14548172, -0.98921967, 0.0024584185, 0.9893609, 0.14546095, 0.99985725, 0, -0.016898468, -0.2898935, 0.7443297, 0.013963461)
 far = 40000.0
+
+[node name="Sketchfab_Scene" parent="." unique_id=675114143 instance=ExtResource("3_2rvtq")]
+transform = Transform3D(11260.316, 0, 0, 0, 1.5370002, 0, 0, 0, 16210.847, -59.344097, -7.4549255, 18.647537)
