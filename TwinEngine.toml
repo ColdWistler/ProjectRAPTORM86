@@ -1,0 +1,69 @@
+# --- General / Mass properties (TwinEngine: long-range high-AR twin) ---
+mass = 1700.0          # kg
+wing_area = 34.0       # m^2
+wing_span = 26.0       # m  (AR ~ 20, high aspect ratio for range)
+chord = 1.31           # m (average chord)
+
+# --- Moments of inertia (kg*m^2) (scaled up for the larger span) ---
+ixx = 5200.0
+iyy = 7600.0
+izz = 10500.0
+
+# --- Aerodynamic coefficients ---
+cl0 = 0.25
+cla = 5.3
+cd0 = 0.020            # clean, laminar-flow long-range airframe
+k_drag = 0.0188        # from AR~20, Oswald ~0.85
+
+cm0 = 0.0
+cma = -1.05
+cmq = -22.0
+cm_adot = -3.0
+cme = -0.65
+
+thrust_max = 2000.0    # moderate static thrust: sized for climb, not sprint
+power_max = 160000.0   # 160 kW total: cruise-optimized (range, not speed)
+thrust_arm = 0.0
+
+# --- Twin-engine propeller model -------------------------------------------
+# Two engines mounted on the wings either side of the CG. `thrust_max` /
+# `power_max` above describe the TOTAL installed power, split evenly between
+# the two. The lateral arm sets the lever of the asymmetric-thrust yawing
+# moment, so an engine cut below Vmc yaws the nose out of control.
+engine_count = 2
+engine_lateral_arm = 3.0
+prop_torque_coeff = 0.0     # counter-rotating props cancel net prop torque
+p_factor_coeff = -0.35      # P-factor yaw (power x AoA) with the props
+gyro_coeff = 0.05           # gyroscopic precession from the spinning props
+throttle_split = 0.0        # asymmetric throttle: -1 = left engine out, +1 = right
+
+# --- Flap increments ---
+cl_flap = 1.15
+cd_flap = 0.15
+cm_flap = -0.22
+flap_stall_shift = 6.0
+
+# --- Steep-bank spiral nose-drop ---
+spiral_nose_drop_cm = 0.11
+
+# --- Collision-shape wind interaction (sized for the TwinEngine) ---
+[[collision_panels]]
+area = 2.6              # fuselage frontal area
+normal = [1.0, 0.0, 0.0]
+cp = [3.0, 0.0, 0.0]
+cd = 1.9
+
+[[collision_panels]]
+area = 1.3              # vertical fin
+normal = [0.0, 0.0, 1.0]
+cp = [-2.8, 0.0, 0.7]
+
+[[collision_panels]]
+area = 2.2              # right wing underside (vertical gust surface)
+normal = [0.0, -1.0, 0.0]
+cp = [0.5, 10.5, -0.2]
+
+[[collision_panels]]
+area = 2.2              # left wing underside
+normal = [0.0, -1.0, 0.0]
+cp = [0.5, -10.5, -0.2]

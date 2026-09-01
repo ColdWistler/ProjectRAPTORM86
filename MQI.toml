@@ -1,0 +1,52 @@
+# --- General / Mass properties (MQI: light tactical single) ---
+mass = 620.0           # kg
+wing_area = 7.5        # m^2
+wing_span = 7.8        # m
+chord = 0.96           # m
+
+# --- Moments of inertia (kg*m^2) ---
+ixx = 340.0
+iyy = 560.0
+izz = 780.0
+
+# --- Aerodynamic coefficients ---
+cl0 = 0.32
+cla = 5.4
+cd0 = 0.026
+k_drag = 0.05
+
+cm0 = 0.0
+cma = -1.15
+cmq = -18.0
+cm_adot = -3.0
+cme = -0.55
+
+thrust_max = 1100.0
+power_max = 78000.0
+thrust_arm = 0.0
+
+# --- Flap increments ---
+cl_flap = 1.05
+cd_flap = 0.13
+cm_flap = -0.19
+flap_stall_shift = 6.0
+
+# --- Steep-bank spiral nose-drop ---
+spiral_nose_drop_cm = 0.09
+
+# --- Collision-shape wind interaction (sized for the MQI) ---
+[[collision_panels]]
+area = 0.9              # fuselage frontal area
+normal = [1.0, 0.0, 0.0]
+cp = [1.6, 0.0, 0.0]
+cd = 1.8
+
+[[collision_panels]]
+area = 1.1              # vertical fin
+normal = [0.0, 0.0, 1.0]
+cp = [-1.5, 0.0, 0.5]
+
+[[collision_panels]]
+area = 3.2              # wing underside
+normal = [0.0, -1.0, 0.0]
+cp = [0.2, 0.0, -0.1]

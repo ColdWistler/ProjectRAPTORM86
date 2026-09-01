@@ -11,6 +11,7 @@ pub mod atmosphere;
 pub mod config;
 pub mod env;
 pub mod integrator;
+pub mod shape;
 pub mod state;
 pub mod wind;
 
@@ -26,7 +27,7 @@ use crate::integrator::step;
 
 /// A high-level convenience wrapper bundling the aircraft configuration
 /// with its current dynamic state and providing the primary integration
-/// API used by the Python and Bevy front-ends.
+/// API used by the Godot GDExtension front-end.
 pub struct Simulator {
     pub config: AircraftConfig,
     pub state: AircraftState,
@@ -85,7 +86,7 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aero::compute_forces_moments;
+    use crate::aero::{compute_forces, compute_forces_moments, compute_moments};
     use crate::integrator::step;
     use nalgebra::Vector3;
 
@@ -309,7 +310,13 @@ cd0: 0.025,
             mach_crit: 0.65,
             cm_adot: -3.0,
             thrust_arm: 0.0,
-cy_beta: -0.31,
+            engine_count: 1,
+            engine_lateral_arm: 0.0,
+            prop_torque_coeff: 0.0,
+            p_factor_coeff: 0.0,
+            gyro_coeff: 0.0,
+            throttle_split: 0.0,
+            cy_beta: -0.31,
             cy_dr: -0.15,
             cl_beta: -0.09,
             cl_p: -0.45,
@@ -326,6 +333,7 @@ cy_beta: -0.31,
             cm_flap: -0.20,
             flap_stall_shift: 6.0_f64.to_radians(),
             spiral_nose_drop_cm: 0.10,
+            collision_panels: Vec::new(),
         }
     }
 
@@ -475,6 +483,166 @@ cy_beta: -0.31,
             alt_change < -10.0,
             "90-deg-banked idle aircraft should dive, not climb (dAlt {:.1} m)",
             alt_change
+        );
+    }
+
+    /// A twin-engine variant of the default aircraft.
+    fn twin_default() -> AircraftConfig {
+        let mut c = aircraft_default();
+        c.engine_count = 2;
+        c.engine_lateral_arm = 3.0;
+        c.p_factor_coeff = -0.35;
+        c.gyro_coeff = 0.05;
+        c.throttle_split = 0.0;
+        c
+    }
+
+    #[test]
+    fn twin_engine_out_yaws_toward_dead_engine() {
+        // Shutting down the right engine (split = +1) must produce a yawing
+        // moment that pushes the nose toward the right (dead side), i.e. a
+        // negative body-Z moment given the body frame (nose +X, right +Y).
+        let mut config = twin_default();
+        config.throttle_split = 1.0; // right engine out
+
+        let mut state = AircraftState::default();
+        let (elev_trim, throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
+
+        let (_, moments) = compute_forces_moments(
+            &state, &config, elev_trim, 0.0, 0.0, 0.8, 0.0, 0.0, &Vector3::zeros(),
+        );
+        // The asymmetric thrust yaws the nose toward the dead (right) engine.
+        assert!(
+            moments.z < 0.0,
+            "right-engine-out should yaw the nose right (negative Mz), got {:.0}",
+            moments.z
+        );
+
+        // Reversing the failed engine should reverse the yaw direction.
+        let mut config_l = config.clone();
+        config_l.throttle_split = -1.0; // left engine out
+        let (_, m_l) = compute_forces_moments(
+            &state, &config_l, elev_trim, 0.0, 0.0, 0.8, 0.0, 0.0, &Vector3::zeros(),
+        );
+        assert!(
+            m_l.z > 0.0,
+            "left-engine-out should yaw the nose left (positive Mz), got {:.0}",
+            m_l.z
+        );
+    }
+
+    #[test]
+    fn twin_symmetric_thrust_matches_single_at_split_zero() {
+        // With no asymmetric split, the twin must deliver the same total thrust
+        // as the single-engine aircraft at the same throttle, so level-flight
+        // trim and phugoid behaviour are unchanged.
+        let single = aircraft_default();
+        let twin = twin_default();
+        let mut s_single = AircraftState::default();
+        let mut s_twin = AircraftState::default();
+        s_single.trim_level_flight(&single, 1000.0, 60.0);
+        s_twin.trim_level_flight(&twin, 1000.0, 60.0);
+
+        let zero = Vector3::zeros();
+        let f_single = compute_forces(&s_single, &single, 0.0, 0.0, 0.0, 0.5, 0.0, &zero);
+        let f_twin = compute_forces(&s_twin, &twin, 0.0, 0.0, 0.0, 0.5, 0.0, &zero);
+
+        // Total axial thrust must be equal at the same throttle.
+        assert!(
+            (f_single.x - f_twin.x).abs() < 1.0,
+            "twin symmetric thrust {:.1} should equal single {:.1}",
+            f_twin.x,
+            f_single.x
+        );
+    }
+
+    #[test]
+    fn twin_asymmetric_yaw_scales_with_engine_arm() {
+        // The asymmetric-thrust yawing moment must scale linearly with the
+        // engine lateral arm (it is `(T_left - T_right) * arm`).
+        let mut state = AircraftState::default();
+        let base = twin_default();
+
+        let mut wide = base.clone();
+        wide.engine_lateral_arm = 2.0;
+        let mut narrow = base.clone();
+        narrow.engine_lateral_arm = 1.0;
+
+        let yaw_for = |c: &AircraftConfig, split: f64| {
+            let mut cc = c.clone();
+            cc.throttle_split = split;
+            let (_, m) = compute_forces_moments(&state, &cc, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, &Vector3::zeros());
+            m.z
+        };
+        let wide_yaw = yaw_for(&wide, 1.0);
+        let narrow_yaw = yaw_for(&narrow, 1.0);
+        assert!(
+            (wide_yaw - 2.0 * narrow_yaw).abs() < 1e-6,
+            "asymmetric yaw should scale with the engine arm ({wide_yaw} vs 2*{narrow_yaw})"
+        );
+    }
+
+    #[test]
+    fn twin_vmc_rudder_authority_grows_faster_than_asymmetric_yaw() {
+        // Rudder + weathercock authority scale ~V^2 (via dynamic pressure),
+        // while the static-limited asymmetric-thrust yaw is roughly constant
+        // with speed. The ratio of rudder authority to asymmetric yaw must
+        // therefore *increase* with speed — the Vmc mechanism: controllable
+        // above a critical speed, uncontrollable below it.
+        let base = twin_default();
+        let speeds = [30.0f64, 60.0, 90.0];
+        let mut prev_auth_ratio = f64::NEG_INFINITY;
+
+        for speed in speeds {
+            let mut c = base.clone();
+            c.throttle_split = 0.0;
+            let mut st = AircraftState::default();
+            st.trim_level_flight(&c, 1000.0, speed);
+
+            // Rudder yaw authority at full deflection (aero only: engine off).
+            let mut c_aero = c.clone();
+            c_aero.thrust_max = 1.0;
+            c_aero.power_max = 1.0;
+            let rud = compute_moments(&st, &c_aero, 0.0, 0.0, -0.35, 0.0, 0.0, 0.0, &Vector3::zeros()).z;
+
+            // Asymmetric-thrust yaw at full throttle, one engine out.
+            let mut c_out = c.clone();
+            c_out.throttle_split = 1.0;
+            let asym = compute_moments(&st, &c_out, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, &Vector3::zeros()).z;
+
+            let ratio = (rud.abs() / asym.abs().max(1e-9));
+            assert!(
+                ratio > prev_auth_ratio,
+                "rudder/asymmetric ratio must grow with speed (V={speed}: {ratio:.3} <= prev {prev_auth_ratio:.3})"
+            );
+            prev_auth_ratio = ratio;
+        }
+    }
+
+    #[test]
+    fn twin_long_range_high_ld_cruises_without_throttle_saturation() {
+        // The TwinEngine is configured as a high-aspect-ratio long-range twin.
+        // At high altitude it must trim at a strongly-improved L/D and sustain
+        // cruise without the throttle saturating (range-optimal, not sprint).
+        let cfg_path = format!("{}/../TwinEngine.toml", env!("CARGO_MANIFEST_DIR"));
+        let c = AircraftConfig::from_file(&cfg_path)
+            .expect("load TwinEngine.toml");
+        assert_eq!(c.engine_count, 2, "TwinEngine must remain a twin");
+
+        let mut st = AircraftState::default();
+        let (_, thr) = st.trim_level_flight(&c, 8000.0, 48.0);
+        assert!(
+            thr < 1.0,
+            "long-range cruise must not saturate throttle (got {thr:.2})"
+        );
+
+        // L/D from the trimmed conditions: CL = W/(qS), Cd from the polar.
+        let rho = crate::Atmosphere::at_altitude(8000.0).density;
+        let cl = 2.0 * c.mass * 9.80665 / (rho * 48.0 * 48.0 * c.wing_area);
+        let ld = cl / (c.cd0 + c.k_drag * cl * cl);
+        assert!(
+            ld > 20.0,
+            "long-range twin should beat L/D=20 at high-altitude cruise (got {ld:.1})"
         );
     }
 }

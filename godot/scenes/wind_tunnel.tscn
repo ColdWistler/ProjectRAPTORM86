@@ -1,8 +1,4 @@
 [gd_scene load_steps=2 format=3]
-; Wind-tunnel scene. Rust WindTunnelNode owns the physics + smoke flow-field;
-; the drone model, orbit camera and MultiMesh smoke renderer are built by
-; wind_tunnel.gd at runtime. The four nodes below are the fixed skeleton
-; the script expects.
 
 [ext_resource type="Script" path="res://scripts/wind_tunnel.gd" id="1_wt"]
 

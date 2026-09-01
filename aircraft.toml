@@ -35,3 +35,25 @@ flap_stall_shift = 6.0 # deg by which positive stall angle is reduced at full fl
 # Nose-down pitching-moment coefficient engaged beyond ~45 deg bank, so a
 # hand-off high bank falls into a dive instead of climbing with wings vertical.
 spiral_nose_drop_cm = 0.10
+
+# --- Collision-shape wind interaction ---
+# Flat-plate panels the imposed wind pours onto. Each entry is a surface with
+# an area (m^2), a body-frame unit normal [nx, ny, nz] (nose +X, up +Y, right
+# +Z), a centre of pressure [x, y, z] offset from the CG in metres, and an
+# optional flat-plate drag coefficient Cd (default 1.5). These make the shape
+# respond to the wind: the nose catches headwinds, the fin crosswinds, etc.
+[[collision_panels]]
+area = 1.3              # fuselage frontal area -> catches headwind
+normal = [1.0, 0.0, 0.0]
+cp = [2.1, 0.0, 0.0]
+cd = 1.8
+
+[[collision_panels]]
+area = 1.6              # vertical fin -> crosswind / sideslip yaw authority
+normal = [0.0, 0.0, 1.0]
+cp = [-1.9, 0.0, 0.6]
+
+[[collision_panels]]
+area = 4.5              # wing underside -> vertical gusts push the wing up
+normal = [0.0, -1.0, 0.0]
+cp = [0.3, 0.0, -0.1]
