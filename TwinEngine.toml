@@ -25,6 +25,18 @@ thrust_max = 4200.0
 power_max = 320000.0
 thrust_arm = 0.0
 
+# --- Twin-engine propeller model -------------------------------------------
+# Two engines mounted on the wings either side of the CG. `thrust_max` /
+# `power_max` above describe the TOTAL installed power, split evenly between
+# the two. The lateral arm sets the lever of the asymmetric-thrust yawing
+# moment, so an engine cut below Vmc yaws the nose out of control.
+engine_count = 2
+engine_lateral_arm = 3.0
+prop_torque_coeff = 0.0     # counter-rotating props cancel net prop torque
+p_factor_coeff = -0.35      # P-factor yaw (power x AoA) with the props
+gyro_coeff = 0.05           # gyroscopic precession from the spinning props
+throttle_split = 0.0        # asymmetric throttle: -1 = left engine out, +1 = right
+
 # --- Flap increments ---
 cl_flap = 1.15
 cd_flap = 0.15

@@ -15,6 +15,7 @@ var aileron := 0.0
 var rudder := 0.0
 var flaps_deg := 0.0
 var throttle := 0.0
+var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 var auto_level := false
 
 const AIRCRAFT_NAMES := ["TwinEngine", "MQI"]
@@ -84,6 +85,7 @@ func _load_aircraft(name: String) -> void:
 		rudder = 0.0
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
+		engine_out = 0
 
 ## Build the on-screen HUD (telemetry panel + aircraft-swap button).
 func _build_hud() -> Label:
@@ -140,6 +142,7 @@ func _physics_process(delta: float) -> void:
 
 	_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
 	_physics.set_elevator_trim(elevator_trim)
+	_physics.set_throttle_split(float(engine_out_side()))
 	_physics.step(delta)
 
 	_drone.transform = _physics.get_drone_transform()
@@ -191,6 +194,10 @@ func _handle_input(delta: float) -> void:
 	if _just_pressed(KEY_F):
 		flaps_deg = 15.0 if flaps_deg < 5.0 else (30.0 if flaps_deg < 20.0 else 0.0)
 
+	# Engine out cycle: both -> left out -> right out (twin only)
+	if _just_pressed(KEY_G):
+		engine_out = (engine_out + 1) % 3
+
 	# Elevator trim: [ = nose DOWN trim, ] = nose UP trim
 	if Input.is_key_pressed(KEY_BRACKETRIGHT):
 		elevator_trim = minf(elevator_trim + 0.05 * delta, MAX_TRIM)
@@ -233,6 +240,7 @@ func _handle_input(delta: float) -> void:
 		rudder = 0.0
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
+		engine_out = 0
 		auto_level = false
 		_physics.set_auto_level(false)
 
@@ -244,6 +252,11 @@ func _center_control(value: float, rate: float, mult: float, delta: float) -> fl
 	if absf(value) < 0.01:
 		return 0.0
 	return value - signf(value) * rate * mult * delta
+
+## Map the engine-out state to a throttle-split for the twin physics:
+## -1 = left engine out, 0 = both running, +1 = right engine out.
+func engine_out_side() -> int:
+	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
 
 func _just_pressed(key: Key) -> bool:
 	return Input.is_key_pressed(key) and not _held.get(key, false)
@@ -304,6 +317,11 @@ func _update_hud() -> void:
 		flap_str = "LANDING (30deg)"
 	var ap := " [AUTOPILOT ON]" if auto_level else ""
 	var stall := " [! STALL !]" if t[23] > 0.5 else ""
+	var engine_str := "BOTH RUNNING"
+	if engine_out == 1:
+		engine_str = "LEFT ENGINE OUT [G]"
+	elif engine_out == 2:
+		engine_str = "RIGHT ENGINE OUT [G]"
 	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
 	_label.text = """TACTICAL UAV DRONE TELEMETRY%s%s
 Aircraft:       %s (model: %s, press [M] to switch)
@@ -318,6 +336,7 @@ AoA / Slip:     %+5.1f deg / %+5.1f deg
 Pitch / Roll:   %+5.1f deg / %+5.1f deg
 Heading (Yaw):  %5.1f deg (Climb: %+4.1f deg)
 Throttle:       %5.0f %%  (Flaps: %s)
+Engines:        %s
 Surfaces:       Ail: %+4.1f deg | Elev: %+4.1f deg (Trim %+4.1f) | Rud: %+4.1f deg
 
 CONTROLS & DRONE SYSTEMS
@@ -326,6 +345,7 @@ Pitch:     [W] Down / [S] Up
 Roll:      [A] Left / [D] Right
 Rudder:    [Q] Left / [E] Right (or [Z]/[C])
 Flaps:     [F] 0 -> 15 -> 30
+Engine:    [G] both -> left out -> right out (twin)
 Trim:      [[] Down / []] Up
 Throttle:  [Shift] Up / [Ctrl] Down
 	Autopilot: [H]/[T] Hold    Reset: [R]
@@ -343,5 +363,6 @@ Menu: [Esc]""" % [
 		t[11], t[12],
 		t[13], t[14],
 		t[15], flap_str,
+		engine_str,
 		t[17], t[18], t[19], t[20],
 	]

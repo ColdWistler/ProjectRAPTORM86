@@ -89,6 +89,8 @@ struct FlightSimNode {
     flaps_deg: f64,
     /// Engine thrust setting (0..=1).
     throttle: f64,
+    /// Asymmetric engine throttle split (-1 = left engine out, +1 = right out).
+    throttle_split: f64,
     /// Wing-leveler / altitude-hold assist.
     auto_level: bool,
     target_alt: f64,
@@ -173,6 +175,8 @@ impl FlightSimNode {
         let vt_air = sim.state.airspeed();
         let wind_earth = wind.total_wind(&sim.state, vt_air, dt);
         self.last_wind = wind_earth;
+        // Apply the asymmetric engine split (engine-out) to the active config.
+        sim.config.throttle_split = self.throttle_split;
         sim.step_6dof(
             total_elevator,
             self.aileron,
@@ -192,6 +196,13 @@ impl FlightSimNode {
         self.rudder = rudder.clamp(-MAX_RUDDER, MAX_RUDDER);
         self.throttle = throttle.clamp(0.0, 1.0);
         self.flaps_deg = flaps_deg;
+    }
+
+    /// Set the asymmetric engine throttle split (`-1..=1`). `0` runs both
+    /// engines together; `-1` shuts the left engine down, `+1` the right.
+    #[func]
+    fn set_throttle_split(&mut self, split: f64) {
+        self.throttle_split = split.clamp(-1.0, 1.0);
     }
 
     /// Switch the active aircraft configuration by name (e.g. `"MQI"` or
@@ -219,6 +230,7 @@ impl FlightSimNode {
         self.rudder = 0.0;
         self.flaps_deg = 0.0;
         self.throttle = trim_throttle;
+        self.throttle_split = 0.0;
         self.auto_level = false;
         self.target_alt = 50.0;
         true
@@ -278,6 +290,7 @@ impl FlightSimNode {
         self.rudder = 0.0;
         self.flaps_deg = 0.0;
         self.throttle = t;
+        self.throttle_split = 0.0;
         self.auto_level = false;
         self.target_alt = 50.0;
         Vector2::new(e as f32, t as f32)

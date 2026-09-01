@@ -12,6 +12,13 @@ fn default_cm_adot() -> f64 { -3.0 }
 fn default_thrust_arm() -> f64 { 0.0 }
 fn default_power_max() -> f64 { 119_000.0 }
 
+fn default_engine_count() -> u32 { 1 }
+fn default_engine_lateral_arm() -> f64 { 0.0 }
+fn default_prop_torque_coeff() -> f64 { 0.0 }
+fn default_p_factor_coeff() -> f64 { 0.0 }
+fn default_gyro_coeff() -> f64 { 0.0 }
+fn default_throttle_split() -> f64 { 0.0 }
+
 fn default_cy_beta() -> f64 { -0.31 }
 fn default_cy_dr() -> f64 { -0.15 }  // Rudder side force (positive rudder yaws right, tail pushed left)
 
@@ -114,6 +121,44 @@ pub struct AircraftConfig {
     /// axis (positive = thrust line below CG, so throttle pulls the nose up).
     #[serde(default = "default_thrust_arm")]
     pub thrust_arm: f64,
+
+    // --- Multi-engine (twin) propeller model --------------------------------
+    /// Number of propulsion units. 1 models a single centreline thrust line;
+    /// 2 splits the total thrust into left/right engines separated by
+    /// [`engine_lateral_arm`](Self::engine_lateral_arm) either side of the CG,
+    /// unlocking asymmetric-thrust (engine-out), P-factor, prop-torque and
+    /// gyroscopic precession behaviour.
+    #[serde(default = "default_engine_count")]
+    pub engine_count: u32,
+    /// Lateral distance (m) of each engine thrust line from the CG along the
+    /// body Y axis. With `engine_count == 2` the left engine sits at
+    /// `-engine_lateral_arm` and the right at `+engine_lateral_arm`. Governs
+    /// the arm of the asymmetric-thrust yawing moment (Vmc).
+    #[serde(default = "default_engine_lateral_arm")]
+    pub engine_lateral_arm: f64,
+    /// Dimensionless propeller-torque rolling-moment constant. Positive values
+    /// roll the aircraft opposite the prop rotation when power is applied; in
+    /// a counter-rotating twin the two torque couples nearly cancel, so this
+    /// is typically small.
+    #[serde(default = "default_prop_torque_coeff")]
+    pub prop_torque_coeff: f64,
+    /// Dimensionless P-factor yawing-moment constant. At high power and high
+    /// angle of attack the descending prop blade produces more thrust than the
+    /// ascending one, yawing the nose. Negative = convention for standard
+    /// clockwise-rotating (right-hand) props when viewed from behind.
+    #[serde(default = "default_p_factor_coeff")]
+    pub p_factor_coeff: f64,
+    /// Dimensionless gyroscopic-precession coupling constant. Scales the pitch
+    /// and yaw couples produced when the spinning propeller mass is pitched or
+    /// yawed (proportional to the propeller angular momentum).
+    #[serde(default = "default_gyro_coeff")]
+    pub gyro_coeff: f64,
+    /// Asymmetric engine throttle split, `-1..=1`, applied on top of the master
+    /// throttle. `0` = both engines at the master setting; `-1` = left engine
+    /// shut down / right at full; `+1` = right engine shut down / left at full.
+    /// Adjustable at runtime (e.g. to inject an engine-out for the Vmc check).
+    #[serde(default = "default_throttle_split")]
+    pub throttle_split: f64,
 
     // --- Lateral-directional aerodynamic stability derivatives ---
     #[serde(default = "default_cy_beta")]
