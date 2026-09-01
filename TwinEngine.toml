@@ -1,19 +1,19 @@
-# --- General / Mass properties (TwinEngine: larger twin) ---
-mass = 2100.0          # kg
-wing_area = 28.0       # m^2
-wing_span = 15.5       # m
-chord = 1.81           # m
+# --- General / Mass properties (TwinEngine: long-range high-AR twin) ---
+mass = 1700.0          # kg
+wing_area = 34.0       # m^2
+wing_span = 26.0       # m  (AR ~ 20, high aspect ratio for range)
+chord = 1.31           # m (average chord)
 
-# --- Moments of inertia (kg*m^2) ---
-ixx = 3600.0
-iyy = 5200.0
-izz = 7200.0
+# --- Moments of inertia (kg*m^2) (scaled up for the larger span) ---
+ixx = 5200.0
+iyy = 7600.0
+izz = 10500.0
 
 # --- Aerodynamic coefficients ---
-cl0 = 0.28
+cl0 = 0.25
 cla = 5.3
-cd0 = 0.030
-k_drag = 0.04
+cd0 = 0.020            # clean, laminar-flow long-range airframe
+k_drag = 0.0188        # from AR~20, Oswald ~0.85
 
 cm0 = 0.0
 cma = -1.05
@@ -21,8 +21,8 @@ cmq = -22.0
 cm_adot = -3.0
 cme = -0.65
 
-thrust_max = 4200.0
-power_max = 320000.0
+thrust_max = 2000.0    # moderate static thrust: sized for climb, not sprint
+power_max = 160000.0   # 160 kW total: cruise-optimized (range, not speed)
 thrust_arm = 0.0
 
 # --- Twin-engine propeller model -------------------------------------------
@@ -61,9 +61,9 @@ cp = [-2.8, 0.0, 0.7]
 [[collision_panels]]
 area = 2.2              # right wing underside (vertical gust surface)
 normal = [0.0, -1.0, 0.0]
-cp = [0.5, 6.0, -0.2]
+cp = [0.5, 10.5, -0.2]
 
 [[collision_panels]]
 area = 2.2              # left wing underside
 normal = [0.0, -1.0, 0.0]
-cp = [0.5, -6.0, -0.2]
+cp = [0.5, -10.5, -0.2]

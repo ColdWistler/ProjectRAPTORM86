@@ -618,4 +618,31 @@ cd0: 0.025,
             prev_auth_ratio = ratio;
         }
     }
+
+    #[test]
+    fn twin_long_range_high_ld_cruises_without_throttle_saturation() {
+        // The TwinEngine is configured as a high-aspect-ratio long-range twin.
+        // At high altitude it must trim at a strongly-improved L/D and sustain
+        // cruise without the throttle saturating (range-optimal, not sprint).
+        let cfg_path = format!("{}/../TwinEngine.toml", env!("CARGO_MANIFEST_DIR"));
+        let c = AircraftConfig::from_file(&cfg_path)
+            .expect("load TwinEngine.toml");
+        assert_eq!(c.engine_count, 2, "TwinEngine must remain a twin");
+
+        let mut st = AircraftState::default();
+        let (_, thr) = st.trim_level_flight(&c, 8000.0, 48.0);
+        assert!(
+            thr < 1.0,
+            "long-range cruise must not saturate throttle (got {thr:.2})"
+        );
+
+        // L/D from the trimmed conditions: CL = W/(qS), Cd from the polar.
+        let rho = crate::Atmosphere::at_altitude(8000.0).density;
+        let cl = 2.0 * c.mass * 9.80665 / (rho * 48.0 * 48.0 * c.wing_area);
+        let ld = cl / (c.cd0 + c.k_drag * cl * cl);
+        assert!(
+            ld > 20.0,
+            "long-range twin should beat L/D=20 at high-altitude cruise (got {ld:.1})"
+        );
+    }
 }
