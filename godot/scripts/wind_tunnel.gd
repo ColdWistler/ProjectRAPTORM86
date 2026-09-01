@@ -21,7 +21,12 @@ var flaps_deg := 0.0
 var _particles: int = 0
 var _multimesh: MultiMesh = null
 var _material: Material = null
-var _propeller: Node3D = null
+var _propellers: Array = []
+var _flaps: Array = []
+var _ailerons: Array = []
+var _aircraft_index := 0
+const AIRCRAFT_NAMES := ["MQI", "TwinEngine"]
+const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 
 @onready var _tunnel = $Physics
 @onready var _drone: Node3D = $DroneView
@@ -31,8 +36,11 @@ var _propeller: Node3D = null
 
 func _ready() -> void:
 	_build_world()
-	DroneFactory.build(_drone)
-	_propeller = DroneFactory.build(_drone)["propeller"] as Node3D
+	# Use the imported GLB aircraft models rather than the procedural drone.
+	var view: Node3D = _AircraftViewScript.new()
+	view.name = "Model"
+	_drone.add_child(view)
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 	_tunnel.reset_trails()
 	_build_smoke_mesh()
 	_rebuild_smoke()
@@ -51,7 +59,25 @@ func _ready() -> void:
 	bs.size = Vector3(8, 2, 8)
 	cs.shape = bs
 	cs.position = Vector3.ZERO
+	cs.name = "FlowCollision"
 	_drone.add_child(cs)
+
+## Switch the active aircraft: swaps the visual model and the Rust flow-grid
+## aero config (including the collision-shape wind interaction).
+func _load_aircraft(name: String) -> void:
+	if _tunnel.switch_aircraft(name):
+		var view := _drone.get_node_or_null("Model")
+		if view:
+			view.set_model(name)
+			_propellers = view.propellers
+			_ailerons = view.ailerons
+			_flaps = view.flaps
+		# Resize the Godot flow-collision box to roughly match the airframe.
+		var cs := _drone.get_node_or_null("FlowCollision") as CollisionShape3D
+		if cs and cs.shape is BoxShape3D:
+			var len := 6.0 if name == "TwinEngine" else 4.0
+			(cs.shape as BoxShape3D).size = Vector3(len, 1.6, len * 0.5)
+		_tunnel.reset_trails()
 
 func _build_world() -> void:
 	var we := WorldEnvironment.new()
@@ -159,9 +185,16 @@ func _physics_process(delta: float) -> void:
 	_update_flow_uniform()
 	_tunnel.step(delta)
 	_drone.transform = _tunnel.get_drone_transform()
-	if _propeller != null:
-		var spin_speed = wind_speed * 0.5
-		_propeller.rotate_y(spin_speed * delta)
+	# Propellers spin with the wind; ailerons/flaps deflect with their controls.
+	for prop in _propellers:
+		if prop is Node3D:
+			prop.rotate_x(wind_speed * 0.5 * delta)
+	for ail in _ailerons:
+		if ail is Node3D:
+			ail.rotation.x = -aileron * 0.6
+	for flap in _flaps:
+		if flap is Node3D:
+			flap.rotation.x = flaps_deg * PI / 180.0
 	_rebuild_smoke(true)
 	_camera_orbit()
 	_update_hud()
@@ -262,6 +295,9 @@ func _process(delta: float) -> void:
 		elevator = 0.0
 		flaps_deg = 0.0
 		_tunnel.reset_trails()
+	if _just_pressed(KEY_M):
+		_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
+		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 	if _just_pressed(KEY_ESCAPE):
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
@@ -286,6 +322,7 @@ func _update_hud() -> void:
 		aero_txt = "Lift:  %7.0f N\nDrag:  %7.0f N\nSide:  %7.0f N\nRoll M:  %+6.0f Nm\nPitch M: %+6.0f Nm\nYaw M:   %+6.0f Nm\nCL:      %+5.2f" % [mag[0], mag[1], mag[2], a[3], a[4], a[5], a[6]]
 	_label.text = """WIND TUNNEL
 -----------------------------
+Aircraft:    %s (press [M])
 Wind speed:  %5.1f m/s
 Wind dir:    %5.0f deg
 Pitch:       %5.1f deg
@@ -310,6 +347,7 @@ Wind dir:   [R] / [T]
 Reset:      [Space]
 Menu:       [Esc]
 Camera:     [Left-drag] / [Scroll]""" % [
+		AIRCRAFT_NAMES[_aircraft_index],
 		s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
 		aero_txt,
 	]

@@ -1,3 +1,4 @@
+@tool
 extends Node3D
 ## Interactive 6-DOF flight simulation. All physics live in `flight_core`
 ## (via the FlightSimNode GDExtension); this script only reads input, feeds
@@ -14,13 +15,25 @@ var aileron := 0.0
 var rudder := 0.0
 var flaps_deg := 0.0
 var throttle := 0.0
+var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 var auto_level := false
 
-var _propeller: Node3D = null
+const AIRCRAFT_NAMES := ["TwinEngine", "MQI"]
+const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
+
+var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
+var _aircraft_index := 0
 var _telemetry := PackedFloat64Array()
 var _hud_timer := 0.0
+var _aircraft_btn: Button = null
+
+var cam_orbit := false
+var cam_yaw := 0.0
+var cam_pitch := 0.3
+var cam_dist := 40.0
+var cam_center := Vector3.ZERO
 
 @onready var _physics = $Physics
 @onready var _drone: Node3D = $DroneView
@@ -28,79 +41,53 @@ var _hud_timer := 0.0
 @onready var _label: Label = _build_hud()
 
 func _ready() -> void:
-	if not _physics.start(""):
-		push_error("FlightSimNode failed to load aircraft.toml")
-		# Trim still works on the built-in defaults, so continue anyway.
-	var tr: Vector2 = _physics.trim(1000.0, 60.0)
-	elevator = 0.0
-	elevator_trim = tr.x
-	throttle = clampf(tr.y, 0.0, 1.0)
+	var is_editor := Engine.is_editor_hint()
 
-	var parts := DroneFactory.build(_drone)
-	_propeller = parts["propeller"]
-	_flaps = parts["flaps"]
-	_ailerons = parts["ailerons"]
+	# In the editor we only want the static visuals; the physics (Rust) node
+	# and input/HUD handling are runtime-only.
+	if not is_editor:
+		if not _physics.start("TwinEngine.toml"):
+			if not _physics.start("aircraft.toml"):
+				push_error("FlightSimNode failed to load any aircraft config")
+			# Trim still works on the built-in defaults, so continue anyway.
+		var tr: Vector2 = _physics.trim(50.0, 60.0)
+		elevator = 0.0
+		elevator_trim = tr.x
+		throttle = clampf(tr.y, 0.0, 1.0)
 
-	_build_world()
-	_camera.global_position = Vector3(-60, 1060, -120)
-	_camera.look_at(Vector3(0, 1000, 0), Vector3.UP)
+	# Use the imported GLB aircraft models rather than the procedural drone.
+	var view: Node3D = _AircraftViewScript.new()
+	view.name = "Model"
+	_drone.add_child(view)
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 
-## Build sky, sun, terrain and a runway + distance markers for motion cues.
-func _build_world() -> void:
-	var we := WorldEnvironment.new()
-	var env := Environment.new()
-	env.background_mode = Environment.BG_SKY
-	var sky := Sky.new()
-	var psky := ProceduralSkyMaterial.new()
-	psky.sky_top_color = Color(0.35, 0.55, 0.90)
-	psky.sky_horizon_color = Color(0.72, 0.78, 0.85)
-	psky.ground_bottom_color = Color(0.18, 0.24, 0.22)
-	psky.ground_horizon_color = Color(0.55, 0.62, 0.60)
-	sky.sky_material = psky
-	env.sky = sky
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	we.environment = env
-	add_child(we)
+	if not is_editor:
+		cam_center = _drone.global_position
+		_chase_camera()
 
-	var sun := DirectionalLight3D.new()
-	sun.shadow_enabled = true
-	sun.rotation_degrees = Vector3(-55, 45, 0)
-	add_child(sun)
+## Switch the active aircraft (visual model + physics config) and re-trim.
+func _load_aircraft(name: String) -> void:
+	var is_editor := Engine.is_editor_hint()
+	var ok := true
+	if not is_editor:
+		ok = _physics.switch_aircraft(name)
+	var view := _drone.get_node_or_null("Model")
+	if view:
+		view.set_model(name)
+		_propellers = view.propellers
+		_ailerons = view.ailerons
+		_flaps = view.flaps
+	if ok and not is_editor:
+		var tr: Vector2 = _physics.trim(50.0, 60.0)
+		elevator = 0.0
+		elevator_trim = tr.x
+		aileron = 0.0
+		rudder = 0.0
+		flaps_deg = 0.0
+		throttle = clampf(tr.y, 0.0, 1.0)
+		engine_out = 0
 
-	var ground := MeshInstance3D.new()
-	var gm := BoxMesh.new()
-	gm.size = Vector3(6000, 2, 6000)
-	var ground_mat := StandardMaterial3D.new()
-	ground_mat.albedo_color = Color(0.36, 0.46, 0.30)
-	ground.mesh = gm
-	ground.material_override = ground_mat
-	ground.position = Vector3(0, -1.0, 0)
-	add_child(ground)
-
-	var runway := MeshInstance3D.new()
-	var rm := BoxMesh.new()
-	rm.size = Vector3(1000, 0.3, 42)
-	var rw_mat := StandardMaterial3D.new()
-	rw_mat.albedo_color = Color(0.25, 0.26, 0.28)
-	runway.mesh = rm
-	runway.material_override = rw_mat
-	runway.position = Vector3(0, -0.05, 0)
-	add_child(runway)
-
-	var i := 0
-	for x in [-400.0, -200.0, 200.0, 400.0]:
-		for color in [Color(0.9, 0.25, 0.2), Color(0.9, 0.8, 0.2)]:
-			var marker := MeshInstance3D.new()
-			var bm := BoxMesh.new()
-			bm.size = Vector3(6, 30, 6)
-			marker.mesh = bm
-			var mm := StandardMaterial3D.new()
-			mm.albedo_color = color
-			marker.material_override = mm
-			marker.position = Vector3(x, 14, -60.0 if i % 2 == 0 else 60.0)
-			add_child(marker)
-			i += 1
-
+## Build the on-screen HUD (telemetry panel + aircraft-swap button).
 func _build_hud() -> Label:
 	var hud := CanvasLayer.new()
 	hud.name = "HUDCanvas"
@@ -117,21 +104,54 @@ func _build_hud() -> Label:
 	label.add_theme_font_size_override("font_size", 13)
 	label.text = "Initializing..."
 	panel.add_child(label)
+
+	_aircraft_btn = Button.new()
+	_aircraft_btn.position = Vector2(12, 620)
+	_aircraft_btn.custom_minimum_size = Vector2(140, 28)
+	_aircraft_btn.add_theme_font_size_override("font_size", 12)
+	var btn_style := StyleBoxFlat.new()
+	btn_style.bg_color = Color(0.04, 0.07, 0.11, 0.85)
+	btn_style.set_corner_radius_all(6)
+	btn_style.set_content_margin_all(6)
+	_aircraft_btn.add_theme_stylebox_override("normal", btn_style)
+	var btn_hover := btn_style.duplicate()
+	btn_hover.bg_color = Color(0.10, 0.18, 0.28, 0.9)
+	_aircraft_btn.add_theme_stylebox_override("hover", btn_hover)
+	_aircraft_btn.pressed.connect(_on_aircraft_swap)
+	hud.add_child(_aircraft_btn)
+	_update_aircraft_btn_text()
+
 	return label
 
+func _on_aircraft_swap() -> void:
+	_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+	_update_aircraft_btn_text()
+
+func _update_aircraft_btn_text() -> void:
+	if _aircraft_btn:
+		var next: String = AIRCRAFT_NAMES[(_aircraft_index + 1) % AIRCRAFT_NAMES.size()]
+		_aircraft_btn.text = "Aircraft: %s  [Swap]" % AIRCRAFT_NAMES[_aircraft_index]
+		_aircraft_btn.tooltip_text = "Click or press [M] to switch to %s" % next
+
 func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
+
 	_handle_input(delta)
 
 	_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
 	_physics.set_elevator_trim(elevator_trim)
+	_physics.set_throttle_split(float(engine_out_side()))
 	_physics.step(delta)
 
 	_drone.transform = _physics.get_drone_transform()
 	_update_control_surfaces()
 	_chase_camera()
 
-	if _propeller:
-		_propeller.rotate_x(delta * (throttle * 45.0 + 3.0))
+	for prop in _propellers:
+		if prop is Node3D:
+			prop.rotate_x(delta * (throttle * 60.0 + 3.0))
 
 	_hud_timer += delta
 	if _hud_timer >= 0.2:
@@ -174,6 +194,10 @@ func _handle_input(delta: float) -> void:
 	if _just_pressed(KEY_F):
 		flaps_deg = 15.0 if flaps_deg < 5.0 else (30.0 if flaps_deg < 20.0 else 0.0)
 
+	# Engine out cycle: both -> left out -> right out (twin only)
+	if _just_pressed(KEY_G):
+		engine_out = (engine_out + 1) % 3
+
 	# Elevator trim: [ = nose DOWN trim, ] = nose UP trim
 	if Input.is_key_pressed(KEY_BRACKETRIGHT):
 		elevator_trim = minf(elevator_trim + 0.05 * delta, MAX_TRIM)
@@ -191,6 +215,22 @@ func _handle_input(delta: float) -> void:
 		auto_level = not auto_level
 		_physics.set_auto_level(auto_level)
 
+	# Camera view toggle: V
+	if _just_pressed(KEY_V):
+		cam_orbit = not cam_orbit
+		if cam_orbit:
+			cam_center = _drone.global_position
+			var offset := _camera.global_position - cam_center
+			cam_dist = maxf(offset.length(), 1.0)
+			cam_yaw = atan2(offset.z, offset.x)
+			cam_pitch = asin(clampf(offset.y / cam_dist, -1.0, 1.0))
+
+	# Switch aircraft: M
+	if _just_pressed(KEY_M):
+		_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
+		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+		_update_aircraft_btn_text()
+
 	# Reset: R
 	if _just_pressed(KEY_R):
 		var tr: Vector2 = _physics.reset()
@@ -200,6 +240,7 @@ func _handle_input(delta: float) -> void:
 		rudder = 0.0
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
+		engine_out = 0
 		auto_level = false
 		_physics.set_auto_level(false)
 
@@ -212,6 +253,11 @@ func _center_control(value: float, rate: float, mult: float, delta: float) -> fl
 		return 0.0
 	return value - signf(value) * rate * mult * delta
 
+## Map the engine-out state to a throttle-split for the twin physics:
+## -1 = left engine out, 0 = both running, +1 = right engine out.
+func engine_out_side() -> int:
+	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
+
 func _just_pressed(key: Key) -> bool:
 	return Input.is_key_pressed(key) and not _held.get(key, false)
 
@@ -223,18 +269,42 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventKey and not event.pressed:
 		_held[event.physical_keycode] = false
 
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			cam_dist = clampf(cam_dist - 3.0, 8.0, 120.0)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			cam_dist = clampf(cam_dist + 3.0, 8.0, 120.0)
+	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		if not cam_orbit:
+			cam_orbit = true
+			cam_center = _drone.global_position
+		cam_yaw -= event.relative.x * 0.006
+		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
+
 func _update_control_surfaces() -> void:
 	for flap in _flaps:
-		flap.rotation.x = flaps_deg * PI / 180.0
+		if flap is Node3D:
+			flap.rotation.x = flaps_deg * PI / 180.0
 	for ail in _ailerons:
-		ail.rotation.x = -aileron * 0.6
+		if ail is Node3D:
+			ail.rotation.x = -aileron * 0.6
 
 func _chase_camera() -> void:
-	var tf: Transform3D = _drone.global_transform
-	var pos := tf * Vector3(-38, 8.5, 0)
-	var look := tf * Vector3(25, 1.5, 0)
-	_camera.global_position = pos
-	_camera.look_at(look, tf.basis.y)
+	# Follow the drone from a fixed offset each frame in GLOBAL space. The
+	# camera is NOT a child of the drone so it keeps a horizon-stable up while
+	# tracking the aircraft (prevents the "locked to ground" pitching bug).
+	var target := _drone.global_position
+	if cam_orbit:
+		var sp := sin(cam_pitch)
+		var cp := cos(cam_pitch)
+		var offset := Vector3(cam_dist * cp * cos(cam_yaw), cam_dist * sp, cam_dist * cp * sin(cam_yaw))
+		cam_center = target
+		_camera.global_position = cam_center + offset
+		_camera.look_at(cam_center, Vector3.UP)
+	else:
+		var tf: Transform3D = _drone.global_transform
+		_camera.global_position = tf * Vector3(-32, 7.0, 0)
+		_camera.look_at(tf.origin, Vector3.UP)
 
 func _update_hud() -> void:
 	if _telemetry.size() < 25:
@@ -247,7 +317,14 @@ func _update_hud() -> void:
 		flap_str = "LANDING (30deg)"
 	var ap := " [AUTOPILOT ON]" if auto_level else ""
 	var stall := " [! STALL !]" if t[23] > 0.5 else ""
+	var engine_str := "BOTH RUNNING"
+	if engine_out == 1:
+		engine_str = "LEFT ENGINE OUT [G]"
+	elif engine_out == 2:
+		engine_str = "RIGHT ENGINE OUT [G]"
+	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
 	_label.text = """TACTICAL UAV DRONE TELEMETRY%s%s
+Aircraft:       %s (model: %s, press [M] to switch)
 ------------------------------------
 Altitude:       %6.0f m (%6.0f ft)
 Airspeed (TAS): %6.1f m/s (%5.0f kts)
@@ -259,6 +336,7 @@ AoA / Slip:     %+5.1f deg / %+5.1f deg
 Pitch / Roll:   %+5.1f deg / %+5.1f deg
 Heading (Yaw):  %5.1f deg (Climb: %+4.1f deg)
 Throttle:       %5.0f %%  (Flaps: %s)
+Engines:        %s
 Surfaces:       Ail: %+4.1f deg | Elev: %+4.1f deg (Trim %+4.1f) | Rud: %+4.1f deg
 
 CONTROLS & DRONE SYSTEMS
@@ -267,11 +345,14 @@ Pitch:     [W] Down / [S] Up
 Roll:      [A] Left / [D] Right
 Rudder:    [Q] Left / [E] Right (or [Z]/[C])
 Flaps:     [F] 0 -> 15 -> 30
+Engine:    [G] both -> left out -> right out (twin)
 Trim:      [[] Down / []] Up
 Throttle:  [Shift] Up / [Ctrl] Down
-Autopilot: [H]/[T] Hold    Reset: [R]
+	Autopilot: [H]/[T] Hold    Reset: [R]
+	Camera:   [V] Chase/Orbit  [RMB-drag] [Scroll]
 Menu: [Esc]""" % [
 		ap, stall,
+		ac_name, ac_name,
 		t[0], t[1],
 		t[2], t[3],
 		t[4],
@@ -282,5 +363,6 @@ Menu: [Esc]""" % [
 		t[11], t[12],
 		t[13], t[14],
 		t[15], flap_str,
+		engine_str,
 		t[17], t[18], t[19], t[20],
 	]

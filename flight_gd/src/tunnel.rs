@@ -15,6 +15,7 @@
 
 use flight_core::aero::compute_forces_moments;
 use flight_core::nalgebra::Vector3 as NVec3;
+use flight_core::shape::compute_shape_wind;
 use flight_core::{AircraftConfig, AircraftState};
 use godot::builtin::{PackedFloat32Array, PackedFloat64Array, Transform3D, Vector3};
 use godot::classes::Node3D;
@@ -271,6 +272,21 @@ impl WindTunnelNode {
         self.flaps_deg = degrees;
     }
 
+    /// Switch the active aircraft configuration (e.g. `"MQI"` or
+    /// `"TwinEngine"`), reloading the flow-grid aero forces + collision-shape
+    /// wind forces for the new airframe. Returns `true` on success.
+    #[func]
+    fn switch_aircraft(&mut self, name: GString) -> bool {
+        let name = name.to_string();
+        let file_name = format!("{name}.toml");
+        let Some(config) = resolve_config_named(&file_name) else {
+            godot_error!("WindTunnelNode: no config for aircraft '{name}'");
+            return false;
+        };
+        self.config = Some(config);
+        true
+    }
+
     /// Recycle every particle back to its rake nozzle so the chamber visibly
     /// floods fresh air from the front on a reset.
     #[func]
@@ -492,7 +508,7 @@ self.particles = (0..PARTICLE_COUNT)
         let state = self.attitude_state();
 
         let wind_earth = NVec3::zeros();
-        let (forces, moments) = compute_forces_moments(
+        let (mut forces, mut moments) = compute_forces_moments(
             &state,
             config,
             self.elevator as f64,
@@ -503,6 +519,17 @@ self.particles = (0..PARTICLE_COUNT)
             self.flaps_deg.to_radians() as f64,
             &wind_earth,
         );
+
+        // Collision-shape wind interaction: the tunnel flow pours onto the
+        // aircraft's flat-plate panels, adding a geometry-dependent force.
+        let dir = self.wind_direction as f64;
+        let speed = self.wind_speed as f64;
+        let flow_wind = NVec3::new(-dir.cos(), 0.0, dir.sin()) * speed;
+        let (shape_force, shape_moment) =
+            compute_shape_wind(&state, &config.collision_panels, &flow_wind);
+        forces += shape_force;
+        moments += shape_moment;
+
         self.force = forces;
         self.moment = moments;
 
@@ -553,6 +580,22 @@ fn resolve_config() -> Option<AircraftConfig> {
         }
     }
     godot_error!("WindTunnelNode: aircraft.toml not found for aero forces");
+    None
+}
+
+/// Resolve a named aircraft config (e.g. `"MQI.toml"`) from the same candidate
+/// directories as [`resolve_config`].
+fn resolve_config_named(file_name: &str) -> Option<AircraftConfig> {
+    for p in ["", "..", "../..", "../../.."] {
+        let candidate = if p.is_empty() {
+            file_name.to_string()
+        } else {
+            format!("{p}/{file_name}")
+        };
+        if let Ok(cfg) = AircraftConfig::from_file(&candidate) {
+            return Some(cfg);
+        }
+    }
     None
 }
 

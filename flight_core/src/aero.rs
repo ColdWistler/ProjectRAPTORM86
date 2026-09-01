@@ -17,6 +17,135 @@ use crate::state::AircraftState;
 /// Gravitational acceleration (m/s²).
 const G: f64 = 9.80665;
 
+/// Thrust produced by a given throttle fraction against a per-engine thrust and
+/// power ceiling, using the constant-power propeller model `T = min(T_max·δ,
+/// P_max·δ / V)`. `thr` is the per-engine power fraction in `[0,1]`.
+fn engine_thrust_ceiling(
+    thr_max: f64,
+    pwr_max: f64,
+    thr: f64,
+    v_tas: f64,
+    density_factor: f64,
+) -> f64 {
+    let static_thrust = thr_max * thr * density_factor;
+    let power_thrust = pwr_max * thr * density_factor / v_tas.max(6.0);
+    static_thrust.min(power_thrust)
+}
+
+/// The per-engine thrust vector for the configured propulsion layout.
+///
+/// `throttle_split` (`-1..=1`, from the config) skews the master throttle
+/// between a left/right pair so an asymmetric thrust / engine-out can be
+/// applied. Returns `(left, right, single)` in Newtons, where `single` is the
+/// centreline thrust for a single-engine layout and is zero for a twin.
+///
+/// `thrust_max` / `power_max` describe the *total* installed propulsion, so for
+/// a twin each engine ceilings at half the total. The skew preserves total
+/// thrust at any split (one engine gains exactly what the other loses), and at
+/// `split == ±1` the dead engine runs at zero while the live one carries its
+/// full single-engine share — matching a real engine-out.
+fn engine_thrusts(
+    config: &AircraftConfig,
+    throttle: f64,
+    throttle_split: f64,
+    v_tas: f64,
+    density_factor: f64,
+) -> (f64, f64, f64) {
+    let split = throttle_split.clamp(-1.0, 1.0);
+
+    if config.engine_count != 2 {
+        // Single engine: thrust line on the centreline, no asymmetry.
+        let t = engine_thrust_ceiling(
+            config.thrust_max,
+            config.power_max,
+            throttle,
+            v_tas,
+            density_factor,
+        );
+        return (0.0, 0.0, t);
+    }
+
+    // Twin: per-engine ceiling is half the total installed thrust/power. The
+    // master throttle is preserved at split==0; the skew shifts power from one
+    // engine to the other up to a full single-engine share.
+    let half_t = config.thrust_max * 0.5;
+    let half_p = config.power_max * 0.5;
+    let left_thr = (throttle * (1.0 - split)).clamp(0.0, 1.0);
+    let right_thr = (throttle * (1.0 + split)).clamp(0.0, 1.0);
+    let t_left = engine_thrust_ceiling(half_t, half_p, left_thr, v_tas, density_factor);
+    let t_right = engine_thrust_ceiling(half_t, half_p, right_thr, v_tas, density_factor);
+    (t_left, t_right, 0.0)
+}
+
+/// Compute the engine (propeller) force and moment contributions for the
+/// configured propulsion layout, including the twin-specific couplings.
+///
+/// Returns `(force, moment)` in the body frame:
+/// * `force.x`  — total axial thrust (sum of all engines).
+/// * `moment.y` — thrust-line pitching moment (thrust × vertical arm).
+/// * `moment.z` — asymmetric-thrust yawing moment `(T_left − T_right) · arm`
+///   (the engine-out / Vmc driver) plus P-factor.
+/// * `moment.x` — propeller-torque rolling moment.
+/// * `moment`   — gyroscopic precession pitch/yaw couples.
+///
+/// `q`, `r` are the body angular rates (rad/s) and `alpha` is the
+/// aerodynamic angle of attack (rad), both needed by the asymmetric couplings.
+#[allow(clippy::too_many_arguments)]
+fn engine_forces_moments(
+    config: &AircraftConfig,
+    throttle: f64,
+    v_tas: f64,
+    density_factor: f64,
+    alpha: f64,
+    q: f64,
+    r: f64,
+    pitch_sense: f64,
+) -> (Vector3<f64>, Vector3<f64>) {
+    let split = config.throttle_split;
+    let (t_left, t_right, t_single) =
+        engine_thrusts(config, throttle, split, v_tas, density_factor);
+
+    let mut force = Vector3::zeros();
+    let mut moment = Vector3::zeros();
+
+    // Total axial thrust.
+    let thrust_total = t_left + t_right + t_single;
+    force.x += thrust_total;
+
+    // Trust-line pitching moment (reverses when inverted).
+    moment.y += thrust_total * config.thrust_arm * pitch_sense;
+
+    if config.engine_count == 2 {
+        let arm = config.engine_lateral_arm;
+
+        // Asymmetric-thrust yawing moment: unequal left/right thrust yaws the
+        // nose toward the dead engine. The rudder must counter this; below Vmc
+        // it cannot, which drives the characteristic engine-out departure.
+        moment.z += (t_left - t_right) * arm;
+
+        // Propeller torque: each engine produces a rolling couple about body X
+        // proportional to its thrust. Assumed counter-rotating for a symmetric
+        // twin, so the net is small and scales with any residual asymmetry.
+        let torque = config.prop_torque_coeff * (t_left - t_right) * arm;
+        moment.x += torque;
+
+        // P-factor: at high power and high AoA the descending blade thrusts
+        // more than the ascending one, yawing the nose. Both props rotate the
+        // same way (standard right-hand from behind), so they reinforce.
+        let pf = config.p_factor_coeff * thrust_total * alpha;
+        moment.z += pf;
+
+        // Gyroscopic precession: the spinning propeller disc resists being
+        // pitched or yawed, coupling the two axes. Proportional to the engine
+        // angular momentum (modelled by the thrust proxy) and the body rates.
+        let gyro = config.gyro_coeff * thrust_total;
+        moment.y += gyro * r;
+        moment.z += -gyro * q;
+    }
+
+    (force, moment)
+}
+
 /// Compute the net aerodynamic + propulsive + gravitational force and
 /// moment acting on the aircraft in full 6-DOF with atmospheric lapse
 /// and nonlinear stall aerodynamics.
@@ -108,13 +237,21 @@ pub fn compute_forces(
     //   T(V) = min(thrust_max * δ, P_max * δ / V)
     // so somewhere above the corner speed the available thrust falls off with
     // airspeed. Both scale with the atmospheric density ratio (forced / turboshaft
-    // losses), clamped to a sensible range.
+    // losses), clamped to a sensible range. Multi-engine layouts (twin) split
+    // and skew the total across left/right engines.
     let throttle = throttle.clamp(0.0, 1.0);
     let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
-    let static_thrust = config.thrust_max * throttle * density_factor;
-    let power_thrust = config.power_max * throttle * density_factor / v_tas.max(6.0);
-    let thrust = static_thrust.min(power_thrust);
-    forces.x += thrust;
+    let (engine_force, _engine_moment) = engine_forces_moments(
+        config,
+        throttle,
+        v_tas,
+        density_factor,
+        alpha,
+        state.q,
+        state.r,
+        1.0, // force only; the thrust-line pitch moment is applied in compute_moments
+    );
+    forces += engine_force;
 
     // --- Gravity rotated from Earth NED [0, 0, m*g] to body axes ---
     let gravity_earth = Vector3::new(0.0, 0.0, config.mass * G);
@@ -158,9 +295,6 @@ pub fn compute_moments(
     // --- Engine thrust (used for the thrust-line pitching moment) ---
     let throttle = throttle.clamp(0.0, 1.0);
     let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
-    let static_thrust = config.thrust_max * throttle * density_factor;
-    let power_thrust = config.power_max * throttle * density_factor / v_tas.max(6.0);
-    let thrust = static_thrust.min(power_thrust);
 
     // --- Dimensionless body angular rates ---
     let p_hat = if v_tas > 1e-6 {
@@ -240,9 +374,9 @@ pub fn compute_moments(
         + stall_pitch_break;
     let cm = cm_core * pitch_sense + spiral_nose_drop * spiral_sense;
     // Thrust line offset from CG produces a pitching moment proportional to
-    // thrust; its body-Z arm also reverses when inverted.
-    let pitch_moment =
-        q_dyn * config.wing_area * config.chord * cm + thrust * config.thrust_arm * pitch_sense;
+    // thrust; its body-Z arm also reverses when inverted. This (plus the twin
+    // asymmetric couplings) is supplied by `engine_forces_moments` below.
+    let pitch_moment = q_dyn * config.wing_area * config.chord * cm;
 
     // --- Rolling Moment Cl (around body X) ---
     let cl_roll = config.cl_beta * beta
@@ -260,7 +394,22 @@ pub fn compute_moments(
         + config.cn_dr * rudder_deflection;
     let yaw_moment = q_dyn * config.wing_area * config.wing_span * cn;
 
-    let moments = Vector3::new(roll_moment, pitch_moment, yaw_moment);
+    let mut moments = Vector3::new(roll_moment, pitch_moment, yaw_moment);
+
+    // --- Engine (twin) thrust-line and asymmetric couplings ---
+    // Adds the thrust-Line pitching moment plus, for a twin, the asymmetric
+    // thrust yaw (Vmc), P-factor, prop torque and gyroscopic precession.
+    let (_, engine_moment) = engine_forces_moments(
+        config,
+        throttle,
+        v_tas,
+        density_factor,
+        alpha,
+        state.q,
+        state.r,
+        pitch_sense,
+    );
+    moments += engine_moment;
 
     moments
 }

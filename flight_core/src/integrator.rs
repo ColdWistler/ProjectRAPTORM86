@@ -10,6 +10,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::aero::{compute_forces, compute_moments};
 use crate::config::AircraftConfig;
+use crate::shape::compute_shape_wind;
 use crate::state::AircraftState;
 
 /// Compressed state used for RK4 derivative evaluation.
@@ -93,7 +94,13 @@ fn derivatives(
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let forces = compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
+    let mut forces =
+        compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
+
+    // Shape-based wind interaction: the imposed wind pushes on the aircraft's
+    // flat-plate collision-shape panels, adding a geometry-dependent force.
+    let (shape_force, shape_moment) = compute_shape_wind(&aircraft, &config.collision_panels, wind_earth);
+    forces += shape_force;
 
     // --- Translational kinematics ---------------------------------------
     let rot_earth_to_body: UnitQuaternion<f64> = s.rotation();
@@ -121,8 +128,9 @@ fn derivatives(
     let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
-    let moments =
+    let mut moments =
         compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap, wind_earth);
+    moments += shape_moment;
     let ixx = config.ixx;
     let iyy = config.iyy;
     let izz = config.izz;
@@ -185,6 +193,31 @@ pub fn step(
 
     *state = next.into_state();
     state.normalize_quaternion();
+
+    // --- Ground plane collision (simple hard floor) ----------------------
+    // NED frame: altitude = -pos_z, so the ground is at pos_z = 0. Clamp the
+    // position to the surface and kill the descent so the aircraft "lands"
+    // rather than passing through the floor. The RL environment treats
+    // altitude <= 0 as a crash, so keep the floor at exactly ground level.
+    const GROUND_Z_NED: f64 = 0.0;
+    if state.pos_z > GROUND_Z_NED {
+        state.pos_z = GROUND_Z_NED;
+        // Project out the downward component of the earth-frame velocity by
+        // removing it from the body-frame velocity. NED up is -z.
+        let rot_earth_to_body = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+            state.q0, state.q1, state.q2, state.q3,
+        ));
+        let up_earth = Vector3::new(0.0, 0.0, -1.0); // NED up is -z
+        let up_body = rot_earth_to_body.transform_vector(&up_earth);
+        let bv = Vector3::new(state.u, state.v, state.w);
+        let velocity_along_up = bv.dot(&up_body);
+        if velocity_along_up < 0.0 {
+            let corrected = bv - up_body * velocity_along_up;
+            state.u = corrected.x;
+            state.v = corrected.y;
+            state.w = corrected.z;
+        }
+    }
 }
 
 /// `a + b * scale` element-wise, used for RK4 stage construction.
