@@ -13,6 +13,7 @@ pub mod env;
 pub mod integrator;
 pub mod shape;
 pub mod state;
+pub mod terrain;
 pub mod wind;
 
 pub use atmosphere::Atmosphere;
@@ -20,6 +21,7 @@ pub use config::AircraftConfig;
 pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
 pub use nalgebra;
 pub use state::AircraftState;
+pub use terrain::{Terrain, TerrainGrid, TerrainHill};
 pub use wind::{TurbulenceIntensity, WindConfig, WindEnvironment};
 
 use crate::config::load_config;
@@ -58,6 +60,10 @@ impl Simulator {
     /// full 6-DOF manual controls (elevator, aileron, rudder, throttle)
     /// plus a trailing-edge flap deflection (radians) and an optional wind
     /// vector in the Earth NED frame (m/s). Pass `None` for still air.
+    ///
+    /// `terrain` (optional) enables terrain ground collision, ground-effect
+    /// lift and orographic vertical wind. Pass `None` to fly over the flat
+    /// datum plane (historical behaviour).
     pub fn step_6dof(
         &mut self,
         elevator: f64,
@@ -67,6 +73,7 @@ impl Simulator {
         flaps: f64,
         wind_earth: Option<&nalgebra::Vector3<f64>>,
         dt: f64,
+        terrain: Option<&Terrain>,
     ) -> [f64; 12] {
         step(
             &mut self.state,
@@ -78,6 +85,7 @@ impl Simulator {
             flaps,
             wind_earth,
             dt,
+            terrain,
         );
         self.state.to_observation_array()
     }
@@ -86,7 +94,10 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aero::{compute_forces, compute_forces_moments, compute_moments};
+    use crate::aero::{
+    compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments,
+    ground_effect_factor,
+};
     use crate::integrator::step;
     use nalgebra::Vector3;
 
@@ -101,7 +112,7 @@ mod tests {
 
         let start = state.clone();
         for _ in 0..steps {
-            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt, None);
         }
 
         let alt_start = -start.pos_z;
@@ -150,6 +161,7 @@ mod tests {
                 0.0,
                 None,
                 dt,
+                None,
             );
         }
 
@@ -194,6 +206,7 @@ mod tests {
                 0.0,
                 None,
                 dt,
+                None,
             );
             tas_min = tas_min.min(state.airspeed());
             tas_max = tas_max.max(state.airspeed());
@@ -236,6 +249,7 @@ mod tests {
                 0.0,
                 None,
                 dt,
+                None,
             );
         }
         assert!(
@@ -261,6 +275,7 @@ mod tests {
                 0.0,
                 None,
                 dt,
+                None,
             );
             q_min = q_min.min(state.q.abs());
         }
@@ -349,7 +364,7 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         for _ in 0..120 {
             // 2 s of sustained right aileron (~11 deg deflection).
-            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, 0.0, None, dt);
+            step(&mut state, &config, elev_trim, 0.20, 0.0, throttle_trim, 0.0, None, dt, None);
         }
 
         let (roll, _, _) = state.euler_angles();
@@ -377,7 +392,7 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         for _ in 0..90 {
             // 1.5 s of sustained right rudder.
-            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, 0.0, None, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.30, throttle_trim, 0.0, None, dt, None);
         }
 
         let heading_change = state.euler_angles().2 - yaw_start;
@@ -400,7 +415,7 @@ cd0: 0.025,
         for _ in 0..120 {
             // 2 s at 0.05 rad (~3 deg) stick pull beyond trim.
             let elevator = elev_trim - 0.05;
-            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, 0.0, None, dt);
+            step(&mut state, &config, elevator, 0.0, 0.0, throttle_trim, 0.0, None, dt, None);
         }
 
         let (_, pitch, _) = state.euler_angles();
@@ -475,7 +490,7 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         // 10 s of hand-off, idle, no inputs.
         for _ in 0..600 {
-            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt);
+            step(&mut state, &config, elev_trim, 0.0, 0.0, throttle_trim, 0.0, None, dt, None);
         }
 
         let alt_change = state.altitude() - alt0;
@@ -643,6 +658,207 @@ cd0: 0.025,
         assert!(
             ld > 20.0,
             "long-range twin should beat L/D=20 at high-altitude cruise (got {ld:.1})"
+        );
+    }
+
+    #[test]
+    fn terrain_collision_stops_descent_on_a_mountain() {
+        // A Gaussian 400 m mountain at the origin. The aircraft should NOT be
+        // able to pierce it: it must rest clamped on the terrain surface at its
+        // (x, y) position, i.e. pos_z = -h(x, y), even though its sea-level
+        // altitude is still positive.
+        let config = aircraft_default();
+        let auth = Terrain::from_hills(vec![TerrainHill {
+            centre: [0.0, 0.0],
+            amplitude: 400.0,
+            sigma: 500.0,
+        }]);
+
+        // Start right above the peak, diving straight down.
+        let mut state = AircraftState::default();
+        state.pos_x = 0.0;
+        state.pos_y = 0.0;
+        state.pos_z = -410.0; // altitude 410 m (10 m above the peak)
+        state.w = 40.0; // 40 m/s down in body frame (level attitude)
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+
+        // After 1 s of diving the aircraft must rest exactly on the peak's
+        // surface, not below sea level.
+        let ground_ned = -auth.height(state.pos_x, state.pos_y);
+        assert!(
+            (state.pos_z - ground_ned).abs() < 1.0,
+            "aircraft did not rest on the terrain: pos_z {:.1} vs ground {:.1}",
+            state.pos_z,
+            ground_ned
+        );
+        assert!(
+            state.pos_z < 0.0,
+            "terrain should hold the aircraft above sea level (pos_z {:.1} < 0)",
+            state.pos_z
+        );
+        // Vertical sink must be gone.
+        let up_earth = Vector3::new(0.0, 0.0, -1.0);
+        let up_body = state.rotation_earth_to_body().transform_vector(&up_earth);
+        let bv = Vector3::new(state.u, state.v, state.w);
+        assert!(
+            bv.dot(&up_body) >= 0.0,
+            "descent velocity into the ground was not killed"
+        );
+    }
+
+    #[test]
+    fn flat_terrain_keeps_historical_sea_level_floor() {
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.pos_z = 10.0; // 10 m *below* the datum (pos_z>0)
+        state.w = 10.0;
+
+        let dt = 1.0 / 120.0;
+        let auth = Terrain::flat();
+        for _ in 0..20 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+        assert!(
+            state.pos_z <= 0.0,
+            "flat terrain must clamp at sea level, got pos_z {:.1}",
+            state.pos_z
+        );
+    }
+
+    #[test]
+    fn grid_terrain_collision_stops_descent_on_a_ridge() {
+        // A 300 m ridge running along east (j axis) at cells with i == 3.
+        let nx = 7;
+        let nz = 5;
+        let mut heights: Vec<f64> = vec![0.0; nx * nz];
+        for j in 0..nz {
+            heights[3 + j * nx] = 300.0;
+        }
+        let auth = Terrain::from_grid(-3000.0, -2000.0, 1000.0, nx, nz, heights);
+
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.pos_x = 0.0; // north between cells 3 -> 3*1000-3000 = 0 ... 1000
+        state.pos_y = 0.0;
+        state.pos_z = -310.0; // 10 m above the 300 m ridge
+        state.w = 40.0;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+
+        let ground_ned = -auth.height(state.pos_x, state.pos_y);
+        assert!(
+            (state.pos_z - ground_ned).abs() < 1.0,
+            "aircraft did not rest on the grid ridge: pos_z {:.1} vs ground {:.1}",
+            state.pos_z,
+            ground_ned
+        );
+        assert!(
+            state.pos_z < 0.0,
+            "grid terrain should hold the aircraft above sea level (pos_z {:.1})",
+            state.pos_z
+        );
+    }
+
+    #[test]
+    fn ground_effect_boosts_lift_near_the_surface() {
+        let config = aircraft_default();
+        let auth = Terrain::from_hills(vec![TerrainHill {
+            centre: [0.0, 0.0],
+            amplitude: 50.0,
+            sigma: 1000.0,
+        }]);
+        let zero = Vector3::zeros();
+
+        // Start from a trimmed level-flight state (net vertical force ~0) and
+        // park it at the surface / 3 spans up. Terrain is the SAME peak, so the
+        // two states differ only in their distance above it.
+        let mut low = AircraftState::default();
+        low.pos_x = 0.0;
+        low.pos_y = 0.0;
+        low.trim_level_flight(&config, 50.5, 60.0); // 0.5 m over the 50 m peak
+        let ge_low = ground_effect_factor(
+            auth.altitude_above_ground(0.0, 0.0, low.altitude()),
+            config.wing_span,
+        );
+
+        let mut high = low.clone();
+        high.pos_z -= 3.0 * config.wing_span; // 3*span above the surface
+        let ge_high = ground_effect_factor(
+            auth.altitude_above_ground(0.0, 0.0, high.altitude()),
+            config.wing_span,
+        );
+
+        let f_low = compute_forces_with_terrain(&low, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero, Some(&auth));
+        let f_high = compute_forces_with_terrain(&high, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero, Some(&auth));
+        let f_ref = compute_forces(&high, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero);
+
+        // Body -Z is up: ground effect must raise the upward lift near the
+        // surface, so f_low.z < f_high.z (both ~ = +/- gravity balance).
+        assert!(ge_low > 0.3 && ge_high < 0.01, "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}");
+        assert!(
+            f_low.z < f_high.z,
+            "ground effect should add lift: AGL~0 gave z {:.1}, 3·b gave z {:.1}",
+            f_low.z,
+            f_high.z
+        );
+        // 3 spans up the effect is negligible: the terrain force must match the
+        // flat-ground reference to within ~0.2% of the aircraft weight.
+        let weight = config.mass * 9.80665;
+        let rel = (f_high.z - f_ref.z).abs() / weight;
+        assert!(
+            rel < 0.002,
+            "3·b above ground should have ~no ground effect (Δ {rel:.4} of weight)"
+        );
+    }
+
+    #[test]
+    fn orographic_wind_produces_updrafts_and_downdrafts() {
+        // A north-facing windward slope: terrain rises to the north
+        // (dh/dnorth > 0). A north wind is forced up it -> updraft
+        // (negative NED vertical wind).
+        let auth = Terrain::from_hills(vec![TerrainHill {
+            centre: [1000.0, 0.0],
+            amplitude: 400.0,
+            sigma: 500.0,
+        }]);
+
+        // Just north of the datum (south of the peak), the slope climbs north.
+        // The ground surface here is ~54 m ASL (Gaussian at 2 sigma), so fly at
+        // 100 m to stay in the air while the decay term still bites.
+        let north = 0.0;
+        let east = 0.0;
+        let wind = Vector3::new(10.0, 0.0, 0.0); // 10 m/s north
+        let orog = auth.orographic_wind(&wind, north, east, 100.0, 300.0);
+
+        assert!(
+            orog.z < 0.0,
+            "windward slope must push air up (NED z<0), got {:.3}",
+            orog.z
+        );
+
+        // A wind blowing *south* down the same slope is a downdraft (NED z>0).
+        let wind_south = Vector3::new(-10.0, 0.0, 0.0);
+        let orog_south = auth.orographic_wind(&wind_south, north, east, 100.0, 300.0);
+        assert!(
+            orog_south.z > 0.0,
+            "leeward/downwind side must push air down (NED z>0), got {:.3}",
+            orog_south.z
+        );
+
+        // Effect decays away from the ground.
+        let high = auth.orographic_wind(&wind, north, east, 1000.0, 300.0);
+        assert!(
+            high.z.abs() < orog.z.abs() * 0.1,
+            "orographic wind must decay with altitude (high {:.3} vs near {:.3})",
+            high.z,
+            orog.z
         );
     }
 }

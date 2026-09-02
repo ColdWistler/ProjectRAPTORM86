@@ -8,10 +8,11 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::aero::{compute_forces, compute_moments};
+use crate::aero::{compute_forces_with_terrain, compute_moments_with_terrain};
 use crate::config::AircraftConfig;
 use crate::shape::compute_shape_wind;
 use crate::state::AircraftState;
+use crate::terrain::Terrain;
 
 /// Compressed state used for RK4 derivative evaluation.
 #[derive(Clone)]
@@ -91,11 +92,21 @@ fn derivatives(
     throttle: f64,
     flap: f64,
     wind_earth: &Vector3<f64>,
+    terrain: Option<&Terrain>,
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let mut forces =
-        compute_forces(&aircraft, config, elevator, aileron, rudder, throttle, flap, wind_earth);
+    let mut forces = compute_forces_with_terrain(
+        &aircraft,
+        config,
+        elevator,
+        aileron,
+        rudder,
+        throttle,
+        flap,
+        wind_earth,
+        terrain,
+    );
 
     // Shape-based wind interaction: the imposed wind pushes on the aircraft's
     // flat-plate collision-shape panels, adding a geometry-dependent force.
@@ -128,8 +139,18 @@ fn derivatives(
     let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
-    let mut moments =
-        compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap, wind_earth);
+    let mut moments = compute_moments_with_terrain(
+        &aircraft,
+        config,
+        elevator,
+        aileron,
+        rudder,
+        throttle,
+        alpha_dot,
+        flap,
+        wind_earth,
+        terrain,
+    );
     moments += shape_moment;
     let ixx = config.ixx;
     let iyy = config.iyy;
@@ -157,6 +178,10 @@ fn derivatives(
 }
 
 /// Advance the aircraft state by `dt` seconds using RK4 with full 6-DOF control inputs.
+///
+/// `terrain` (optional) enables terrain ground collision, ground-effect force
+/// augmentation and orographic (terrain-induced) vertical wind. With `None`
+/// the aircraft flies over a flat infinite plane at the reference datum.
 pub fn step(
     state: &mut AircraftState,
     config: &AircraftConfig,
@@ -167,24 +192,37 @@ pub fn step(
     flap: f64,
     wind_earth: Option<&Vector3<f64>>,
     dt: f64,
+    terrain: Option<&Terrain>,
 ) {
     let s0 = DynState::from(&*state);
     let half = dt * 0.5;
 
-    // Resolve the wind field once for the entire step (quasi-static over dt).
+    // Resolve the wind field once for the entire step (quasi-static over dt),
+    // adding any terrain-orographic vertical wind on top of the supplied field.
     let zero_wind = Vector3::zeros();
-    let wind = wind_earth.unwrap_or(&zero_wind);
+    let mut wind_buf = wind_earth.copied().unwrap_or(zero_wind);
+    if let Some(t) = terrain {
+        let wr = wind_earth.unwrap_or(&zero_wind);
+        wind_buf += t.orographic_wind(
+            wr,
+            state.pos_x,
+            state.pos_y,
+            state.altitude(),
+            300.0, // orographic decay height scale (m AGL)
+        );
+    }
+    let wind = &wind_buf;
 
-    let k1 = derivatives(&s0, config, elevator, aileron, rudder, throttle, flap, wind);
+    let k1 = derivatives(&s0, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
 
     let s2 = add_scaled(&s0, &k1, half);
-    let k2 = derivatives(&s2, config, elevator, aileron, rudder, throttle, flap, wind);
+    let k2 = derivatives(&s2, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
 
     let s3 = add_scaled(&s0, &k2, half);
-    let k3 = derivatives(&s3, config, elevator, aileron, rudder, throttle, flap, wind);
+    let k3 = derivatives(&s3, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
 
     let s4 = add_scaled(&s0, &k3, dt);
-    let k4 = derivatives(&s4, config, elevator, aileron, rudder, throttle, flap, wind);
+    let k4 = derivatives(&s4, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
 
     // Combine the four stage slopes: (k1 + 2k2 + 2k3 + k4)/6.
     let one_sixth = dt / 6.0;
@@ -194,14 +232,18 @@ pub fn step(
     *state = next.into_state();
     state.normalize_quaternion();
 
-    // --- Ground plane collision (simple hard floor) ----------------------
-    // NED frame: altitude = -pos_z, so the ground is at pos_z = 0. Clamp the
-    // position to the surface and kill the descent so the aircraft "lands"
-    // rather than passing through the floor. The RL environment treats
-    // altitude <= 0 as a crash, so keep the floor at exactly ground level.
-    const GROUND_Z_NED: f64 = 0.0;
-    if state.pos_z > GROUND_Z_NED {
-        state.pos_z = GROUND_Z_NED;
+    // --- Ground-plane collision ------------------------------------------
+    // NED frame: altitude = -pos_z. Without a terrain the ground is a flat
+    // plane at the reference datum (pos_z = 0). With terrain supplied the
+    // ground follows the elevation surface `h(pos_x, pos_y)`, i.e. the aircraft
+    // rests on pos_z = -h. In both cases clamp the position to the surface and
+    // kill the descent so the aircraft "lands" rather than passing through.
+    let ground_z_ned = match terrain {
+        Some(t) => -t.height(state.pos_x, state.pos_y),
+        None => 0.0,
+    };
+    if state.pos_z > ground_z_ned {
+        state.pos_z = ground_z_ned;
         // Project out the downward component of the earth-frame velocity by
         // removing it from the body-frame velocity. NED up is -z.
         let rot_earth_to_body = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(

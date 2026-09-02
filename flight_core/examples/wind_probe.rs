@@ -26,7 +26,7 @@ fn main() {
         let _ = (elev, thr);
         // Step forward 20 s at 60 Hz under the given constant wind.
         for _ in 0..(20 * 60) {
-            sim.step_6dof(elev, 0.0, 0.0, thr, 0.0, Some(&wind_vec), 1.0 / 60.0);
+            sim.step_6dof(elev, 0.0, 0.0, thr, 0.0, Some(&wind_vec), 1.0 / 60.0, None);
         }
         let st = &sim.state;
         let tas = st.true_airspeed(&wind_vec);
@@ -49,7 +49,7 @@ fn main() {
         let vt = sim.state.airspeed();
         let w = wind_env.total_wind(&sim.state, vt, 1.0 / 60.0);
         spare = spare.max(w.norm());
-        sim.step_6dof(elev, 0.0, 0.0, thr, 0.0, Some(&w), 1.0 / 60.0);
+        sim.step_6dof(elev, 0.0, 0.0, thr, 0.0, Some(&w), 1.0 / 60.0, None);
     }
     println!(
         "turbulent 30s: max_wind={spare:.2} m/s  alt={:.1} m  TAS={:.2} m/s",

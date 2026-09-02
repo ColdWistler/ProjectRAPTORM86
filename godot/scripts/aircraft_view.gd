@@ -105,3 +105,39 @@ func set_model(name: String) -> bool:
 
 func current_name() -> String:
 	return _current_name
+
+## Load an arbitrary `.glb`/`.gltf`/`.obj` scene (path = `res://...` or an
+## absolute `/path`) under this node, wrapped in an import root so the caller
+## can bake a pose. Clears any current model. Used by the wind tunnel's model
+## importer. Returns `false` if the scene could not be loaded.
+func show_imported(path: String) -> bool:
+	var resolved := path
+	if path.begins_with("res://") == false and path.begins_with("/") == false:
+		resolved = "res://" + path
+	if not ResourceLoader.exists(resolved):
+		push_error("AircraftView: cannot import '%s' (missing scene)" % resolved)
+		return false
+	var packed: PackedScene = load(resolved)
+	if packed == null:
+		push_error("AircraftView: failed to load scene '%s'" % resolved)
+		return false
+
+	if _align_root == null:
+		_align_root = Node3D.new()
+		add_child(_align_root)
+	# Clear any previous model (built-in or imported).
+	for child in _align_root.get_children():
+		_align_root.remove_child(child)
+		child.queue_free()
+
+	_instance = packed.instantiate() as Node3D
+	if _instance == null:
+		push_error("AircraftView: scene '%s' has no root Node3D" % resolved)
+		return false
+	_instance.name = "Imported"
+	_align_root.add_child(_instance)
+	_current_name = ""
+	propellers = []
+	ailerons = []
+	flaps = []
+	return true
