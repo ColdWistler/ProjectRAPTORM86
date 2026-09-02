@@ -183,6 +183,7 @@ impl Environment {
             flaps,
             wind_vec.as_ref(),
             self.config.dt,
+            None,
         );
 
         self.step_count += 1;

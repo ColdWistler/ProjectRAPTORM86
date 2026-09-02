@@ -7,7 +7,7 @@
 //! model is built with its nose along local **+X** (up = +Y, right = +Z).
 
 use flight_core::{
-    nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator,
+    nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator, Terrain,
     TurbulenceIntensity, WindConfig, WindEnvironment,
 };
 use godot::builtin::{PackedFloat64Array, Transform3D, Vector2, Vector3};
@@ -94,6 +94,11 @@ struct FlightSimNode {
     /// Wing-leveler / altitude-hold assist.
     auto_level: bool,
     target_alt: f64,
+    /// Physical ground: sampled grid / analytic hills. `flat()` disables
+    /// terrain collision, ground effect and orographic wind.
+    terrain: Terrain,
+    /// Master switch; the airport runway stays flat while the rest bumps.
+    terrain_enabled: bool,
     base: Base<Node3D>,
 }
 
@@ -185,7 +190,67 @@ impl FlightSimNode {
             self.flaps_deg.to_radians(),
             Some(&wind_earth),
             dt,
+            if self.terrain_enabled {
+                Some(&self.terrain)
+            } else {
+                None
+            },
         );
+    }
+
+    /// Replace the physical ground with a sampled height grid from an imported
+    /// terrain mesh. `north0`/`east0` are the NED (north, east) coordinates of
+    /// cell (0,0), `spacing` the cell size (m), `nx`/`nz` the dimensions, and
+    /// `heights` the row-major surface altitudes in m above datum.
+    ///
+    /// The grid maps Godot world `(x, z)` to NED `(north, east)` and the world
+    /// `y` of the sampled mesh to the surface altitude.
+    #[func]
+    fn configure_terrain(
+        &mut self,
+        north0: f64,
+        east0: f64,
+        spacing: f64,
+        nx: i64,
+        nz: i64,
+        heights: PackedFloat64Array,
+    ) {
+        let nx = nx.max(2) as usize;
+        let nz = nz.max(2) as usize;
+        if (heights.len() as usize) < nx * nz {
+            godot_error!(
+                "configure_terrain: got {} heights, need {} ({}x{})",
+                heights.len(),
+                nx * nz,
+                nx,
+                nz
+            );
+            return;
+        }
+        let mut h = Vec::with_capacity(nx * nz);
+        for i in 0..nx * nz {
+            h.push(heights.get(i).unwrap_or(0.0));
+        }
+        self.terrain = Terrain::from_grid(north0, east0, spacing, nx, nz, h);
+        godot_warn!("FlightSimNode: terrain grid {nx}x{nz} @ {spacing:.1} m set");
+    }
+
+    /// Enable/disable the physical terrain (collision + ground effect +
+    /// orographic wind). Disabled = flat infinite floor, the historical mode.
+    #[func]
+    fn set_terrain_enabled(&mut self, enabled: bool) {
+        self.terrain_enabled = enabled;
+    }
+
+    /// Height of the physical terrain (m above datum) at a NED (north, east)
+    /// position. Returns 0 when terrain is flat/disabled, which also lets
+    /// callers compute AGL: `altitude - terrain_height_at(...)`.
+    #[func]
+    fn terrain_height_at(&self, north: f64, east: f64) -> f64 {
+        if !self.terrain_enabled {
+            return 0.0;
+        }
+        self.terrain.height(north, east)
     }
 
     /// Replace all control inputs in one call (angles in radians, flaps in °).

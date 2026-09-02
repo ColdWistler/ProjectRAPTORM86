@@ -17,6 +17,7 @@ var aileron := 0.0
 var rudder := 0.0
 var elevator := 0.0
 var flaps_deg := 0.0
+var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 
 var _particles: int = 0
 var _multimesh: MultiMesh = null
@@ -25,16 +26,30 @@ var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
 var _aircraft_index := 0
+var _imported_name := ""
+# Resolution for voxelizing an imported model into wind panels (edge cells,
+# powers of two). Min/max matched to the Rust voxelizer (4..=24).
+var _import_resolution := 12
 const AIRCRAFT_NAMES := ["MQI", "TwinEngine"]
+const MODEL_FILTERS := [
+	"*.glb;GLTF Binary",
+	"*.gltf;GLTF Text",
+	"*.obj;Wavefront OBJ",
+	"*.fbx;Autodesk FBX",
+]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 
+var _label: Label
+var _aircraft_menu: OptionButton
+var _res_label: Label
 @onready var _tunnel = $Physics
 @onready var _drone: Node3D = $DroneView
 @onready var _smoke: MultiMeshInstance3D = $Smoke
 @onready var _camera: Camera3D = $Camera
-@onready var _label: Label = _build_hud()
+@onready var _file_dialog: FileDialog = _build_file_dialog()
 
 func _ready() -> void:
+	_aircraft_menu = _build_hud()
 	_build_world()
 	# Use the imported GLB aircraft models rather than the procedural drone.
 	var view: Node3D = _AircraftViewScript.new()
@@ -66,6 +81,7 @@ func _ready() -> void:
 ## aero config (including the collision-shape wind interaction).
 func _load_aircraft(name: String) -> void:
 	if _tunnel.switch_aircraft(name):
+		_imported_name = ""
 		var view := _drone.get_node_or_null("Model")
 		if view:
 			view.set_model(name)
@@ -77,7 +93,105 @@ func _load_aircraft(name: String) -> void:
 		if cs and cs.shape is BoxShape3D:
 			var len := 6.0 if name == "TwinEngine" else 4.0
 			(cs.shape as BoxShape3D).size = Vector3(len, 1.6, len * 0.5)
+		engine_out = 0
 		_tunnel.reset_trails()
+
+## Import an arbitrary 3D model into the wind tunnel: normalize it onto the
+## tunnel's voxel grid, send the mesh to Rust to build its drag panels, and
+## display it. An imported model replaces the coefficient aero (pure shape
+## drag). Passing an empty/clears path reverts to the built-in aircraft.
+func _import_model(path: String) -> void:
+	var mesh_data := _extract_mesh_from_scene(path)
+	if mesh_data.is_empty():
+		push_error("WindTunnel: no triangle geometry found in '%s'" % path)
+		return
+	var verts: PackedVector3Array = mesh_data["vertices"]
+	var idxs: PackedInt32Array = mesh_data["indices"]
+	_normalize_mesh(verts)
+	var npanels: int = _tunnel.set_imported_shape(verts, idxs, _import_resolution)
+	if npanels <= 0:
+		push_error("WindTunnel: mesh valid but voxelizer produced no panels")
+		return
+
+	# Show the model visually (import root wraps it, so its own pose is used).
+	var view := _drone.get_node_or_null("Model")
+	if view:
+		view.show_imported(path)
+		_propellers = []
+		_ailerons = []
+		_flaps = []
+		_imported_name = path.get_file()
+	# Freeze the object at the origin with a representative collision shape.
+	var cs := _drone.get_node_or_null("FlowCollision") as CollisionShape3D
+	if cs and cs.shape is BoxShape3D:
+		(cs.shape as BoxShape3D).size = Vector3(7, 4, 7)
+	engine_out = 0
+	if _aircraft_menu and not _aircraft_menu.is_queued_for_deletion():
+		_aircraft_menu.select(-1)
+	_tunnel.reset_trails()
+	print("[WIND TUNNEL] imported '%s' -> %d panels @ res %d" % [path.get_file(), npanels, _import_resolution])
+
+## Flatten every MeshInstance3D under `scene_path` into a single triangle soup
+## (world-space after applying all transforms), as vertex + index arrays.
+## Returns an empty Dictionary if nothing usable is found.
+func _extract_mesh_from_scene(path: String) -> Dictionary:
+	var root: Node = null
+	if ResourceLoader.exists(path):
+		var packed := load(path)
+		root = packed.instantiate() if packed is PackedScene else null
+	if root == null:
+		return {}
+	var verts := PackedVector3Array()
+	var idxs := PackedInt32Array()
+	_collect_mesh_nodes(root, Transform3D.IDENTITY, verts, idxs)
+	root.free()
+	return {"vertices": verts, "indices": idxs}
+
+## Recursive: append all triangle geometry under `node` (world-space after
+## applying transforms) into `verts`/`idxs`.
+func _collect_mesh_nodes(node: Node, xform: Transform3D, verts: PackedVector3Array, idxs: PackedInt32Array) -> void:
+	if node is MeshInstance3D:
+		var mesh := (node as MeshInstance3D).mesh
+		if mesh is ArrayMesh:
+			var am := mesh as ArrayMesh
+			for s in am.get_surface_count():
+				var arrs := am.surface_get_arrays(s)
+				if arrs.is_empty():
+					continue
+				var v := arrs[Mesh.ARRAY_VERTEX] as PackedVector3Array
+				if v.is_empty():
+					continue
+				var ni := arrs[Mesh.ARRAY_INDEX] as PackedInt32Array
+				var base := verts.size()
+				for p in v:
+					verts.append(xform * p)
+				if ni.is_empty():
+					for q in v.size():
+						idxs.append(base + q)
+				else:
+					for qi in ni:
+						idxs.append(base + qi)
+	for c in node.get_children():
+		_collect_mesh_nodes(c, xform * c.transform, verts, idxs)
+
+## Center the mesh's bounding box on the origin and scale it to fit the tunnel
+## (~7 m across) so the voxelizer sees a consistent coordinate space.
+func _normalize_mesh(verts: PackedVector3Array) -> void:
+	if verts.is_empty():
+		return
+	var minv := verts[0]
+	var maxv := verts[0]
+	for i in verts.size():
+		minv = minv.min(verts[i])
+		maxv = maxv.max(verts[i])
+	var center := (minv + maxv) * 0.5
+	var ext := maxv - minv
+	var size := maxf(maxf(ext.x, ext.y), ext.z)
+	if size < 0.001:
+		size = 1.0
+	var scale := 7.0 / size
+	for i in verts.size():
+		verts[i] = (verts[i] - center) * scale
 
 func _build_world() -> void:
 	var we := WorldEnvironment.new()
@@ -105,23 +219,106 @@ func _build_world() -> void:
 	floor.position = Vector3(0, -12, 0)
 	add_child(floor)
 
-func _build_hud() -> Label:
+## Build the HUD: a top panel with the aircraft drop-down + import button and
+## below it the telemetry label. Returns the aircraft `OptionButton`.
+func _build_hud() -> OptionButton:
 	var hud := CanvasLayer.new()
 	hud.name = "HUDCanvas"
 	add_child(hud)
+
+	var box := VBoxContainer.new()
+	box.position = Vector2(12, 12)
+	box.add_theme_constant_override("separation", 10)
+	hud.add_child(box)
+
+	# --- Row: aircraft selector + import button -------------------------------
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
 	var panel := PanelContainer.new()
 	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.02, 0.05, 0.09, 0.88)
+	style.bg_color = Color(0.02, 0.05, 0.09, 0.9)
 	style.set_corner_radius_all(6)
-	style.set_content_margin_all(12)
+	style.set_content_margin_all(8)
 	panel.add_theme_stylebox_override("panel", style)
-	panel.position = Vector2(12, 12)
-	hud.add_child(panel)
+	row.add_child(panel)
+	box.add_child(row)
+
+	var row_box := VBoxContainer.new()
+	panel.add_child(row_box)
+	var row_h := HBoxContainer.new()
+	row_box.add_child(row_h)
+
+	var menu := OptionButton.new()
+	menu.add_theme_font_size_override("font_size", 14)
+	for name in AIRCRAFT_NAMES:
+		menu.add_item(name)
+	menu.selected = _aircraft_index
+	menu.custom_minimum_size = Vector2(140, 0)
+	menu.item_selected.connect(_on_aircraft_selected)
+	row_h.add_child(menu)
+
+	var import_btn := Button.new()
+	import_btn.text = "Import Model..."
+	import_btn.add_theme_font_size_override("font_size", 14)
+	import_btn.pressed.connect(_on_import_pressed)
+	row_h.add_child(import_btn)
+
+	var res_label := Label.new()
+	res_label.text = "Res: %d" % _import_resolution
+	res_label.add_theme_font_size_override("font_size", 13)
+	row_h.add_child(res_label)
+	_res_label = res_label
+	var res_minus := Button.new()
+	res_minus.text = "-"
+	res_minus.add_theme_font_size_override("font_size", 13)
+	res_minus.pressed.connect(_on_res_pressed.bind(false))
+	row_h.add_child(res_minus)
+	var res_plus := Button.new()
+	res_plus.text = "+"
+	res_plus.add_theme_font_size_override("font_size", 13)
+	res_plus.pressed.connect(_on_res_pressed.bind(true))
+	row_h.add_child(res_plus)
+
+	# --- Telemetry panel ------------------------------------------------------
 	var label := Label.new()
 	label.add_theme_font_size_override("font_size", 14)
 	label.text = "Initializing flow field..."
-	panel.add_child(label)
-	return label
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	label.add_theme_constant_override("outline_size", 4)
+	box.add_child(label)
+	_label = label
+	return menu
+
+func _build_file_dialog() -> FileDialog:
+	var fd := FileDialog.new()
+	fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	fd.title = "Import 3D model"
+	fd.access = FileDialog.ACCESS_FILESYSTEM
+	fd.filters = MODEL_FILTERS
+	fd.file_selected.connect(_on_import_file_selected)
+	# Wrap in a CanvasLayer so it shows above the 3D viewport.
+	var layer := CanvasLayer.new()
+	layer.name = "FileDialogLayer"
+	layer.layer = 20
+	add_child(layer)
+	layer.add_child(fd)
+	return fd
+
+func _on_aircraft_selected(index: int) -> void:
+	_aircraft_index = index
+	_load_aircraft(AIRCRAFT_NAMES[index])
+
+func _on_import_pressed() -> void:
+	_file_dialog.popup_centered_ratio(0.6)
+
+func _on_import_file_selected(path: String) -> void:
+	_import_model(path)
+
+func _on_res_pressed(increase: bool) -> void:
+	var step := 2
+	_import_resolution = clampi(_import_resolution + step if increase else _import_resolution - step, 4, 24)
+	if _res_label and is_instance_valid(_res_label):
+		_res_label.text = "Res: %d" % _import_resolution
 
 func _build_smoke_mesh() -> void:
 	_particles = int(_tunnel.particle_count())
@@ -205,6 +402,8 @@ func _apply_settings() -> void:
 	_tunnel.set_attitude(pitch_deg, roll_deg, yaw_deg)
 	_tunnel.set_controls(aileron, rudder, elevator)
 	_tunnel.set_flaps_deg(flaps_deg)
+	_tunnel.set_throttle(engine_throttle())
+	_tunnel.set_throttle_split(float(engine_out_side()))
 
 ## Keep the MultiMesh in step with the Rust particle pool size.
 func _ensure_smoke_size() -> void:
@@ -294,10 +493,13 @@ func _process(delta: float) -> void:
 		rudder = 0.0
 		elevator = 0.0
 		flaps_deg = 0.0
+		engine_out = 0
 		_tunnel.reset_trails()
 	if _just_pressed(KEY_M):
 		_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
 		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+	if _just_pressed(KEY_G):
+		engine_out = (engine_out + 1) % 3
 	if _just_pressed(KEY_ESCAPE):
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
@@ -305,6 +507,18 @@ var _held := {}
 
 func _just_pressed(key: Key) -> bool:
 	return Input.is_key_pressed(key) and not _held.get(key, false)
+
+## The tunnel holds the aircraft fixed in the flow, so the engines run at a
+## fixed full throttle to make the thrust-line and asymmetric-engine moments
+## (engine-out) visible on the aero HUD.
+func engine_throttle() -> float:
+	return 1.0
+
+## Map the engine-out state to a throttle-split for the twin physics:
+## -1 = left engine out, 0 = both running, +1 = right engine out.
+## Has no effect on the single-engine aircraft (MQI).
+func engine_out_side() -> int:
+	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
@@ -317,12 +531,22 @@ func _update_hud() -> void:
 	var a: PackedFloat64Array = _tunnel.get_aero()
 	var mag: PackedFloat64Array = _tunnel.get_aero_magnitudes()
 	var has_aero: bool = _tunnel.has_aero()
+	var engine_str := "BOTH RUNNING"
+	if engine_out == 1:
+		engine_str = "LEFT ENGINE OUT [G]"
+	elif engine_out == 2:
+		engine_str = "RIGHT ENGINE OUT [G]"
 	var aero_txt := "computing..."
 	if has_aero:
 		aero_txt = "Lift:  %7.0f N\nDrag:  %7.0f N\nSide:  %7.0f N\nRoll M:  %+6.0f Nm\nPitch M: %+6.0f Nm\nYaw M:   %+6.0f Nm\nCL:      %+5.2f" % [mag[0], mag[1], mag[2], a[3], a[4], a[5], a[6]]
+		if _tunnel.is_imported_shape():
+			var ia: PackedFloat64Array = _tunnel.get_imported_aero()
+			aero_txt += "\n\nImported drag model (realistic):\nCd(ref frontal): %5.2f\nRe:             %8.1e\nFrontal area:   %5.2f m2\nWetted area:    %5.2f m2" % [ia[0], ia[1], ia[2], ia[3]]
+	var aircraft_str := _imported_name if _imported_name != "" else ("%s (built-in)" % AIRCRAFT_NAMES[_aircraft_index])
 	_label.text = """WIND TUNNEL
 -----------------------------
-Aircraft:    %s (press [M])
+Model:       %s
+Import res:  %d (voxel)
 Wind speed:  %5.1f m/s
 Wind dir:    %5.0f deg
 Pitch:       %5.1f deg
@@ -331,23 +555,30 @@ Yaw (beta):  %5.1f deg
 Aileron:     %+4.1f deg
 Rudder:      %+4.1f deg
 Flaps:       %3.0f deg
+Engines:     %s
 -----------------------------
 %s
 
-CONTROLS
+METHODS
 -----------------------------
-Pitch:      [W] / [S]
-Yaw:        [A] / [D]
-Roll:       [Up] / [Down]
-Aileron:    [Q] / [E]
-Rudder:     [Z] / [C]
-Flaps:      [F] cycle
-Wind speed: [Shift] / [Ctrl]
-Wind dir:   [R] / [T]
-Reset:      [Space]
-Menu:       [Esc]
-Camera:     [Left-drag] / [Scroll]""" % [
-		AIRCRAFT_NAMES[_aircraft_index],
+Aircraft:    [M] or dropdown
+Import:      "Import Model..." button
+Resolution:  [-] / [+] buttons
+Pitch:       [W] / [S]
+Yaw:         [A] / [D]
+Roll:        [Up] / [Down]
+Aileron:     [Q] / [E]
+Rudder:      [Z] / [C]
+Flaps:       [F] cycle
+Engine:      [G] both -> left out -> right out
+Wind speed:  [Shift] / [Ctrl]
+Wind dir:    [R] / [T]
+Reset:       [Space]
+Menu:        [Esc]
+Camera:      [Left-drag] / [Scroll]""" % [
+		aircraft_str,
+		_import_resolution,
 		s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+		engine_str,
 		aero_txt,
 	]

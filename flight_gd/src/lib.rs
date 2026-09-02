@@ -11,6 +11,7 @@
 
 mod sim;
 mod tunnel;
+mod voxel;
 
 use godot::prelude::*;
 
