@@ -21,7 +21,7 @@ pub use config::AircraftConfig;
 pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
 pub use nalgebra;
 pub use state::AircraftState;
-pub use terrain::{Terrain, TerrainHill};
+pub use terrain::{Terrain, TerrainGrid, TerrainHill};
 pub use wind::{TurbulenceIntensity, WindConfig, WindEnvironment};
 
 use crate::config::load_config;
@@ -730,6 +730,43 @@ cd0: 0.025,
     }
 
     #[test]
+    fn grid_terrain_collision_stops_descent_on_a_ridge() {
+        // A 300 m ridge running along east (j axis) at cells with i == 3.
+        let nx = 7;
+        let nz = 5;
+        let mut heights: Vec<f64> = vec![0.0; nx * nz];
+        for j in 0..nz {
+            heights[3 + j * nx] = 300.0;
+        }
+        let auth = Terrain::from_grid(-3000.0, -2000.0, 1000.0, nx, nz, heights);
+
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.pos_x = 0.0; // north between cells 3 -> 3*1000-3000 = 0 ... 1000
+        state.pos_y = 0.0;
+        state.pos_z = -310.0; // 10 m above the 300 m ridge
+        state.w = 40.0;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+
+        let ground_ned = -auth.height(state.pos_x, state.pos_y);
+        assert!(
+            (state.pos_z - ground_ned).abs() < 1.0,
+            "aircraft did not rest on the grid ridge: pos_z {:.1} vs ground {:.1}",
+            state.pos_z,
+            ground_ned
+        );
+        assert!(
+            state.pos_z < 0.0,
+            "grid terrain should hold the aircraft above sea level (pos_z {:.1})",
+            state.pos_z
+        );
+    }
+
+    #[test]
     fn ground_effect_boosts_lift_near_the_surface() {
         let config = aircraft_default();
         let auth = Terrain::from_hills(vec![TerrainHill {
@@ -778,6 +815,62 @@ cd0: 0.025,
         assert!(
             rel < 0.002,
             "3·b above ground should have ~no ground effect (Δ {rel:.4} of weight)"
+        );
+    }
+
+    #[test]
+    fn flat_terrain_keeps_historical_sea_level_floor() {
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.pos_z = 10.0; // 10 m *below* the datum (pos_z>0)
+        state.w = 10.0;
+
+        let dt = 1.0 / 120.0;
+        let auth = Terrain::flat();
+        for _ in 0..20 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+        assert!(
+            state.pos_z <= 0.0,
+            "flat terrain must clamp at sea level, got pos_z {:.1}",
+            state.pos_z
+        );
+    }
+
+    #[test]
+    fn grid_terrain_collision_stops_descent_on_a_ridge() {
+        // A 300 m ridge running along east (j axis) at cells with i == 3.
+        let nx = 7;
+        let nz = 5;
+        let mut heights: Vec<f64> = vec![0.0; nx * nz];
+        for j in 0..nz {
+            heights[3 + j * nx] = 300.0;
+        }
+        let auth = Terrain::from_grid(-3000.0, -2000.0, 1000.0, nx, nz, heights);
+
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.pos_x = 0.0; // north between cells 3 -> 3*1000-3000 = 0 ... 1000
+        state.pos_y = 0.0;
+        state.pos_z = -310.0; // 10 m above the 300 m ridge
+        state.w = 40.0;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            step(&mut state, &config, 0.0, 0.0, 0.0, 0.0, 0.0, None, dt, Some(&auth));
+        }
+
+        let ground_ned = -auth.height(state.pos_x, state.pos_y);
+        assert!(
+            (state.pos_z - ground_ned).abs() < 1.0,
+            "aircraft did not rest on the grid ridge: pos_z {:.1} vs ground {:.1}",
+            state.pos_z,
+            ground_ned
+        );
+        assert!(
+            state.pos_z < 0.0,
+            "grid terrain should hold the aircraft above sea level (pos_z {:.1})",
+            state.pos_z
         );
     }
 
