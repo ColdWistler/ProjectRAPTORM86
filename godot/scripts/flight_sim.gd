@@ -54,6 +54,9 @@ func _ready() -> void:
 		elevator = 0.0
 		elevator_trim = tr.x
 		throttle = clampf(tr.y, 0.0, 1.0)
+		# Sample the imported terrain mesh once the scene tree settles; the
+		# physics keeps its flat default until the grid arrives.
+		_sample_terrain_grid.call_deferred()
 
 	# Use the imported GLB aircraft models rather than the procedural drone.
 	var view: Node3D = _AircraftViewScript.new()
@@ -86,6 +89,92 @@ func _load_aircraft(name: String) -> void:
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
 		engine_out = 0
+
+## Sample the imported terrain mesh into a uniform height grid and hand it to
+## the Rust physics so the mountains are the real ground (collision + ground
+## effect + orographic wind). Godot world (x, z) maps to NED (north, east) and
+## world y is the surface altitude, matching `FlightSimNode`.
+func _sample_terrain_grid() -> void:
+	var root := get_node_or_null("Sketchfab_Scene")
+	if root == null:
+		push_warning("terrain: no Sketchfab_Scene node to sample")
+		return
+	var meshes: Array = []
+	_collect_meshes(root, meshes)
+	if meshes.is_empty():
+		push_warning("terrain: no mesh instances found")
+		return
+
+	# Pass 1: world-space bounding box of the (north=x, east=z) extent.
+	var minx := INF
+	var maxx := -INF
+	var minz := INF
+	var maxz := -INF
+	for mi: MeshInstance3D in meshes:
+		var tf: Transform3D = mi.global_transform
+		var mesh: Mesh = mi.mesh
+		for s in mesh.get_surface_count():
+			var verts: PackedVector3Array = mesh.surface_get_arrays(s)[Mesh.ARRAY_VERTEX]
+			for v in verts:
+				var w := tf * v
+				minx = minf(minx, w.x)
+				maxx = maxf(maxx, w.x)
+				minz = minf(minz, w.z)
+				maxz = maxf(maxz, w.z)
+	if not (minx < maxx and minz < maxz):
+		push_warning("terrain: degenerate bounds")
+		return
+
+	# Grid: fixed 64 m cells; cap resolution so the grid stays cheap.
+	var spacing := 64.0
+	var nx := clampi(ceili((maxx - minx) / spacing), 8, 512)
+	var nz := clampi(ceili((maxz - minz) / spacing), 8, 512)
+	var heights := PackedFloat64Array()
+	heights.resize(nx * nz)
+	heights.fill(-INF)
+	var miny := INF
+	var maxy := -INF
+
+	# Pass 2: accumulate the highest vertex per cell (keeps the aircraft from
+	# "tunnelling" through any peak even for a coarse grid).
+	for mi: MeshInstance3D in meshes:
+		var tf: Transform3D = mi.global_transform
+		var mesh: Mesh = mi.mesh
+		for s in mesh.get_surface_count():
+			var verts: PackedVector3Array = mesh.surface_get_arrays(s)[Mesh.ARRAY_VERTEX]
+			for v in verts:
+				var w := tf * v
+				miny = minf(miny, w.y)
+				maxy = maxf(maxy, w.y)
+				var ix := int(floor((w.x - minx) / spacing))
+				var iz := int(floor((w.z - minz) / spacing))
+				ix = clampi(ix, 0, nx - 1)
+				iz = clampi(iz, 0, nz - 1)
+				var idx := iz * nx + ix
+				if w.y > heights[idx]:
+					heights[idx] = w.y
+
+	# Fill any empty cells with the datum, then carve a flat apron around the
+	# runway (the 1000 x 42 m strip at the world origin).
+	for i in nx * nz:
+		if heights[i] == -INF:
+			heights[i] = 0.0
+	for iz in nz:
+		for ix in nx:
+			var north := minx + ix * spacing
+			var east := minz + iz * spacing
+			if absf(north) < 650.0 and absf(east) < 90.0:
+				heights[iz * nx + ix] = 0.0
+
+	_physics.configure_terrain(minx, minz, spacing, nx, nz, heights)
+	_physics.set_terrain_enabled(true)
+	print("terrain grid configured: ", nx, "x", nz, " @ ", spacing, " m (", minx, "..", maxx, " , ", minz, "..", maxz, " , y ", miny, "..", maxy, " m)")
+
+func _collect_meshes(n: Node, out: Array) -> void:
+	if n is MeshInstance3D:
+		out.append(n)
+	for c in n.get_children():
+		_collect_meshes(c, out)
 
 ## Build the on-screen HUD (telemetry panel + aircraft-swap button).
 func _build_hud() -> Label:
