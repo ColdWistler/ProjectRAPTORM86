@@ -531,6 +531,15 @@ func _update_hud() -> void:
 	var a: PackedFloat64Array = _tunnel.get_aero()
 	var mag: PackedFloat64Array = _tunnel.get_aero_magnitudes()
 	var has_aero: bool = _tunnel.has_aero()
+	# VLM diagnostics: spanwise circulation distribution
+	var vlm_gamma: PackedFloat32Array = _tunnel.get_vlm_gamma()
+	var vlm_str := ""
+	if vlm_gamma.size() >= 4:
+		# Report root circulation and total peak
+		var peak := 0.0
+		for i in range(1, vlm_gamma.size(), 2):
+			peak = maxf(peak, absf(vlm_gamma[i]))
+		vlm_str = "VLM spanwise circulation:\npeak Γ = %.1f m²/s\n%d panels" % [peak, vlm_gamma.size() / 2]
 	var engine_str := "BOTH RUNNING"
 	if engine_out == 1:
 		engine_str = "LEFT ENGINE OUT [G]"
@@ -543,6 +552,7 @@ func _update_hud() -> void:
 			var ia: PackedFloat64Array = _tunnel.get_imported_aero()
 			aero_txt += "\n\nImported drag model (realistic):\nCd(ref frontal): %5.2f\nRe:             %8.1e\nFrontal area:   %5.2f m2\nWetted area:    %5.2f m2" % [ia[0], ia[1], ia[2], ia[3]]
 	var aircraft_str := _imported_name if _imported_name != "" else ("%s (built-in)" % AIRCRAFT_NAMES[_aircraft_index])
+	var vlm_txt := vlm_str if not _tunnel.is_imported_shape() else ""
 	_label.text = """WIND TUNNEL
 -----------------------------
 Model:       %s
@@ -558,7 +568,7 @@ Flaps:       %3.0f deg
 Engines:     %s
 -----------------------------
 %s
-
+%s
 METHODS
 -----------------------------
 Aircraft:    [M] or dropdown
@@ -581,4 +591,5 @@ Camera:      [Left-drag] / [Scroll]""" % [
 		s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
 		engine_str,
 		aero_txt,
+		vlm_txt,
 	]
