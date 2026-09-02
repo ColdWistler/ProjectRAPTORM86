@@ -8,7 +8,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::aero::{compute_forces_with_terrain, compute_moments};
+use crate::aero::{compute_forces_with_terrain, compute_moments_with_terrain};
 use crate::config::AircraftConfig;
 use crate::shape::compute_shape_wind;
 use crate::state::AircraftState;
@@ -139,8 +139,18 @@ fn derivatives(
     let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
-    let mut moments =
-        compute_moments(&aircraft, config, elevator, aileron, rudder, throttle, alpha_dot, flap, wind_earth);
+    let mut moments = compute_moments_with_terrain(
+        &aircraft,
+        config,
+        elevator,
+        aileron,
+        rudder,
+        throttle,
+        alpha_dot,
+        flap,
+        wind_earth,
+        terrain,
+    );
     moments += shape_moment;
     let ixx = config.ixx;
     let iyy = config.iyy;

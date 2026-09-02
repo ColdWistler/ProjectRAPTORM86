@@ -149,20 +149,23 @@ fn engine_forces_moments(
 
 // --- Ground effect (WIG / altitude-in-ground-effect) -------------------------
 
-/// Ground-effect factor `σ ∈ [0, 1)` from the classic height-to-span ratio:
+/// Ground-effect factor `σ ∈ [0, 1]` from the height-to-span ratio.
 ///
 /// ```text
-/// σ = 1 / (1 + (16·h/b)²)
+/// σ = 1 / (1 + (4·h/b)²)
 /// ```
 ///
 /// `h` is the altitude above the ground surface and `b` the wing span, both in
-/// metres. `σ → 1` at the surface (full ground effect) and `σ → 0` beyond a
-/// span or two, so the influence fades rapidly with height.
+/// metres. This is the canonical ratio of the induced-downwash retained in
+/// ground effect: σ = 0.5 at a quarter span (`h = b/4`), fading to under 10%
+/// by one span. Unlike an aggressive 16·h/b law, the cushion builds smoothly
+/// through the flare instead of snapping on only in the final metres.
 ///
 /// Returns the factor; pass it into [`ground_effect_factors`] to scale the
 /// lift and induced drag coefficients.
 pub fn ground_effect_factor(altitude_above_ground: f64, wing_span: f64) -> f64 {
-    let x = 16.0 * (altitude_above_ground / wing_span.max(1e-6));
+    let h = altitude_above_ground.max(0.0);
+    let x = 4.0 * (h / wing_span.max(1e-6));
     1.0 / (1.0 + x * x)
 }
 
@@ -170,14 +173,15 @@ pub fn ground_effect_factor(altitude_above_ground: f64, wing_span: f64) -> f64 {
 /// these factors when the aircraft is in ground effect. Mapped from the raw
 /// [`ground_effect_factor`]:
 ///
-/// * `cl_mult`   — ground effect increases the lift-curve slope / effective
-///   lift (~+30% max at the surface).
+/// * `cl_mult`   — ground effect raises the effective lift (~+10% max at the
+///   surface), enough to cushion the flare but not to hold the aircraft off
+///   the deck; it still has to settle.
 /// * `cd_induced_mult` — wingtip vortices are suppressed by the ground, so
-///   induced drag falls (up to ~−40% at the surface).
+///   induced drag falls (up to ~−30% at the surface).
 pub fn ground_effect_factors(altitude_above_ground: f64, wing_span: f64) -> (f64, f64) {
     let ge = ground_effect_factor(altitude_above_ground, wing_span);
-    let cl_mult = 1.0 + 0.30 * ge;
-    let cd_induced_mult = 1.0 - 0.40 * ge;
+    let cl_mult = 1.0 + 0.10 * ge;
+    let cd_induced_mult = 1.0 - 0.30 * ge;
     (cl_mult, cd_induced_mult)
 }
 
@@ -398,6 +402,67 @@ pub fn compute_moments(
     flap_deflection: f64,
     wind_earth: &Vector3<f64>,
 ) -> Vector3<f64> {
+    compute_moments_impl(
+        state,
+        config,
+        elevator_deflection,
+        aileron_deflection,
+        rudder_deflection,
+        throttle,
+        alpha_dot,
+        flap_deflection,
+        wind_earth,
+        None,
+    )
+}
+
+/// `compute_moments` with the optional terrain ground-effect pitching moment.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_moments_with_terrain(
+    state: &AircraftState,
+    config: &AircraftConfig,
+    elevator_deflection: f64,
+    aileron_deflection: f64,
+    rudder_deflection: f64,
+    throttle: f64,
+    alpha_dot: f64,
+    flap_deflection: f64,
+    wind_earth: &Vector3<f64>,
+    terrain: Option<&Terrain>,
+) -> Vector3<f64> {
+    compute_moments_impl(
+        state,
+        config,
+        elevator_deflection,
+        aileron_deflection,
+        rudder_deflection,
+        throttle,
+        alpha_dot,
+        flap_deflection,
+        wind_earth,
+        terrain,
+    )
+}
+
+/// Nose-down pitch tendency in ground effect, as Cm at full effect (σ = 1).
+/// The damped wing downwash in ground effect shifts the trim nose-down, so the
+/// pilot feels a gentle flare hand-back pressure and the aircraft settles
+/// instead of hovering pinned on a level "cushion road".
+const GE_PITCH_CM: f64 = -0.015;
+
+#[allow(clippy::too_many_arguments)]
+fn compute_moments_impl(
+    state: &AircraftState,
+    config: &AircraftConfig,
+    elevator_deflection: f64,
+    aileron_deflection: f64,
+    rudder_deflection: f64,
+    throttle: f64,
+    alpha_dot: f64,
+    flap_deflection: f64,
+    wind_earth: &Vector3<f64>,
+    terrain: Option<&Terrain>,
+) -> Vector3<f64> {
     // --- Air-relative velocity: the aero acts on the relative wind. ---
     let v_air = state.air_velocity(wind_earth);
     let v_tas = v_air.norm();
@@ -492,7 +557,13 @@ pub fn compute_moments(
         + config.cm_adot * alpha_dot_hat
         + config.cme * elevator_deflection
         + config.cm_flap * flap
-        + stall_pitch_break;
+        + stall_pitch_break
+        // Ground-effect pitch: the reduced downwash near the ground shifts
+        // trim nose-down, giving the flare a faint nose-drop to hold against.
+        + GE_PITCH_CM * terrain.map_or(0.0, |t| {
+            let agl = t.altitude_above_ground(state.pos_x, state.pos_y, altitude);
+            ground_effect_factor(agl, config.wing_span)
+        });
     let cm = cm_core * pitch_sense + spiral_nose_drop * spiral_sense;
     // Thrust line offset from CG produces a pitching moment proportional to
     // thrust; its body-Z arm also reverses when inverted. This (plus the twin
