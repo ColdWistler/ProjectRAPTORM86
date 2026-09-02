@@ -94,7 +94,10 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aero::{compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments};
+    use crate::aero::{
+    compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments,
+    ground_effect_factor,
+};
     use crate::integrator::step;
     use nalgebra::Vector3;
 
@@ -736,31 +739,44 @@ cd0: 0.025,
         }]);
         let zero = Vector3::zeros();
 
-        // Same attitude/velocity, once right at the surface (AGL≈0) and once at
-        // 3 spans up. Everything else identical, so only ground effect differs.
+        // Start from a trimmed level-flight state (net vertical force ~0) and
+        // park it at the surface / 3 spans up. Terrain is the SAME peak, so the
+        // two states differ only in their distance above it.
         let mut low = AircraftState::default();
         low.pos_x = 0.0;
         low.pos_y = 0.0;
-        low.pos_z = -50.0; // AGL≈0
-        let mut high = low.clone();
-        high.pos_z -= 3.0 * config.wing_span;
-
-        let f_low = compute_forces_with_terrain(&low, &config, 0.0, 0.0, 0.0, 0.0, 0.0, &zero, Some(&auth));
-        let f_high = compute_forces_with_terrain(&high, &config, 0.0, 0.0, 0.0, 0.0, 0.0, &zero, Some(&auth));
-        let f_ref = compute_forces(&high, &config, 0.0, 0.0, 0.0, 0.0, 0.0, &zero);
-
-        // Lift points up in body -Z; ground effect must raise its magnitude.
-        let lift_low = -f_low.z;
-        let lift_high = -f_high.z;
-        let lift_ref = -f_ref.z;
-        assert!(
-            lift_low > lift_high,
-            "ground effect should increase lift: AGL~0 gave {lift_low:.1} N, 3·b gave {lift_high:.1} N"
+        low.trim_level_flight(&config, 51.0, 60.0); // 1 m over the 50 m peak
+        let ge_low = ground_effect_factor(
+            auth.altitude_above_ground(0.0, 0.0, low.altitude()),
+            config.wing_span,
         );
+
+        let mut high = low.clone();
+        high.pos_z -= 3.0 * config.wing_span; // 3*span above the surface
+        let ge_high = ground_effect_factor(
+            auth.altitude_above_ground(0.0, 0.0, high.altitude()),
+            config.wing_span,
+        );
+
+        let f_low = compute_forces_with_terrain(&low, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero, Some(&auth));
+        let f_high = compute_forces_with_terrain(&high, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero, Some(&auth));
+        let f_ref = compute_forces(&high, &config, 0.0, 0.0, 0.0, 0.5, 0.0, &zero);
+
+        // Body -Z is up: ground effect must raise the upward lift near the
+        // surface, so f_low.z < f_high.z (both ~ = +/- gravity balance).
+        assert!(ge_low > 0.5 && ge_high < 0.01, "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}");
         assert!(
-            (lift_high - lift_ref).abs() < lift_ref * 0.02,
-            "3·b above ground should have no ground effect (off {:.3}%)",
-            (lift_high - lift_ref).abs() / lift_ref * 100.0
+            f_low.z < f_high.z,
+            "ground effect should add lift: AGL~0 gave z {:.1}, 3·b gave z {:.1}",
+            f_low.z,
+            f_high.z
+        );
+        // 3 spans up the effect is negligible: the terrain force must match the
+        // flat-ground reference to within a fraction of a percent.
+        let rel = ((f_high.z - f_ref.z) / f_high.z.abs()).abs();
+        assert!(
+            rel < 0.005,
+            "3·b above ground should have ~no ground effect (rel diff {rel:.3e})"
         );
     }
 
@@ -776,10 +792,12 @@ cd0: 0.025,
         }]);
 
         // Just north of the datum (south of the peak), the slope climbs north.
+        // The ground surface here is ~54 m ASL (Gaussian at 2 sigma), so fly at
+        // 100 m to stay in the air while the decay term still bites.
         let north = 0.0;
         let east = 0.0;
         let wind = Vector3::new(10.0, 0.0, 0.0); // 10 m/s north
-        let orog = auth.orographic_wind(&wind, north, east, 50.0, 300.0);
+        let orog = auth.orographic_wind(&wind, north, east, 100.0, 300.0);
 
         assert!(
             orog.z < 0.0,
@@ -789,7 +807,7 @@ cd0: 0.025,
 
         // A wind blowing *south* down the same slope is a downdraft (NED z>0).
         let wind_south = Vector3::new(-10.0, 0.0, 0.0);
-        let orog_south = auth.orographic_wind(&wind_south, north, east, 50.0, 300.0);
+        let orog_south = auth.orographic_wind(&wind_south, north, east, 100.0, 300.0);
         assert!(
             orog_south.z > 0.0,
             "leeward/downwind side must push air down (NED z>0), got {:.3}",

@@ -310,12 +310,7 @@ fn compute_forces_impl(
     let (cl_mult, cd_ind_mult) = match terrain {
         Some(t) => {
             let agl = t.altitude_above_ground(state.pos_x, state.pos_y, altitude);
-            let f = ground_effect_factors(agl, config.wing_span);
-            eprintln!(
-                "[GE] agl={agl:.2} cl_mult={:.3} cd_ind_mult={:.3}",
-                f.0, f.1
-            );
-            f
+            ground_effect_factors(agl, config.wing_span)
         }
         None => (1.0, 1.0),
     };
