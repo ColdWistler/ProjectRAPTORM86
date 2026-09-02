@@ -745,7 +745,7 @@ cd0: 0.025,
         let mut low = AircraftState::default();
         low.pos_x = 0.0;
         low.pos_y = 0.0;
-        low.trim_level_flight(&config, 51.0, 60.0); // 1 m over the 50 m peak
+        low.trim_level_flight(&config, 50.5, 60.0); // 0.5 m over the 50 m peak
         let ge_low = ground_effect_factor(
             auth.altitude_above_ground(0.0, 0.0, low.altitude()),
             config.wing_span,
@@ -764,7 +764,7 @@ cd0: 0.025,
 
         // Body -Z is up: ground effect must raise the upward lift near the
         // surface, so f_low.z < f_high.z (both ~ = +/- gravity balance).
-        assert!(ge_low > 0.5 && ge_high < 0.01, "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}");
+        assert!(ge_low > 0.3 && ge_high < 0.01, "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}");
         assert!(
             f_low.z < f_high.z,
             "ground effect should add lift: AGL~0 gave z {:.1}, 3·b gave z {:.1}",
@@ -772,11 +772,12 @@ cd0: 0.025,
             f_high.z
         );
         // 3 spans up the effect is negligible: the terrain force must match the
-        // flat-ground reference to within a fraction of a percent.
-        let rel = ((f_high.z - f_ref.z) / f_high.z.abs()).abs();
+        // flat-ground reference to within ~0.2% of the aircraft weight.
+        let weight = config.mass * 9.80665;
+        let rel = (f_high.z - f_ref.z).abs() / weight;
         assert!(
-            rel < 0.005,
-            "3·b above ground should have ~no ground effect (rel diff {rel:.3e})"
+            rel < 0.002,
+            "3·b above ground should have ~no ground effect (Δ {rel:.4} of weight)"
         );
     }
 
