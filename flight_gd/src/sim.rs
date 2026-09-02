@@ -185,6 +185,7 @@ impl FlightSimNode {
             self.flaps_deg.to_radians(),
             Some(&wind_earth),
             dt,
+            None,
         );
     }
 
