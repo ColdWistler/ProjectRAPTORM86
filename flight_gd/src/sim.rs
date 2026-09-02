@@ -7,7 +7,7 @@
 //! model is built with its nose along local **+X** (up = +Y, right = +Z).
 
 use flight_core::{
-    nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator,
+    nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator, Terrain,
     TurbulenceIntensity, WindConfig, WindEnvironment,
 };
 use godot::builtin::{PackedFloat64Array, Transform3D, Vector2, Vector3};
@@ -94,6 +94,11 @@ struct FlightSimNode {
     /// Wing-leveler / altitude-hold assist.
     auto_level: bool,
     target_alt: f64,
+    /// Physical ground: sampled grid / analytic hills. `flat()` disables
+    /// terrain collision, ground effect and orographic wind.
+    terrain: Terrain,
+    /// Master switch; the airport runway stays flat while the rest bumps.
+    terrain_enabled: bool,
     base: Base<Node3D>,
 }
 
