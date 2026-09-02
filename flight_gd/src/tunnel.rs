@@ -14,14 +14,16 @@
 //! `FlightSimNode`.
 
 use flight_core::aero::compute_forces_moments;
+use flight_core::config::CollisionPanel;
 use flight_core::nalgebra::Vector3 as NVec3;
-use flight_core::shape::compute_shape_wind;
+use flight_core::shape::{compute_imported_shape_wind, compute_shape_wind, ImportedAero};
 use flight_core::{AircraftConfig, AircraftState};
-use godot::builtin::{PackedFloat32Array, PackedFloat64Array, Transform3D, Vector3};
+use godot::builtin::{PackedFloat32Array, PackedFloat64Array, PackedVector3Array, Transform3D, Vector3};
 use godot::classes::Node3D;
 use godot::prelude::*;
 
 use crate::sim::origin_and_basis;
+use crate::voxel::{mesh_metrics, voxelize_panels};
 
 // --- Smoke-rake geometry ----------------------------------------------------
 /// Front rake rows across height (Y). The rows deliberately ENVELOPE the whole
@@ -99,6 +101,22 @@ struct WindTunnelNode {
     aileron: f32,
     rudder: f32,
     elevator: f32,
+    /// Master throttle (0..=1); the engine-forces term stays meaningful in the
+    /// tunnel so asymmetric-thrust / engine-out moments can be visualized.
+    throttle: f64,
+    /// Runtime engine split (-1..=1) applied to the twin: 0 = both engines,
+    /// -1 = left out, +1 = right out. Mirrors `FlightSimNode.set_throttle_split`.
+    throttle_split: f64,
+    /// Flat-plate panels of an *arbitrary* imported 3D model (voxelized hull).
+    /// When non-empty, these replace the per-aircraft `collision_panels` and
+    /// the aero becomes a pure pressure-drag body (no lift coefficients).
+    imported_panels: Vec<CollisionPanel>,
+    /// Realistic drag diagnostics from the last imported-shape computation.
+    imported_aero: ImportedAero,
+    /// Resolution-independent geometry metrics of the imported mesh.
+    imported_wetted: f64,
+    imported_frontal: f64,
+    imported_len: f64,
     /// Flap deflection (degrees).
     flaps_deg: f32,
     /// Free air "molecule" seeds: small particles advected through the flow
@@ -272,6 +290,70 @@ impl WindTunnelNode {
         self.flaps_deg = degrees;
     }
 
+    /// Set the master throttle (0..=1). Unlike the free-flying sim the tunnel
+    /// holds the aircraft fixed, so throttle mainly drives the thrust-line and
+    /// asymmetric-engine moments; it is exposed for parity with `FlightSimNode`.
+    #[func]
+    fn set_throttle(&mut self, throttle: f64) {
+        self.throttle = throttle.clamp(0.0, 1.0);
+    }
+
+    /// Set the engine split for the twin/turboprop layout:
+    /// 0 = both engines, -1 = left engine out, +1 = right engine out.
+    #[func]
+    fn set_throttle_split(&mut self, split: f64) {
+        self.throttle_split = split.clamp(-1.0, 1.0);
+    }
+
+    /// Import an *arbitrary* 3D model as the wind-body. `vertices` and
+    /// `indices` are a triangle soup in the body frame (already centred at the
+    /// origin and scaled); the mesh is voxelized into flat-plate panels that
+    /// replace the aerofoil model, so the tunnel reports pure pressure drag
+    /// and centre-of-pressure moments. Returns the number of panels built.
+    /// Pass an empty mesh to clear the import and return to the coefficient
+    /// aero model.
+    #[func]
+    fn set_imported_shape(
+        &mut self,
+        vertices: PackedVector3Array,
+        indices: PackedInt32Array,
+        resolution: i64,
+    ) -> i64 {
+        if vertices.is_empty() || indices.is_empty() {
+            self.imported_panels = Vec::new();
+            return 0;
+        }
+        let mut verts: Vec<[f64; 3]> = Vec::with_capacity(vertices.len() as usize);
+        for i in 0..vertices.len() {
+            let v = vertices[i];
+            verts.push([v.x as f64, v.y as f64, v.z as f64]);
+        }
+        let mut tris: Vec<[usize; 3]> = Vec::with_capacity(indices.len() as usize / 3);
+        let chunks = indices.len() as usize / 3;
+        for c in 0..chunks {
+            tris.push([
+                indices[c * 3] as usize,
+                indices[c * 3 + 1] as usize,
+                indices[c * 3 + 2] as usize,
+            ]);
+        }
+        let panels = voxelize_panels(&verts, &tris, resolution as usize);
+        let m = mesh_metrics(&verts, &tris);
+        self.imported_frontal = m.frontal_area;
+        self.imported_wetted = m.wetted_area;
+        // Reference length for Re: the stream-wise (X) box extent of the
+        // normalized model.
+        self.imported_len = m.size_x;
+        self.imported_panels = panels;
+        self.imported_panels.len() as i64
+    }
+
+    /// True when an arbitrary imported model is driving the aero.
+    #[func]
+    fn is_imported_shape(&self) -> bool {
+        !self.imported_panels.is_empty()
+    }
+
     /// Switch the active aircraft configuration (e.g. `"MQI"` or
     /// `"TwinEngine"`), reloading the flow-grid aero forces + collision-shape
     /// wind forces for the new airframe. Returns `true` on success.
@@ -284,6 +366,8 @@ impl WindTunnelNode {
             return false;
         };
         self.config = Some(config);
+        // Switching back to a built-in aircraft clears any imported model.
+        self.imported_panels = Vec::new();
         true
     }
 
@@ -369,6 +453,20 @@ fn reset_trails(&mut self) {
             (-self.force.x).abs(),
             self.force.y.abs(),
             self.cl.abs(),
+        ])
+    }
+
+    /// Imported-shape drag diagnostics, only meaningful after
+    /// `set_imported_shape` and a `step`. Order:
+    /// `[Cd_frontal, Re, frontal_area m², wetted_area m², reference_len m]`.
+    #[func]
+    fn get_imported_aero(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(vec![
+            self.imported_aero.cd_frontal,
+            self.imported_aero.re,
+            self.imported_aero.frontal_area,
+            self.imported_aero.wetted_area,
+            self.imported_aero.reference_len,
         ])
     }
 
@@ -498,6 +596,32 @@ self.particles = (0..PARTICLE_COUNT)
     /// Run `flight_core`'s aero model for the current attitude and stash the
     /// forces + lift coefficient used by both the HUD and the flow field.
     fn compute_aero(&mut self) {
+        let dir = self.wind_direction as f64;
+        let speed = self.wind_speed as f64;
+        let flow_wind = NVec3::new(-dir.cos(), 0.0, dir.sin()) * speed;
+
+        // Arbitrary imported model: no lift coefficients exist, so report the
+        // realistic skin-friction + form-drag from the voxelized hull (zero lift).
+        if !self.imported_panels.is_empty() {
+            let state = self.attitude_state();
+            // flow_wind is in the earth frame; express it in the body frame.
+            let stream_body = state
+                .rotation_earth_to_body()
+                .transform_vector(&flow_wind);
+            let aero = compute_imported_shape_wind(
+                &self.imported_panels,
+                &stream_body,
+                self.imported_wetted,
+                self.imported_frontal,
+                self.imported_len,
+            );
+            self.force = aero.force;
+            self.moment = aero.moment;
+            self.cl = 0.0;
+            self.imported_aero = aero;
+            return;
+        }
+
         if self.config.is_none() {
             self.config = resolve_config();
             if self.config.is_none() {
@@ -507,14 +631,19 @@ self.particles = (0..PARTICLE_COUNT)
         let config = self.config.as_ref().unwrap();
         let state = self.attitude_state();
 
+        let mut config = config.clone();
+        // Let a runtime engine-out split (G key) override the config default so
+        // the asymmetric-thrust yaw / pitching moments show up on the HUD.
+        config.throttle_split = self.throttle_split;
+
         let wind_earth = NVec3::zeros();
         let (mut forces, mut moments) = compute_forces_moments(
             &state,
-            config,
+            &config,
             self.elevator as f64,
             self.aileron as f64,
             self.rudder as f64,
-            0.0,
+            self.throttle,
             0.0,
             self.flaps_deg.to_radians() as f64,
             &wind_earth,
@@ -522,9 +651,6 @@ self.particles = (0..PARTICLE_COUNT)
 
         // Collision-shape wind interaction: the tunnel flow pours onto the
         // aircraft's flat-plate panels, adding a geometry-dependent force.
-        let dir = self.wind_direction as f64;
-        let speed = self.wind_speed as f64;
-        let flow_wind = NVec3::new(-dir.cos(), 0.0, dir.sin()) * speed;
         let (shape_force, shape_moment) =
             compute_shape_wind(&state, &config.collision_panels, &flow_wind);
         forces += shape_force;
