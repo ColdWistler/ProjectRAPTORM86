@@ -242,6 +242,17 @@ impl FlightSimNode {
         self.terrain_enabled = enabled;
     }
 
+    /// Height of the physical terrain (m above datum) at a NED (north, east)
+    /// position. Returns 0 when terrain is flat/disabled, which also lets
+    /// callers compute AGL: `altitude - terrain_height_at(...)`.
+    #[func]
+    fn terrain_height_at(&self, north: f64, east: f64) -> f64 {
+        if !self.terrain_enabled {
+            return 0.0;
+        }
+        self.terrain.height(north, east)
+    }
+
     /// Replace all control inputs in one call (angles in radians, flaps in °).
     #[func]
     fn set_controls(&mut self, elevator: f64, aileron: f64, rudder: f64, throttle: f64, flaps_deg: f64) {
