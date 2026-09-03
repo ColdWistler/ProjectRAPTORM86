@@ -19,7 +19,8 @@ use flight_core::nalgebra::Vector3 as NVec3;
 use flight_core::shape::{compute_imported_shape_wind, compute_shape_wind, ImportedAero};
 use flight_core::{AircraftConfig, AircraftState};
 use godot::builtin::{
-    PackedFloat32Array, PackedFloat64Array, PackedVector3Array, Transform3D, Vector3,
+    PackedByteArray, PackedFloat32Array, PackedFloat64Array, PackedVector3Array, Transform3D,
+    Vector3,
 };
 use godot::classes::Node3D;
 use godot::prelude::*;
@@ -47,7 +48,7 @@ const TOP_RAKE_X_MIN: f32 = 3.5;
 const TOP_RAKE_X_MAX: f32 = -3.5;
 const TOP_RAKE_HALF_WIDTH: f32 = 2.8;
 
-const PARTICLE_COUNT: usize = 8000;
+const PARTICLE_COUNT: usize = 50000;
 const PARTICLE_LIFE: f32 = 2.0;
 const RAKE_JITTER: f32 = 0.16;
 const PARTICLE_BASE_RADIUS: f32 = 0.07;
@@ -78,6 +79,10 @@ const PROP_INFLOW: f32 = 2.0;
 const VLM_CORE: f32 = 0.15;
 /// How far downstream trailing vortex filaments extend (metres from trailing edge).
 const VLM_WAKE_LEN: f32 = 40.0;
+/// Squared distance (m²) beyond which a trailing filament's contribution to a
+/// grid cell is negligible (1/r far-field decay) and can be skipped.  Kept
+/// large enough to preserve the tip-vortex far-field.
+const VLM_FAR2: f32 = 16.0 * 16.0;
 /// Number of spanwise panels on the main wing.
 const VLM_N_SPAN: usize = 14;
 /// Number of spanwise panels on each V-tail fin.
@@ -587,6 +592,9 @@ struct WindTunnelNode {
     shed_vortices: Vec<ShedVortex>,
     shed_timer: f32,
     shed_phase: f32,
+    /// When true, particle advection is handled on the GPU; the CPU-side
+    /// particle pool is left untouched (saving the per-frame advection cost).
+    gpu_streaming: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -641,7 +649,16 @@ impl WindTunnelNode {
             &self.vlm_filaments,
             &self.shed_vortices,
         );
-        self.advance_particles(dt as f32);
+        if !self.gpu_streaming {
+            self.advance_particles(dt as f32);
+        }
+    }
+
+    /// Enable/disable GPU-side particle streaming. When enabled, the CPU-side
+    /// particle advection is skipped (rendering is driven by GPUParticles3D).
+    #[func]
+    fn set_gpu_streaming(&mut self, on: bool) {
+        self.gpu_streaming = on;
     }
 
     #[func]
@@ -859,6 +876,52 @@ impl WindTunnelNode {
             out.extend_from_slice(&[*y, *g]);
         }
         PackedFloat32Array::from(out)
+    }
+
+    /// Upload the flow field for GPU particle advection. Returns one RGBA
+    /// (float32 × 4, little-endian) per cell: RGB = velocity normalised by
+    /// `vmax`, A = speed/vmax.  Returned as raw bytes for direct Texture3D
+    /// upload — no per-float GDScript conversion.
+    #[func]
+    fn get_flow_field(&self) -> PackedByteArray {
+        let vmax = (self.wind_speed * 3.0).max(1.0);
+        let inv = 1.0 / vmax;
+        let n = self.grid.data.len() / 3;
+        let mut out = PackedByteArray::new();
+        out.resize(n * 16);
+        for c in 0..n {
+            let b = c * 3;
+            let vx = self.grid.data[b];
+            let vy = self.grid.data[b + 1];
+            let vz = self.grid.data[b + 2];
+            let sp = (vx * vx + vy * vy + vz * vz).sqrt();
+            let vals = [vx * inv, vy * inv, vz * inv, sp * inv];
+            let base = c * 16;
+            for (k, val) in vals.iter().enumerate() {
+                let bytes = val.to_le_bytes();
+                let kb = base + k * 4;
+                out[kb] = bytes[0];
+                out[kb + 1] = bytes[1];
+                out[kb + 2] = bytes[2];
+                out[kb + 3] = bytes[3];
+            }        }
+        out
+    }
+
+    /// Flow grid metadata: [origin.x, origin.y, origin.z, cell, nx, ny, nz, vmax].
+    #[func]
+    fn get_flow_meta(&self) -> PackedFloat32Array {
+        let vmax = (self.wind_speed * 3.0).max(1.0);
+        PackedFloat32Array::from(vec![
+            self.grid.origin.x,
+            self.grid.origin.y,
+            self.grid.origin.z,
+            self.grid.cell.x,
+            self.grid.nx as f32,
+            self.grid.ny as f32,
+            self.grid.nz as f32,
+            vmax,
+        ])
     }
 }
 
@@ -1158,18 +1221,34 @@ fn filaments_induced(p: Vector3, filaments: &[VortexSegment]) -> Vector3 {
     for &seg in filaments {
         let dl = seg.b - seg.a;
         let dl_len = dl.length();
-        // Use semi-infinite formula for long trailing filaments, finite for short
+        // Compute perpendicular distance from point p to the filament line.
+        // This allows cheap culling: if the point is far from the filament
+        // line, the induced velocity (~1/r) is negligible.
+        let to_a = p - seg.a;
+        let line_dir = (seg.b - seg.a).normalized();
+        let perp_dist = to_a.cross(line_dir).length();
+        // Influence radius: beyond this distance, contribution is visually negligible.
+        const VLM_INFLUENCE_RADIUS: f32 = 6.0;
+        if perp_dist > VLM_INFLUENCE_RADIUS {
+            continue;
+        }
         if dl_len > VLM_WAKE_LEN * 0.9 {
-            let dir = (seg.b - seg.a).normalized();
+            // Semi-infinite filament term
+            let to_a_len2 = to_a.length_squared();
+            if to_a_len2 > VLM_FAR2 {
+                continue;
+            }
+            let dir = line_dir;
             v += biot_savart_semi(p, seg.a, dir, seg.gamma);
         } else {
             v += biot_savart_seg(p, seg);
         }
-        // Limit per-segment contribution for stability
-        let max_seg = 300.0;
-        if v.length() > max_seg {
-            v = v.normalized() * max_seg;
-        }
+    }
+    // Limiting the total (not per-segment) avoids repeated normalizations.
+    let max_total = 500.0;
+    let len = v.length();
+    if len > max_total {
+        v = v * (max_total / len);
     }
     v
 }
@@ -1306,6 +1385,21 @@ fn body_flow(local: Vector3, speed: f32, t_sec: f32, alpha: f32) -> Vector3 {
         if x > FUSE_HALF_LEN * 0.5 && x <= FUSE_HALF_LEN + STANDOFF {
             v.x += speed * 0.9 * intensity;
         }
+    }
+
+    // --- Drone obstacle: radial repulsion from the drone at the origin ---
+    let drone_radius = 2.8;
+    let drone_len = local.length();
+    let drone_pen = drone_radius - drone_len;
+    if drone_pen > 0.0 {
+        let drone_intensity = (drone_pen / drone_radius).clamp(0.0, 1.0);
+        let dir = if drone_len > 1e-6 {
+            -local / drone_len
+        } else {
+            Vector3::new(1.0, 0.0, 0.0)
+        };
+        let drone_push = dir * (2.0 * drone_intensity);
+        v += drone_push * (speed * 1.5 * drone_intensity);
     }
 
     // --- Post-stall flow separation ---

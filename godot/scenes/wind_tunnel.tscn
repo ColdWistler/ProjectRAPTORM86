@@ -1,4 +1,4 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=1 format=3]
 
 [ext_resource type="Script" path="res://scripts/wind_tunnel.gd" id="1_wt"]
 
@@ -9,7 +9,7 @@ script = ExtResource("1_wt")
 
 [node name="Physics" type="WindTunnelNode" parent="."]
 
-[node name="Smoke" type="MultiMeshInstance3D" parent="."]
+[node name="Smoke" type="GPUParticles3D" parent="."]
 
 [node name="Camera" type="Camera3D" parent="."]
 far = 2000.0

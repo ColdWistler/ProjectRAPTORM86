@@ -19,13 +19,14 @@ var elevator := 0.0
 var flaps_deg := 0.0
 var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 
-var _particles: int = 60000
+var _particles: int = 0
+var _multimesh: MultiMesh = null
+var _material: Material = null
 var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
 var _aircraft_index := 0
 var _imported_name := ""
-var smoke_density := 1.0
 # Resolution for voxelizing an imported model into wind panels (edge cells,
 # powers of two). Min/max matched to the Rust voxelizer (4..=24).
 var _import_resolution := 12
@@ -41,10 +42,9 @@ const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 var _label: Label
 var _aircraft_menu: OptionButton
 var _res_label: Label
-var _material: ShaderMaterial = null
 @onready var _tunnel = $Physics
 @onready var _drone: Node3D = $DroneView
-@onready var _smoke: GPUParticles3D = $Smoke
+@onready var _smoke: MultiMeshInstance3D = $Smoke
 @onready var _camera: Camera3D = $Camera
 @onready var _file_dialog: FileDialog = _build_file_dialog()
 
@@ -57,16 +57,15 @@ func _ready() -> void:
 	_drone.add_child(view)
 	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 	_tunnel.reset_trails()
-	# Particle advection happens on the GPU (GPUParticles3D); tell Rust to skip
-	# its own CPU-side particle loop so we don't pay the cost twice.
-	_tunnel.set_gpu_streaming(true)
 	_build_smoke_mesh()
-	_upload_flow_field()
+	_rebuild_smoke()
 	_camera_orbit()
-	print("[WIND TUNNEL] particles=%d process_mat=%s pass_mesh=%s" % [
+	print("[WIND TUNNEL] particles=%d instances=%d mesh_set=%s mat_set=%s aabb=%s" % [
 		_particles,
-		_smoke.process_material != null,
-		_smoke.draw_pass_1 != null,
+		_multimesh.get_instance_count(),
+		_smoke.multimesh != null,
+		_smoke.material_override != null,
+		_multimesh.custom_aabb,
 	])
 
 	# Add a collision shape so the drone physically interacts with the particle flow.
@@ -323,91 +322,60 @@ func _on_res_pressed(increase: bool) -> void:
 
 func _build_smoke_mesh() -> void:
 	_particles = int(_tunnel.particle_count())
+	var puff_count := _particles
 
-	# GPU particle system: the process stage advects every particle through the
-	# Rust-computed flow field entirely on the GPU, and the draw pass renders
-	# them as dense, soft overlapping puffs.  No CPU particle loop, no
-	# MultiMesh buffer transfers -> thousands of particles at full frame rate.
-	var pm := ShaderMaterial.new()
-	pm.shader = load("res://shaders/wind_tunnel_flow.gdshader") as Shader
-	_smoke.process_material = pm
-
-	# Draw pass: a single unit quad scaled per-particle to a soft cloud puff.
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_custom_data = false
+	mm.use_colors = true
+	mm.instance_count = puff_count
+	mm.custom_aabb = AABB(Vector3(-26, -8, -17), Vector3(42, 16, 34))
 	var quad := QuadMesh.new()
 	quad.size = Vector2.ONE
-	_smoke.draw_pass_1 = quad
+	mm.mesh = quad
+	_smoke.multimesh = mm
+	_multimesh = mm
 
-	var mat := ShaderMaterial.new()
-	mat.shader = load("res://shaders/dense_smoke.gdshader") as Shader
-	mat.set_shader_parameter("flow_speed", wind_speed)
-	mat.set_shader_parameter("density", smoke_density)
+	# ENGINE-NATIVE renderer (no custom GLSL, so it compiles on any driver):
+	# a soft radial "molecule" dot, billboarded toward the camera, sized per
+	# instance via the scaled basis. Per-instance colors carry age tint + fade.
+	var dot := GradientTexture2D.new()
+	dot.width = 64
+	dot.height = 64
+	dot.fill = GradientTexture2D.FILL_RADIAL
+	dot.fill_from = Vector2(0.5, 0.5)
+	dot.fill_to = Vector2(0.0, 0.5)
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	g.colors = PackedColorArray([
+		Color(1, 1, 1, 0.5),
+		Color(1, 1, 1, 0.2),
+		Color(1, 1, 1, 0.0),
+	])
+	dot.gradient = g
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	mat.albedo_color = Color(0.92, 0.98, 1.0)
+	mat.albedo_texture = dot
+	mat.vertex_color_use_as_albedo = true
+	mat.emission_enabled = true
+	mat.emission = Color(0.90, 0.97, 1.0)
+	mat.emission_texture = dot
+	mat.emission_energy_multiplier = 2.0
 	_smoke.material_override = mat
-	_smoke.amount = _particles
-	_smoke.lifetime = 2.0
-	_smoke.preprocess = _particles
-	_smoke.explosiveness = 0.0
-	_smoke.randomness = 1.0
-	_smoke.fixed_fps = 60
 	_smoke.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_smoke.visibility_aabb = AABB(Vector3(-26, -8, -17), Vector3(42, 16, 34))
 	_material = mat
 
-## Upload the Rust flow field (Texture3D) + advection metadata into the GPU
-## particle process shader once per frame.
-func _upload_flow_field() -> void:
-	var meta: PackedFloat32Array = _tunnel.get_flow_meta()
-	if meta.size() < 8:
-		return
-	var origin := Vector3(meta[0], meta[1], meta[2])
-	var cell := meta[3]
-	var dims := Vector3i(int(meta[4]), int(meta[5]), int(meta[6]))
-	var vmax := meta[7]
-
-	# Rebuild the Texture3D only when the grid dims change (a rare event);
-	# else just refresh the stored layer data from the live Rust field.
-	if _flow_tex == null or _flow_dims != dims:
-		_flow_dims = dims
-		_make_flow_texture(dims)
-	if _flow_tex != null:
-		var data: PackedByteArray = _tunnel.get_flow_field()
-		var slice_bytes := dims.x * dims.y * 4 * 4
-		if data.size() >= slice_bytes * dims.z:
-			for z in dims.z:
-				var img := _flow_layers[z]
-				img.set_data(
-					dims.x, dims.y, false, Image.FORMAT_RGBAF,
-					data.slice(z * slice_bytes, (z + 1) * slice_bytes),
-				)
-			_flow_tex.update(_flow_layers)
-			_smoke.process_material.set_shader_parameter("flow_tex", _flow_tex)
-
-	_smoke.process_material.set_shader_parameter("flow_origin", origin)
-	_smoke.process_material.set_shader_parameter("flow_cell", Vector3.ONE * cell)
-	_smoke.process_material.set_shader_parameter("flow_dims", Vector3(dims.x, dims.y, dims.z))
-	_smoke.process_material.set_shader_parameter("vmax", vmax)
-	_smoke.process_material.set_shader_parameter("particle_life", 2.0)
-	_smoke.process_material.set_shader_parameter("puff_radius", 0.45)
-	if _material is ShaderMaterial:
-		_material.set_shader_parameter("flow_speed", wind_speed)
-
-## Build an RGBAF Texture3D sized to the flow grid plus its persistent layer
-## images, so we can refresh slice data without re-fetching from the texture.
-func _make_flow_texture(dims: Vector3i) -> void:
-	_flow_layers.clear()
-	for z in dims.z:
-		_flow_layers.append(Image.create_empty(dims.x, dims.y, false, Image.FORMAT_RGBAF))
-	var tex := ImageTexture3D.new()
-	tex.create(Image.FORMAT_RGBAF, dims.x, dims.y, dims.z, false, _flow_layers)
-	_flow_tex = tex
-
-var _flow_tex: ImageTexture3D = null
-var _flow_layers: Array[Image] = []
-var _flow_dims := Vector3i.ZERO
-
-## Gentle global brightness pulse so the mist visibly "breathes" with the flow.
+## Gentle global brightness pulse so the mist visibly "breathes" with the flow
+## even though each molecule's motion comes from the Rust advection.
 func _update_flow_uniform() -> void:
-	if _material is ShaderMaterial:
-		_material.set_shader_parameter("density", smoke_density)
+	if _material is StandardMaterial3D:
+		var t := Time.get_ticks_msec() * 0.001
+		_material.emission_energy_multiplier = 3.6 + sin(t * 2.7) * 0.9
 
 func _physics_process(delta: float) -> void:
 	_apply_settings()
@@ -424,8 +392,7 @@ func _physics_process(delta: float) -> void:
 	for flap in _flaps:
 		if flap is Node3D:
 			flap.rotation.x = flaps_deg * PI / 180.0
-	# Advect on the GPU through the live Rust flow field.
-	_upload_flow_field()
+	_rebuild_smoke(true)
 	_camera_orbit()
 	_update_hud()
 
@@ -437,6 +404,35 @@ func _apply_settings() -> void:
 	_tunnel.set_flaps_deg(flaps_deg)
 	_tunnel.set_throttle(engine_throttle())
 	_tunnel.set_throttle_split(float(engine_out_side()))
+
+## Keep the MultiMesh in step with the Rust particle pool size.
+func _ensure_smoke_size() -> void:
+	var n := int(_tunnel.particle_count())
+	if _multimesh == null or n != _particles:
+		_build_smoke_mesh()
+
+## Update every air molecule from the Rust pool. Each is a small billboard
+## quad: radius (enlarging then thinning as it dissipates), with age + a
+## per-particle tint/fade packed into the per-instance color so the molecules
+## age from bright fresh mist into soft blue haze downstream.
+func _rebuild_smoke(_enabled := true) -> void:
+	_ensure_smoke_size()
+	var d: PackedFloat32Array = _tunnel.get_particles()
+	if d.size() < _particles * 6:
+		return
+	for i in _particles:
+		var b := i * 6
+		var p := Vector3(d[b], d[b + 1], d[b + 2])
+		var r := d[b + 3]
+		var age_norm := d[b + 4]
+		_multimesh.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3(r, r, 1.0)), p))
+		var tint := Color(
+			0.92 - 0.30 * age_norm,
+			0.98 - 0.18 * age_norm,
+			1.0 - 0.05 * age_norm,
+			0.45 + 0.40 * (1.0 - age_norm * age_norm),
+		)
+		_multimesh.set_instance_color(i, tint)
 
 func _camera_orbit() -> void:
 	var sp := sin(cam_pitch)
@@ -485,10 +481,6 @@ func _process(delta: float) -> void:
 		wind_dir_deg += 30.0 * delta
 	if Input.is_key_pressed(KEY_T):
 		wind_dir_deg -= 30.0 * delta
-	if Input.is_key_pressed(KEY_BRACKETLEFT):
-		smoke_density = maxf(smoke_density - 0.6 * delta, 0.2)
-	if Input.is_key_pressed(KEY_BRACKETRIGHT):
-		smoke_density = minf(smoke_density + 0.6 * delta, 2.0)
 	if _just_pressed(KEY_F):
 		flaps_deg = 15.0 if flaps_deg < 5.0 else (30.0 if flaps_deg < 20.0 else 0.0)
 	if _just_pressed(KEY_SPACE):
@@ -502,7 +494,6 @@ func _process(delta: float) -> void:
 		elevator = 0.0
 		flaps_deg = 0.0
 		engine_out = 0
-		smoke_density = 1.0
 		_tunnel.reset_trails()
 	if _just_pressed(KEY_M):
 		_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
@@ -575,8 +566,6 @@ Aileron:     %+4.1f deg
 Rudder:      %+4.1f deg
 Flaps:       %3.0f deg
 Engines:     %s
-Smoke:       GPU advect, %d puffs
-Smoke dens:  %4.2f
 -----------------------------
 %s
 %s
@@ -594,7 +583,6 @@ Flaps:       [F] cycle
 Engine:      [G] both -> left out -> right out
 Wind speed:  [Shift] / [Ctrl]
 Wind dir:    [R] / [T]
-Smoke dens:  [ / ]
 Reset:       [Space]
 Menu:        [Esc]
 Camera:      [Left-drag] / [Scroll]""" % [
@@ -602,8 +590,6 @@ Camera:      [Left-drag] / [Scroll]""" % [
 		_import_resolution,
 		s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
 		engine_str,
-		_particles,
-		smoke_density,
 		aero_txt,
 		vlm_txt,
 	]
