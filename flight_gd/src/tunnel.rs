@@ -274,19 +274,25 @@ impl WindTunnelNode {
     /// Recycle every particle back to its rake nozzle so the chamber visibly
     /// floods fresh air from the front on a reset.
     #[func]
-fn reset_trails(&mut self) {
-    if self.particles.is_empty() {
-        self.refill_particles();
+    fn reset_trails(&mut self) {
+        if self.particles.is_empty() {
+            self.refill_particles();
+            return;
+        }
+        // Reset ALL particles to the front/top rakes with zero age so fresh
+        // smoke streams continuously from the emission points.
+        let n = self.particles.len();
+        let nozzle_count = self.sources.len().max(1);
+        for (i, p) in self.particles.iter_mut().enumerate() {
+            let src = self.sources[i % nozzle_count];
+            p.seed = prng(i * 7 + 3);  // Re-seed for varied jitter pattern
+            p.pos = jittered(src, p.seed);
+            // Stagger ages slightly so they don't all expire simultaneously,
+            // but keep them young enough to form continuous visible trails.
+            p.age = (i as f32 * 0.0005).min(PARTICLE_LIFE * 0.1);
+        }
+        self.emit_i = 0;
     }
-    // Spread ages evenly across the lifespan so the trail is continuous
-    // and does not "burst" when the whole cohort recycles at once.
-    let n = self.particles.len();
-    for (i, p) in self.particles.iter_mut().enumerate() {
-        p.age = (i as f32 / (n - 1) as f32) * PARTICLE_LIFE;
-        let src = self.sources[i % self.sources.len()];
-        p.pos = jittered(src, p.seed);
-    }
-}
 
     /// Number of air particles.
     #[func]

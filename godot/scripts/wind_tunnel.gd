@@ -154,6 +154,31 @@ func _update_flow_uniform() -> void:
 		var t := Time.get_ticks_msec() * 0.001
 		_material.emission_energy_multiplier = 3.6 + sin(t * 2.7) * 0.9
 
+## Enhanced smoke visualization: particles grow larger and fade more smoothly
+## as they age, creating a more realistic aerodynamic flow visualization.
+## These constants match the Rust side (tunnel.rs) for consistent behavior.
+const PARTICLE_BASE_RADIUS := 0.07
+const PARTICLE_GROW := 1.0
+
+func _get_particle_radius(age_norm: float) -> float:
+	# Particles start small, swell in mid-life (dissipation), then shrink at end
+	# This creates a more natural "evaporating" effect as smoke dissipates
+	return PARTICLE_BASE_RADIUS * (1.0 + PARTICLE_GROW * age_norm * age_norm) * (1.0 - 0.75 * age_norm * age_norm * age_norm)
+
+func _get_particle_color(age_norm: float) -> Color:
+	# Fresh particles: bright white-blue, high alpha
+	# Mid-age: slight blue tint, medium alpha  
+	# Old: faded blue-gray, low alpha (evaporating)
+	var fresh_alpha = 0.55
+	var old_alpha = 0.15
+	var alpha = fresh_alpha - (fresh_alpha - old_alpha) * age_norm * age_norm
+	
+	var r = 0.92 - 0.25 * age_norm
+	var g = 0.98 - 0.15 * age_norm
+	var b = 1.0 - 0.05 * age_norm
+	
+	return Color(r, g, b, alpha)
+
 func _physics_process(delta: float) -> void:
 	_apply_settings()
 	_update_flow_uniform()
@@ -193,14 +218,12 @@ func _rebuild_smoke(_enabled := true) -> void:
 		var p := Vector3(d[b], d[b + 1], d[b + 2])
 		var r := d[b + 3]
 		var age_norm := d[b + 4]
-		_multimesh.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3(r, r, 1.0)), p))
-		var tint := Color(
-			0.92 - 0.30 * age_norm,
-			0.98 - 0.18 * age_norm,
-			1.0 - 0.05 * age_norm,
-			0.45 + 0.40 * (1.0 - age_norm * age_norm),
-		)
-		_multimesh.set_instance_color(i, tint)
+		var seed := d[b + 5]
+		
+		# Use enhanced visualization functions for more realistic smoke
+		var visual_radius = _get_particle_radius(age_norm)
+		_multimesh.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3(visual_radius, visual_radius, 1.0)), p))
+		_multimesh.set_instance_color(i, _get_particle_color(age_norm))
 
 func _camera_orbit() -> void:
 	var sp := sin(cam_pitch)
