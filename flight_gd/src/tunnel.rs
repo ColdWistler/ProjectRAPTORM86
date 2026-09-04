@@ -48,8 +48,8 @@ const TOP_RAKE_X_MIN: f32 = 3.5;
 const TOP_RAKE_X_MAX: f32 = -3.5;
 const TOP_RAKE_HALF_WIDTH: f32 = 2.8;
 
-const PARTICLE_COUNT: usize = 50000;
-const PARTICLE_LIFE: f32 = 2.0;
+const PARTICLE_COUNT: usize = 25000;
+const PARTICLE_LIFE: f32 = 2.5;
 const RAKE_JITTER: f32 = 0.16;
 const PARTICLE_BASE_RADIUS: f32 = 0.07;
 const PARTICLE_GROW: f32 = 1.0;

@@ -19,13 +19,13 @@ var elevator := 0.0
 var flaps_deg := 0.0
 var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 
-var _particles: int = 60000
+var _particles: int = 25000
 var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
 var _aircraft_index := 0
 var _imported_name := ""
-var smoke_density := 1.0
+var smoke_density := 0.85
 # Resolution for voxelizing an imported model into wind panels (edge cells,
 # powers of two). Min/max matched to the Rust voxelizer (4..=24).
 var _import_resolution := 12
@@ -343,7 +343,7 @@ func _build_smoke_mesh() -> void:
 	mat.set_shader_parameter("density", smoke_density)
 	_smoke.material_override = mat
 	_smoke.amount = _particles
-	_smoke.lifetime = 2.0
+	_smoke.lifetime = 2.5
 	_smoke.preprocess = _particles
 	_smoke.explosiveness = 0.0
 	_smoke.randomness = 1.0
@@ -385,10 +385,17 @@ func _upload_flow_field() -> void:
 	_smoke.process_material.set_shader_parameter("flow_cell", Vector3.ONE * cell)
 	_smoke.process_material.set_shader_parameter("flow_dims", Vector3(dims.x, dims.y, dims.z))
 	_smoke.process_material.set_shader_parameter("vmax", vmax)
-	_smoke.process_material.set_shader_parameter("particle_life", 2.0)
-	_smoke.process_material.set_shader_parameter("puff_radius", 0.45)
+	_smoke.process_material.set_shader_parameter("particle_life", 2.5)
+	_smoke.process_material.set_shader_parameter("puff_radius", 0.55)
 	if _material is ShaderMaterial:
 		_material.set_shader_parameter("flow_speed", wind_speed)
+		_material.set_shader_parameter("density", smoke_density)
+		_material.set_shader_parameter("core_alpha", 0.18)
+		_material.set_shader_parameter("puff_soft", 0.65)
+		_material.set_shader_parameter("puff_scale", 2.4)
+		_material.set_shader_parameter("noise_scale", 0.45)
+		_material.set_shader_parameter("glow", 0.9)
+		_material.set_shader_parameter("age_fade", 0.35)
 
 ## Build an RGBAF Texture3D sized to the flow grid plus its persistent layer
 ## images, so we can refresh slice data without re-fetching from the texture.

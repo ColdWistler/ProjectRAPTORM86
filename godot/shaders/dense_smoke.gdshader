@@ -5,7 +5,7 @@
 // accumulate opacity; a broad soft profile + additive glow makes the aggregate
 // read as a continuous volume instead of a field of hard dots.
 //
-// The particle pool is dense (~50k) and each particle is a wide soft puff, so
+// The particle pool is dense (~25k) and each particle is a wide soft puff, so
 // the overlapping sprites build up a thick, volumetric-looking smoke layer.
 //
 // Per-instance COLOR (packed by wind_tunnel_flow.gdshader):
@@ -13,20 +13,20 @@
 //   G,B = 24-bit seed
 
 shader_type spatial;
-render_mode blend_mix, depth_draw_never, cull_disabled, unshaded;
+render_mode blend_add, depth_draw_never, cull_disabled, unshaded, disable_fog;
 
 // --- Tuning -----------------------------------------------------------------
-uniform vec3 base_color : source_color = vec3(0.95, 0.99, 1.0);
-uniform vec3 aged_color : source_color = vec3(0.60, 0.80, 0.97);
-uniform float core_alpha : hint_range(0.05, 1.0) = 0.30;
-uniform float puff_soft : hint_range(0.0, 1.0) = 0.55;
-uniform float puff_scale : hint_range(0.5, 4.0) = 1.8;
-uniform float noise_scale : hint_range(0.05, 3.0) = 0.7;
-uniform float noise_speed : hint_range(0.0, 3.0) = 0.9;
+uniform vec3 base_color : source_color = vec3(0.92, 0.97, 1.0);
+uniform vec3 aged_color : source_color = vec3(0.55, 0.75, 0.92);
+uniform float core_alpha : hint_range(0.05, 1.0) = 0.18;
+uniform float puff_soft : hint_range(0.0, 1.0) = 0.65;
+uniform float puff_scale : hint_range(0.5, 4.0) = 2.4;
+uniform float noise_scale : hint_range(0.05, 3.0) = 0.45;
+uniform float noise_speed : hint_range(0.0, 3.0) = 0.6;
 uniform float flow_speed : hint_range(0.0, 200.0) = 20.0;
-uniform float glow : hint_range(0.0, 2.0) = 1.35;
+uniform float glow : hint_range(0.0, 2.0) = 0.9;
 uniform float density : hint_range(0.2, 2.0) = 1.0;
-uniform float age_fade : hint_range(0.0, 1.0) = 0.55;
+uniform float age_fade : hint_range(0.0, 1.0) = 0.35;
 
 varying flat float v_age;
 varying flat float v_seed;
@@ -78,7 +78,7 @@ void fragment() {
 	// Soft radial puff profile (broad so neighbours overlap into volume).
 	float d = length(v_uv) * 2.0;
 	float prof = 1.0 - smoothstep(1.0 - puff_soft, 1.0, d);
-	prof *= prof;
+	prof *= prof * prof;
 
 	// World position of the pixel.
 	vec3 wp = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -110,5 +110,5 @@ void fragment() {
 
 	ALPHA = clamp(alpha, 0.0, 1.0);
 	ALBEDO = col;
-	EMISSION = col * (0.3 + alpha) * glow;
+	EMISSION = col * (0.25 + alpha * 0.7) * glow;
 }
