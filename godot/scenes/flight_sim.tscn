@@ -3,6 +3,7 @@
 [ext_resource type="Script" uid="uid://c4vhox1gd6dj1" path="res://scripts/flight_sim.gd" id="1_fsim"]
 [ext_resource type="PackedScene" uid="uid://b8ujoo3gmxoj2" path="res://assets/snowy_mountain_landscape.glb" id="3_2rvtq"]
 [ext_resource type="Environment" uid="uid://c1f6b7fw4cu4" path="res://environments/flight_env.tres" id="3_env"]
+[ext_resource type="Script" uid="uid://c5vbhrqbx2ekm" path="res://scripts/cloud_system.gd" id="4_cloud"]
 
 [sub_resource type="StandardMaterial3D" id="Mat_runway"]
 albedo_color = Color(0.25, 0.26, 0.28, 1)
@@ -28,6 +29,7 @@ environment = ExtResource("3_env")
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=1682711154]
 transform = Transform3D(0.70710677, -0.579228, 0.4055798, 0, 0.57357645, 0.81915206, -0.70710677, -0.579228, 0.4055798, 0, 0, 0)
 shadow_enabled = true
+light_volumetric_fog_energy = 1.0
 
 [node name="Runway" type="MeshInstance3D" parent="." unique_id=1656802888]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
@@ -82,6 +84,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5022564, 0.36547887, 0)
 [node name="Camera" type="Camera3D" parent="." unique_id=1836501567]
 transform = Transform3D(-0.016718686, 0.14548172, -0.98921967, 0.0024584185, 0.9893609, 0.14546095, 0.99985725, 0, -0.016898468, -0.2898935, 0.7443297, 0.013963461)
 far = 40000.0
+
+[node name="Clouds" type="Node3D" parent="." unique_id=866410512]
+script = ExtResource("4_cloud")
 
 [node name="Sketchfab_Scene" parent="." unique_id=675114143 instance=ExtResource("3_2rvtq")]
 transform = Transform3D(11260.316, 0, 0, 0, 11260.316, 0, 0, 0, 16210.847, -59.344097, -1482.7576, 18.647537)
