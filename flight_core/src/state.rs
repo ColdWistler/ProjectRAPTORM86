@@ -3,7 +3,7 @@
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 use crate::atmosphere::{Atmosphere, RHO0_SL};
-use crate::config::AircraftConfig;
+use crate::config::{AircraftConfig, Propulsion};
 
 /// The full 6-DOF state of the aircraft.
 ///
@@ -101,13 +101,20 @@ impl AircraftState {
         let elev_trim = -(config.cm0 + config.cma * alpha_trim + cm_thrust) / config.cme;
 
         // 5. Throttle setting needed to produce the required thrust. This
-        //    must mirror the aero model's `min(static, power/V)` fall-off,
-        //    otherwise trims requested above the corner speed would falsely
-        //    assume more thrust than the constant-power propeller delivers.
+        //    must mirror the aero model's thrust-vs-speed characteristic:
+        //    a propeller is `min(static, power/V)` while a jet is a flat
+        //    `thrust_max` (both density-scaled), otherwise trims requested at
+        //    high speed would falsely assume more/less thrust than the engine
+        //    actually delivers.
         let density_factor = (atm.density / RHO0_SL).clamp(0.1, 1.2);
-        let static_ceiling = config.thrust_max * density_factor;
-        let power_ceiling = config.power_max * density_factor / speed.max(6.0);
-        let thrust_avail = static_ceiling.min(power_ceiling);
+        let thrust_avail = match config.propulsion {
+            Propulsion::Jet => config.thrust_max * density_factor,
+            Propulsion::Propeller => {
+                let static_ceiling = config.thrust_max * density_factor;
+                let power_ceiling = config.power_max * density_factor / speed.max(6.0);
+                static_ceiling.min(power_ceiling)
+            }
+        };
         let throttle_trim = (thrust_req / thrust_avail.max(1.0)).clamp(0.0, 1.0);
 
         // 6. Populate rigid-body state
