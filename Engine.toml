@@ -1,0 +1,79 @@
+# --- General / Mass properties (Engine: fast long-range jet) ---
+# The ENGINE MODE's "normal aircraft": a swept-wing twin-turbofan jet (light
+# business-jet class). Jet propulsion (thrust ~constant with speed) plus a
+# clean, low-drag airframe let it cruise fast and far — unlike the propeller-
+# driven UAV drones, whose top speed is capped by the P/V power ceiling.
+mass = 4400.0          # kg
+wing_area = 26.0       # m^2
+wing_span = 16.5       # m  (AR ~ 10.5)
+chord = 1.58           # m
+
+# --- Moments of inertia (kg*m^2) ---
+ixx = 12000.0          # roll axis (swept wings, some fuel outboard)
+iyy = 26000.0          # pitch axis (long cabin + tail)
+izz = 30000.0          # yaw axis
+
+# --- Aerodynamic coefficients ---
+cl0 = 0.15
+cla = 4.9
+cd0 = 0.0170           # clean laminar jet airframe
+k_drag = 0.038
+
+cm0 = 0.0
+cma = -1.05
+cmq = -25.0
+cm_adot = -3.0
+cme = -0.5
+
+# --- Jet propulsion -----------------------------------------------------------
+# `propulsion = "jet"` switches the engine model: a turbojet's thrust stays
+# roughly constant with airspeed (only the air density scales it), so this
+# aircraft keeps accelerating where a constant-power propeller would run out.
+# This is the physical feature that makes ENGINE MODE fast and long-range.
+propulsion = "jet"
+thrust_max = 18000.0   # total installed thrust, N (two turbofans)
+power_max = 0.0        # unused by the jet model (kept for TOML parity)
+thrust_arm = 0.0
+
+# Twin-turbofan asymmetric-thrust model (engine-out yaw still applies). Jets
+# have no propeller torque / P-factor / gyroscopic precession, hence zeros.
+engine_count = 2
+engine_lateral_arm = 1.0
+prop_torque_coeff = 0.0
+p_factor_coeff = 0.0
+gyro_coeff = 0.0
+throttle_split = 0.0
+
+# --- Trailing-edge flap increments (per radian of flap deflection) ---
+cl_flap = 1.05
+cd_flap = 0.13
+cm_flap = -0.21
+flap_stall_shift = 6.0
+
+# --- Steep-bank spiral nose-drop ---
+spiral_nose_drop_cm = 0.08
+
+# --- Transonic drag-rise threshold (fast cruise) ---
+mach_crit = 0.78
+
+# --- Collision-shape wind interaction (sized for the jet) ---
+[[collision_panels]]
+area = 1.6              # fuselage frontal area
+normal = [1.0, 0.0, 0.0]
+cp = [2.8, 0.0, 0.0]
+cd = 1.8
+
+[[collision_panels]]
+area = 1.1              # vertical fin
+normal = [0.0, 0.0, 1.0]
+cp = [-3.0, 0.0, 0.6]
+
+[[collision_panels]]
+area = 3.6              # right wing underside
+normal = [0.0, -1.0, 0.0]
+cp = [0.4, 7.5, -0.2]
+
+[[collision_panels]]
+area = 3.6              # left wing underside
+normal = [0.0, -1.0, 0.0]
+cp = [0.4, -7.5, -0.2]
