@@ -18,8 +18,17 @@ var throttle := 0.0
 var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 var auto_level := false
 
-const AIRCRAFT_NAMES := ["TwinEngine", "MQI"]
+const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
+
+## Trim (altitude m, airspeed m/s) each mode re-trims to on load/reset. ENGINE
+## MODE is the fast long-range jet: it starts at high-altitude fast cruise so
+## it behaves like a real turbine aircraft rather than a drone.
+const MODE_TRIM := {
+	"TwinEngine": Vector2(50.0, 60.0),
+	"MQI": Vector2(50.0, 60.0),
+	"Engine": Vector2(8000.0, 200.0),
+}
 
 var _propellers: Array = []
 var _flaps: Array = []
@@ -81,7 +90,8 @@ func _load_aircraft(name: String) -> void:
 		_ailerons = view.ailerons
 		_flaps = view.flaps
 	if ok and not is_editor:
-		var tr: Vector2 = _physics.trim(50.0, 60.0)
+		var trm: Vector2 = MODE_TRIM.get(name, Vector2(50.0, 60.0))
+		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
 		aileron = 0.0
@@ -320,9 +330,10 @@ func _handle_input(delta: float) -> void:
 		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 		_update_aircraft_btn_text()
 
-	# Reset: R
+	# Reset: R (re-trims to the active mode's cruise altitude / speed)
 	if _just_pressed(KEY_R):
-		var tr: Vector2 = _physics.reset()
+		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(50.0, 60.0))
+		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
 		aileron = 0.0
@@ -412,7 +423,8 @@ func _update_hud() -> void:
 	elif engine_out == 2:
 		engine_str = "RIGHT ENGINE OUT [G]"
 	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
-	_label.text = """TACTICAL UAV DRONE TELEMETRY%s%s
+	var mode_title: String = "ENGINE MODE — FAST LONG-RANGE JET" if ac_name == "Engine" else "TACTICAL UAV DRONE TELEMETRY"
+	_label.text = """%s%s%s
 Aircraft:       %s (model: %s, press [M] to switch)
 ------------------------------------
 Altitude:       %6.0f m (%6.0f ft)
@@ -440,7 +452,7 @@ Throttle:  [Shift] Up / [Ctrl] Down
 	Autopilot: [H]/[T] Hold    Reset: [R]
 	Camera:   [V] Chase/Orbit  [RMB-drag] [Scroll]
 Menu: [Esc]""" % [
-		ap, stall,
+		mode_title, ap, stall,
 		ac_name, ac_name,
 		t[0], t[1],
 		t[2], t[3],

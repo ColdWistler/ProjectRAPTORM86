@@ -30,7 +30,7 @@ var _imported_name := ""
 # Resolution for voxelizing an imported model into wind panels (edge cells,
 # powers of two). Min/max matched to the Rust voxelizer (4..=24).
 var _import_resolution := 12
-const AIRCRAFT_NAMES := ["MQI", "TwinEngine"]
+const AIRCRAFT_NAMES := ["MQI", "TwinEngine", "Engine"]
 const MODEL_FILTERS := [
 	"*.glb;GLTF Binary",
 	"*.gltf;GLTF Text",
@@ -91,8 +91,8 @@ func _load_aircraft(name: String) -> void:
 		# Resize the Godot flow-collision box to roughly match the airframe.
 		var cs := _drone.get_node_or_null("FlowCollision") as CollisionShape3D
 		if cs and cs.shape is BoxShape3D:
-			var len := 6.0 if name == "TwinEngine" else 4.0
-			(cs.shape as BoxShape3D).size = Vector3(len, 1.6, len * 0.5)
+			var len := 9.0 if name == "Engine" else (6.0 if name == "TwinEngine" else 4.0)
+			(cs.shape as BoxShape3D).size = Vector3(len, 1.8, len * 0.6)
 		engine_out = 0
 		_tunnel.reset_trails()
 
