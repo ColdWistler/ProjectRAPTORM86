@@ -7,11 +7,13 @@ extends Node3D
 ## `set_model(name)` (e.g. `"MQI"` or `"TwinEngine"`).
 
 const MODEL_PATH := "res://assets/aircraft/"
+const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
 
 ## Per-aircraft visual alignment. `rotation_deg` is applied to the model to
 ## bring its nose onto +X; `scale` normalizes its size to the physics scale.
 ## These are best-guess from the raw model extents and may need tuning — tweak
-## here rather than in code.
+## here rather than in code. An entry with `"procedural": true` is built from
+## primitives by `EngineFactory` instead of a `.glb`.
 const ALIGN := {
 	"MQI": {
 		"scene": "MQI.glb",
@@ -29,11 +31,15 @@ const ALIGN := {
 		"ailerons": [],
 		"flaps": [],
 	},
+	"Engine": {
+		"procedural": true,
+	},
 }
 
 var _current_name := ""
 var _instance: Node3D = null
 var _align_root: Node3D = null
+var _procedural := false
 var propellers: Array = []
 var ailerons: Array = []
 var flaps: Array = []
@@ -68,17 +74,22 @@ func set_model(name: String) -> bool:
 	var align: Dictionary = ALIGN[name]
 
 	# Already showing this model.
-	if _current_name == name and _instance != null:
+	if _current_name == name and (_instance != null or _procedural):
 		return true
 
+	# Clear the previous aircraft (GLB instance or procedural build).
 	if _align_root == null:
 		_align_root = Node3D.new()
 		add_child(_align_root)
-	elif _current_name != "":
-		# Clear the previous loaded model (keep the alignment root).
+	else:
 		for child in _align_root.get_children():
 			_align_root.remove_child(child)
 			child.queue_free()
+	_instance = null
+	_procedural = false
+
+	if align.get("procedural", false):
+		return _build_procedural(name)
 
 	var scene_path := MODEL_PATH + str(align["scene"])
 	if not ResourceLoader.exists(scene_path):
@@ -101,6 +112,18 @@ func set_model(name: String) -> bool:
 	propellers = _find_nodes(_instance, align.get("propellers", []))
 	ailerons = _find_nodes(_instance, align.get("ailerons", []))
 	flaps = _find_nodes(_instance, align.get("flaps", []))
+	return true
+
+## Build the ENGINE MODE jet from primitives under the alignment root and wire
+## up its animated control surfaces. Returns `true` on success.
+func _build_procedural(name: String) -> bool:
+	var parts: Dictionary = _EngineFactoryScript.build(_align_root)
+	propellers = parts.get("propellers", [])
+	ailerons = parts.get("ailerons", [])
+	flaps = parts.get("flaps", [])
+	_instance = null
+	_procedural = true
+	_current_name = name
 	return true
 
 func current_name() -> String:
@@ -137,6 +160,7 @@ func show_imported(path: String) -> bool:
 	_instance.name = "Imported"
 	_align_root.add_child(_instance)
 	_current_name = ""
+	_procedural = false
 	propellers = []
 	ailerons = []
 	flaps = []

@@ -17,7 +17,7 @@ pub mod terrain;
 pub mod wind;
 
 pub use atmosphere::Atmosphere;
-pub use config::AircraftConfig;
+pub use config::{AircraftConfig, Propulsion};
 pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
 pub use nalgebra;
 pub use state::AircraftState;
@@ -318,6 +318,7 @@ cd0: 0.025,
             cme: -0.6,
             thrust_max: 1800.0,
             power_max: 119_000.0,
+            propulsion: Propulsion::Propeller,
             oswald_e: 0.80,
             alpha_stall_pos: 16.0_f64.to_radians(),
             alpha_stall_neg: -12.0_f64.to_radians(),
@@ -658,6 +659,107 @@ cd0: 0.025,
         assert!(
             ld > 20.0,
             "long-range twin should beat L/D=20 at high-altitude cruise (got {ld:.1})"
+        );
+    }
+
+    #[test]
+    fn jet_thrust_does_not_fall_off_with_speed() {
+        // A propeller's available thrust collapses above its corner speed
+        // (P/V), which caps the top speed. A jet's thrust must stay flat
+        // with airspeed (only the density ratio changes it) — this is what
+        // lets an "engine" aircraft cruise fast, unlike the drone props.
+        let prop = aircraft_default();
+        let jet = {
+            let mut j = aircraft_default();
+            j.propulsion = Propulsion::Jet;
+            j
+        };
+        let zero = Vector3::zeros();
+        let force_x = |c: &AircraftConfig, v: f64| {
+            let mut st = AircraftState::default();
+            st.u = v; // wings-level, no AoA: body-X force = thrust - drag
+            compute_forces(&st, c, 0.0, 0.0, 0.0, 1.0, 0.0, &zero).x
+        };
+        // Both lose axial force to drag as the speed rises; the propeller
+        // additionally loses engine thrust to the P/V power ceiling, so its
+        // drop must be larger than the jet's.
+        let drop_jet = force_x(&jet, 40.0) - force_x(&jet, 120.0);
+        let drop_prop = force_x(&prop, 40.0) - force_x(&prop, 120.0);
+        // The propeller alone loses the P/V power-ceiling thrust between these
+        // speeds: static 1800 N at 40 m/s -> 119000/120 = 991.7 N at 120 m/s.
+        // The jet keeps full thrust at both, so the extra drop must be exactly
+        // that propeller-only loss (~808 N) — proving jet thrust is flat.
+        let prop_thrust_loss = 1800.0 - 119_000.0 / 120.0;
+        assert!(
+            drop_prop - drop_jet > 0.0
+                && (drop_prop - drop_jet - prop_thrust_loss).abs() < 5.0,
+            "jet axial drop {drop_jet:.0} N should exceed prop drop {drop_prop:.0} N by only the P/V thrust loss {prop_thrust_loss:.0} N"
+        );
+    }
+
+    #[test]
+    fn engine_mode_trims_to_sustained_fast_cruise() {
+        // The Engine mode is a twin-turbofan jet — a "normal aircraft" instead
+        // of the UAV drones. Jet propulsion must trim level far above the
+        // propeller corner speed and hold that fast, high-altitude cruise
+        // without saturating the throttle (long range = fast + efficient).
+        let cfg_path = format!("{}/../Engine.toml", env!("CARGO_MANIFEST_DIR"));
+        let c = AircraftConfig::from_file(&cfg_path).expect("load Engine.toml");
+        assert_eq!(c.propulsion, Propulsion::Jet, "Engine mode must be a jet");
+        assert_eq!(c.engine_count, 2, "Engine mode must remain a twin");
+
+        let mut st = AircraftState::default();
+        let (elev, thr) = st.trim_level_flight(&c, 8000.0, 200.0);
+        assert!(
+            thr < 0.9,
+            "fast cruise must not saturate throttle (got {thr:.2})"
+        );
+
+        // 20 s of hands-off flight at that trim: airspeed + altitude must hold
+        // within a narrow envelope (no stall, no runaway dive/climb).
+        let dt = 1.0 / 60.0;
+        let alt0 = st.altitude();
+        let mut tas = st.airspeed();
+        for _ in 0..1200 {
+            step(&mut st, &c, elev, 0.0, 0.0, thr, 0.0, None, dt, None);
+            tas = st.airspeed();
+        }
+        assert!(
+            tas > 180.0 && tas < 300.0,
+            "jet must sustain fast cruise (TAS {tas:.1} m/s)"
+        );
+        assert!(
+            (st.altitude() - alt0).abs() < 80.0,
+            "fast cruise must hold altitude (drifted {:.1} m)",
+            (st.altitude() - alt0).abs()
+        );
+    }
+
+    #[test]
+    fn engine_mode_full_throttle_accelerates_past_trim_speed() {
+        // The jet must be able to *sustain* level flight well beyond the
+        // 200 m/s cruise trim at full throttle — where a constant-power
+        // propeller would already be hitting its P/V ceiling. We sweep the
+        // speed solver: any speed whose level-flight trim needs throttle
+        // <= 1.0 is achievable by the jet. This is what makes ENGINE MODE
+        // actually "fast".
+        let cfg_path = format!("{}/../Engine.toml", env!("CARGO_MANIFEST_DIR"));
+        let c = AircraftConfig::from_file(&cfg_path).expect("load Engine.toml");
+        let mut max_sustained: f64 = 0.0;
+        let mut vs: f64 = 200.0;
+        while vs < 340.0 {
+            let mut st = AircraftState::default();
+            let (_elev, throttle) = st.trim_level_flight(&c, 8000.0, vs);
+            if throttle <= 1.0 {
+                max_sustained = vs;
+                vs += 2.0;
+            } else {
+                break;
+            }
+        }
+        assert!(
+            max_sustained > 220.0,
+            "full-throttle jet must sustain >220 m/s level flight at 8000 m (max sustained {max_sustained:.0} m/s)"
         );
     }
 
