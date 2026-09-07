@@ -21,6 +21,20 @@ use crate::shape::compute_shape_wind;
 use crate::state::AircraftState;
 use crate::terrain::Terrain;
 
+// ---------------------------------------------------------------------------
+// Integrator tuning constants
+// ---------------------------------------------------------------------------
+
+/// Orographic vertical-wind decay height scale (m AGL) applied inside
+/// [`step`] when a terrain is active. Matches the decay scale documented on
+/// [`Terrain::orographic_wind`].
+pub const OROGRAPHIC_DECAY_SCALE: f64 = 300.0;
+
+/// Guard numerator floor for the alpha-dot computation `(u·ẇ − w·u̇)/(u²+w²)`:
+/// avoids a division blow-up at (near) zero horizontal airspeed. Values below
+/// this are treated as vertically-incident flow.
+const ALPHA_DOT_SQ_MIN: f64 = 1e-6;
+
 /// Compressed state used for RK4 derivative evaluation.
 #[derive(Clone)]
 struct DynState {
@@ -143,7 +157,7 @@ fn derivatives(
     //     The body accelerations depend only on the forces, not the moments,
     //     so there is no circularity here.
     let v_t_sq = s.u * s.u + s.w * s.w;
-    let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(1e-6);
+    let alpha_dot = (s.u * accel.z - s.w * accel.x) / v_t_sq.max(ALPHA_DOT_SQ_MIN);
 
     // --- Rotational dynamics (Euler's equations) ------------------------
     let mut moments = compute_moments_with_terrain(
@@ -215,7 +229,7 @@ pub fn step(
             state.pos_x,
             state.pos_y,
             state.altitude(),
-            300.0, // orographic decay height scale (m AGL)
+            OROGRAPHIC_DECAY_SCALE, // orographic decay height scale (m AGL)
         );
     }
     let wind = &wind_buf;

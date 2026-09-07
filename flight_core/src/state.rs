@@ -16,6 +16,15 @@ use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use crate::atmosphere::{Atmosphere, RHO0_SL};
 use crate::config::{AircraftConfig, Propulsion};
 
+/// Quaternion normalisation tolerance below which the state is left untouched
+/// (guards a zero-length quaternion from `1/0`).
+const QUAT_NORM_MIN: f64 = 1e-12;
+
+/// Floor on the denominator axial velocity (body X) used in the sideslip
+/// `atan2` — keeps the angle finite for pure vertical descent. Shared with the
+/// aero module's relative-wind side-slip computation.
+pub const SIDESLIP_AXIAL_MIN: f64 = 1e-6;
+
 /// The full 6-DOF state of the aircraft.
 ///
 /// Position is expressed in the Earth-fixed **NED** frame
@@ -165,7 +174,7 @@ impl AircraftState {
     /// Sideslip angle (beta) in radians, the angle between the relative wind
     /// and the body X axis in the body X–Y plane.
     pub fn sideslip_angle(&self) -> f64 {
-        (self.v).atan2(self.u.max(1e-6))
+        (self.v).atan2(self.u.max(SIDESLIP_AXIAL_MIN))
     }
 
     /// Total airspeed magnitude, sqrt(u² + v² + w²) in m/s.
@@ -202,7 +211,7 @@ impl AircraftState {
     /// Earth NED frame.
     pub fn air_sideslip_angle(&self, wind_earth: &Vector3<f64>) -> f64 {
         let v = self.air_velocity(wind_earth);
-        v.y.atan2(v.x.max(1e-6))
+        v.y.atan2(v.x.max(SIDESLIP_AXIAL_MIN))
     }
 
     /// Normalize the orientation quaternion back to unit length. Called
@@ -210,7 +219,7 @@ impl AircraftState {
     pub fn normalize_quaternion(&mut self) {
         let norm = (self.q0 * self.q0 + self.q1 * self.q1 + self.q2 * self.q2 + self.q3 * self.q3)
             .sqrt();
-        if norm > 1e-12 {
+        if norm > QUAT_NORM_MIN {
             let inv = 1.0 / norm;
             self.q0 *= inv;
             self.q1 *= inv;

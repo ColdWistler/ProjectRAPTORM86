@@ -29,11 +29,17 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::atmosphere::Atmosphere;
 use crate::config::{AircraftConfig, Propulsion};
-use crate::state::AircraftState;
+use crate::state::{AircraftState, SIDESLIP_AXIAL_MIN};
 use crate::terrain::Terrain;
 
 /// Gravitational acceleration (m/s²). [NASA SP-747 / WGS84]
 pub const G: f64 = 9.80665;
+
+/// True-airspeed (m/s) floor guarding the dimensionless-rate and rate-damping
+/// normalisations `p̂ = p·b/(2V)`, etc. against a near-hover divide-by-zero.
+/// Larger than the sideslip floor because it scales a physical characteristic
+/// length, not just an `atan2` argument.
+const V_TAS_EPS: f64 = 1e-6;
 
 // ---------------------------------------------------------------------------
 // Post-stall / high-AoA model tuning constants
@@ -104,9 +110,12 @@ const GE_CDI_SUPPRESS: f64 = 0.30;
 /// Bank-angle ramp (sin of ~35°) where the spiral nose-drop engages.
 /// sin(35°) ≈ 0.574; ramp completes at 90° (sin = 1.0).
 const SPIRAL_ENGAGE_SIN: f64 = 0.574;
-/// Steep-bank spiral nose-drop pitch coefficient at full effect. Negative =
+/// Steep-bank spiral nose-drop pitch coefficient at full effect (`Cm`). Negative =
 /// nose-down; value tuned so it overcomes the residual level-trim nose-up
-/// couple (~0.4 kN·m) without dominating normal flight.
+/// couple (~0.4 kN·m) without dominating normal flight. Published here for
+/// traceability: it is the source of the `spiral_nose_drop_cm` default in
+/// `AircraftConfig`.
+#[allow(dead_code)]
 const SPIRAL_DROP_CM: f64 = 0.10;
 /// Knife-edge blend slope for the pitch-sense sign transition (`8.0` per
 /// unit of body-down projection: fades through ~90° bank over ±12°).
@@ -132,9 +141,9 @@ fn engine_thrust_ceiling(
     match propulsion {
         Propulsion::Jet => thr_max * thr * density_factor,
         Propulsion::Propeller => {
-let static_thrust = thr_max * thr * density_factor;
-    let power_thrust = pwr_max * thr * density_factor / v_tas.max(V_MIN_GUARD);
-    static_thrust.min(power_thrust)
+            let static_thrust = thr_max * thr * density_factor;
+            let power_thrust = pwr_max * thr * density_factor / v_tas.max(V_MIN_GUARD);
+            static_thrust.min(power_thrust)
         }
     }
 }
@@ -292,8 +301,8 @@ pub fn ground_effect_factor(altitude_above_ground: f64, wing_span: f64) -> f64 {
 ///   induced drag falls (up to ~−30% at the surface).
 pub fn ground_effect_factors(altitude_above_ground: f64, wing_span: f64) -> (f64, f64) {
     let ge = ground_effect_factor(altitude_above_ground, wing_span);
-    let cl_mult = 1.0 + 0.10 * ge;
-    let cd_induced_mult = 1.0 - 0.30 * ge;
+    let cl_mult = 1.0 + GE_LIFT_BOOST * ge;
+    let cd_induced_mult = 1.0 - GE_CDI_SUPPRESS * ge;
     (cl_mult, cd_induced_mult)
 }
 
@@ -395,7 +404,7 @@ fn compute_forces_impl(
     let v_air = state.air_velocity(wind_earth);
     let v_tas = v_air.norm();
     let alpha = v_air.z.atan2(v_air.x);
-    let beta = v_air.y.atan2(v_air.x.max(1e-6));
+    let beta = v_air.y.atan2(v_air.x.max(SIDESLIP_AXIAL_MIN));
 
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -581,7 +590,7 @@ fn compute_moments_impl(
     let v_air = state.air_velocity(wind_earth);
     let v_tas = v_air.norm();
     let alpha = v_air.z.atan2(v_air.x);
-    let beta = v_air.y.atan2(v_air.x.max(1e-6));
+    let beta = v_air.y.atan2(v_air.x.max(SIDESLIP_AXIAL_MIN));
 
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -597,22 +606,22 @@ fn compute_moments_impl(
     let density_factor = (atm.density_ratio).clamp(DENSITY_RATIO_CLAMP.0, DENSITY_RATIO_CLAMP.1);
 
     // --- Dimensionless body angular rates ---
-    let p_hat = if v_tas > 1e-6 {
+    let p_hat = if v_tas > V_TAS_EPS {
         state.p * config.wing_span / (2.0 * v_tas)
     } else {
         0.0
     };
-    let q_hat = if v_tas > 1e-6 {
+    let q_hat = if v_tas > V_TAS_EPS {
         state.q * config.chord / (2.0 * v_tas)
     } else {
         0.0
     };
-    let r_hat = if v_tas > 1e-6 {
+    let r_hat = if v_tas > V_TAS_EPS {
         state.r * config.wing_span / (2.0 * v_tas)
     } else {
         0.0
     };
-    let alpha_dot_hat = if v_tas > 1e-6 {
+    let alpha_dot_hat = if v_tas > V_TAS_EPS {
         alpha_dot * config.chord / (2.0 * v_tas)
     } else {
         0.0
@@ -621,12 +630,12 @@ fn compute_moments_impl(
     // --- Pitching Moment Cm with downwash-lag damping & stall break ---
     // At post-stall, center-of-pressure shifts aft, adding a stabilizing nose-down pitch break.
     // Flaps lower the positive stall angle (incremental lift to the rear drops the break AoA).
-    let flap = flap_deflection.clamp(0.0, 0.7);
+    let flap = flap_deflection.clamp(0.0, FLAP_MAX_RAD);
     let alpha_stall_pos = config.alpha_stall_pos - config.flap_stall_shift * flap;
     let stall_pitch_break = if alpha > alpha_stall_pos {
-        -0.45 * (alpha - alpha_stall_pos).min(0.4)
+        -STALL_BREAK_GAIN * (alpha - alpha_stall_pos).min(STALL_BREAK_MAX_ARM)
     } else if alpha < config.alpha_stall_neg {
-        0.45 * (config.alpha_stall_neg - alpha).min(0.4)
+        STALL_BREAK_GAIN * (config.alpha_stall_neg - alpha).min(STALL_BREAK_MAX_ARM)
     } else {
         0.0
     };
@@ -640,7 +649,7 @@ fn compute_moments_impl(
     let (bank, _, _) = state.euler_angles();
     let sin_bank = bank.sin().abs();
     // Engage between ~35 deg (sin=0.574) and ~90 deg (sin=1.0).
-    let engage = ((sin_bank - 0.574) / (1.0 - 0.574)).clamp(0.0, 1.0);
+    let engage = ((sin_bank - SPIRAL_ENGAGE_SIN) / (1.0 - SPIRAL_ENGAGE_SIN)).clamp(0.0, 1.0);
     let spiral_nose_drop = -config.spiral_nose_drop_cm * engage * engage;
 
     // --- Inversion sign (proper 6-DOF pitch sense) ---
@@ -657,7 +666,7 @@ fn compute_moments_impl(
     // spiral nose-drop is left out: it is already a world-space nose-down term
     // rather than a body-flow term.
     let (_, _, body_down) = state.body_axes_in_earth();
-    let pitch_sense = (8.0 * body_down.z).tanh();
+    let pitch_sense = (PITCH_SENSE_BLEND * body_down.z).tanh();
     // The spiral nose-drop is a *world-space* gravity nose-down tendency. Its
     // body-frame pitch component reverses when inverted, but it must stay full
     // strength exactly at knife-edge (where pitch_sense ~ 0). Use a hard sign
@@ -760,10 +769,10 @@ pub fn compute_forces_moments(
 
 /// Prandtl-Glauert compressibility correction factor.
 fn compressibility_factor(mach: f64) -> f64 {
-    if mach < 0.85 {
-        (1.0 - mach * mach).max(0.04).sqrt()
+    if mach < PG_MACH_BAND {
+        (1.0 - mach * mach).max(PG_BETA2_FLOOR).sqrt()
     } else {
-        0.20 // Subsonic limit clamp
+        PG_BETA_FLOOR // Subsonic limit clamp
     }
 }
 
@@ -781,17 +790,17 @@ fn compute_viterna_lift(
     } else if alpha > alpha_pos {
         // Positive post-stall: smooth sigmoid transition to flat-plate separated flow
         let d_alpha = alpha - alpha_pos;
-        let blend = (1.0 + (5.0 * d_alpha).tanh()) * 0.5;
+        let blend = (1.0 + (VITERNA_BLEND_POS * d_alpha).tanh()) * 0.5;
         let cl_stall_peak = config.cl0 + config.cla * alpha_pos;
-        let cl_separated = (config.cd_max * 0.5) * (2.0 * alpha).sin()
-            + 0.1 * (alpha.cos()).powi(2) / alpha.sin().max(0.01);
+        let cl_separated = (config.cd_max * SEPARATED_LIFT_KC) * (2.0 * alpha).sin()
+            + SEPARATED_LIFT_RESIDUAL * (alpha.cos()).powi(2) / alpha.sin().max(SEPARATED_MIN_SIN);
         (1.0 - blend) * cl_stall_peak + blend * cl_separated
     } else {
         // Negative post-stall (inverted stall)
         let d_alpha = alpha_neg - alpha;
-        let blend = (1.0 + (5.0 * d_alpha).tanh()) * 0.5;
+        let blend = (1.0 + (VITERNA_BLEND_NEG * d_alpha).tanh()) * 0.5;
         let cl_stall_neg_peak = config.cl0 + config.cla * alpha_neg;
-        let cl_separated = (config.cd_max * 0.5) * (2.0 * alpha).sin();
+        let cl_separated = (config.cd_max * SEPARATED_LIFT_KC) * (2.0 * alpha).sin();
         (1.0 - blend) * cl_stall_neg_peak + blend * cl_separated
     }
 }
@@ -812,7 +821,7 @@ fn compute_viterna_drag(
         } else {
             alpha_neg - alpha
         };
-        let blend = (1.0 + (6.0 * d_alpha).tanh()) * 0.5;
+        let blend = (1.0 + (VITERNA_DRAG_BLEND * d_alpha).tanh()) * 0.5;
         let cd_flat_plate = config.cd_max * (alpha.sin()).powi(2) + config.cd0 * alpha.cos().abs();
         (1.0 - blend) * cd_attached + blend * cd_flat_plate
     }

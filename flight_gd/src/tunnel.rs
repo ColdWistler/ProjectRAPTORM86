@@ -79,10 +79,21 @@ const CL_REF: f32 = 0.6;
 const WING_HALF_SPAN: f32 = 5.5;
 const FUSE_HALF_LEN: f32 = 2.8;
 const STANDOFF: f32 = 0.12;
+/// Length-scale of the Gaussian decay of wing circulation along the spanwise
+/// vortex sheet (visual; 3.2 m → ~2.4 m e-folding half-chord downstream).
 const CIRC_DECAY: f32 = 3.2;
+/// Peak upwash/downwash strength of the bound circulation, in airspeeds.
+/// `w = CIRC_STRENGTH·V·CL·(x/r)·exp(...)`; tuned so the smoke visibly bends
+/// up ahead of the wing and down behind it at cruise CL (~0.6).
 const CIRC_STRENGTH: f32 = 3.6;
+/// Trailing-tip-vortex tangential-velocity gain (airspeeds). `v∝K·V·CL/r`,
+/// chosen so the rolled-up spirals trail cleanly behind the tips at cruise.
 const TIP_STRENGTH: f32 = 6.0;
+/// Core radius of the wing circulation and tip vortices (m): a small offset
+/// that keeps the analytic field finite at the centre-line / vortex axis.
 const TIP_CORE: f32 = 1.0;
+/// Axial distance over which the tip vortices curl from the wing plane onto
+/// the trailing streamlines (m, visual tuning).
 const TIP_GROW: f32 = 2.5;
 
 // --- Rear-pusher propeller slipstream ---------------------------------------
@@ -382,19 +393,19 @@ impl WindTunnelNode {
     /// Recycle every particle back to its rake nozzle so the chamber visibly
     /// floods fresh air from the front on a reset.
     #[func]
-fn reset_trails(&mut self) {
-    if self.particles.is_empty() {
-        self.refill_particles();
+    fn reset_trails(&mut self) {
+        if self.particles.is_empty() {
+            self.refill_particles();
+        }
+        // Spread ages evenly across the lifespan so the trail is continuous
+        // and does not "burst" when the whole cohort recycles at once.
+        let n = self.particles.len();
+        for (i, p) in self.particles.iter_mut().enumerate() {
+            p.age = (i as f32 / (n - 1) as f32) * PARTICLE_LIFE;
+            let src = self.sources[i % self.sources.len()];
+            p.pos = jittered(src, p.seed);
+        }
     }
-    // Spread ages evenly across the lifespan so the trail is continuous
-    // and does not "burst" when the whole cohort recycles at once.
-    let n = self.particles.len();
-    for (i, p) in self.particles.iter_mut().enumerate() {
-        p.age = (i as f32 / (n - 1) as f32) * PARTICLE_LIFE;
-        let src = self.sources[i % self.sources.len()];
-        p.pos = jittered(src, p.seed);
-    }
-}
 
     /// Number of air particles.
     #[func]
@@ -517,16 +528,16 @@ impl WindTunnelNode {
             }
         }
 self.particles = (0..PARTICLE_COUNT)
-        .map(|i| {
-            let seed = prng(i);
-            Particle {
-                pos: Vector3::ZERO,
-                age: (i as f32 / (PARTICLE_COUNT - 1) as f32) * PARTICLE_LIFE,
-                seed,
-            }
-        })
-        .collect();
-    self.emit_i = 0;
+            .map(|i| {
+                let seed = prng(i);
+                Particle {
+                    pos: Vector3::ZERO,
+                    age: (i as f32 / (PARTICLE_COUNT - 1) as f32) * PARTICLE_LIFE,
+                    seed,
+                }
+            })
+            .collect();
+        self.emit_i = 0;
     }
 
     /// Bin the whole pool onto rake nozzles with jitter so the chamber is
