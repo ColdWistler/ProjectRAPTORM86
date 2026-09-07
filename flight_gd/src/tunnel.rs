@@ -12,6 +12,14 @@
 //! head-on free stream travels from +X (front) toward -X (tail). The aircraft
 //! model traced by the flow field uses the same +X-nose convention as
 //! `FlightSimNode`.
+//!
+//! # Implementation notes
+//! - The flow field is analytic (superposition of fuselage/body/spanwise
+//!   potentials and a turbulent wake), evaluated on a fixed world-space grid
+//!   and sampled trilinearly per particle (RK2 advection). Parameters are
+//!   dimensioned and documented in the constants at the top of this file.
+//! - Free-stream speed is clamped to 1–120 m/s; particle advection uses a
+//!   fixed RK2 midpoint stepper with step clamping for numerical stability.
 
 use flight_core::aero::compute_forces_moments;
 use flight_core::config::CollisionPanel;
