@@ -159,6 +159,8 @@ func _process(delta: float) -> void:
 func _schedule_rebuild() -> void:
 	_rebuild_pending = true
 
+## Clear all existing cloud pockets and regenerate the cell grid around the
+## camera cell (deterministic per-cell seeding keeps the field stable).
 func _rebuild() -> void:
 	for p in _pockets:
 		if is_instance_valid(p):
@@ -184,6 +186,9 @@ func _rebuild() -> void:
 			_spawn_cell(cx + dx, cz + dz)
 	_update_wind_group()
 
+## Scatter `pockets_per_cell` fog-volume pockets across one grid cell, each
+## seeded deterministically from the cell coordinates + index so the cloud
+## pattern is stable between rebuilds.
 func _spawn_cell(cx: int, cz: int) -> void:
 	for i in pockets_per_cell:
 		var rng := RandomNumberGenerator.new()
@@ -209,6 +214,8 @@ func _spawn_cell(cx: int, cz: int) -> void:
 		_wind_group.add_child(f)
 		_pockets.append(f)
 
+## Hash three 32-bit integers into a deterministic `seed` value (Jenkins/
+## Knuth-style avalanche mix) for per-pocket `RandomNumberGenerator`s.
 func _hash_ints(a: int, b: int, c: int) -> int:
 	var h := a & 0xFFFFFFFF
 	h = (h * 0x9E3779B1) & 0xFFFFFFFF
@@ -219,6 +226,8 @@ func _hash_ints(a: int, b: int, c: int) -> int:
 	h ^= h >> 16
 	return h & 0xFFFFFFFF
 
+## Build (once) a pool of `texture_pool_count` density textures produced from
+## independently-seeded FBM noise fields, shared by all cloud pockets.
 func _ensure_pool() -> void:
 	if _pool.size() == texture_pool_count:
 		return
@@ -235,6 +244,8 @@ func _ensure_pool() -> void:
 		noise.fractal_weighted_strength = weighted_strength
 		_pool.append(_make_density_texture(noise))
 
+## Render the FBM noise into a 3D density `Texture3D`, applying the radial
+## falloff mask so pocket density fades toward its edges.
 func _make_density_texture(noise: FastNoiseLite) -> Texture3D:
 	var slices: Array[Image] = []
 	slices.resize(NOISE_TEX_RES)
@@ -263,6 +274,8 @@ func _make_density_texture(noise: FastNoiseLite) -> Texture3D:
 	tex.create(Image.FORMAT_RGBA8, NOISE_TEX_RES, NOISE_TEX_RES, NOISE_TEX_RES, false, slices)
 	return tex
 
+## Map raw FBM noise [-1,1] to a fog density, with a `density_floor` cutoff,
+## smoothstep ramp, and reduced density toward the top of the cloud.
 func _noise_to_density(v: float) -> float:
 	var t := clampf(v * 0.5 + 0.5, 0.0, 1.0)
 	if t <= density_floor:
@@ -273,6 +286,8 @@ func _noise_to_density(v: float) -> float:
 	var top := clampf((t - density_peak) / maxf(1.0 - density_peak, 0.001), 0.0, 1.0)
 	return clampf(d * (1.0 - 0.35 * top * top * (3.0 - 2.0 * top)), 0.0, 1.0)
 
+## Build a per-pocket `FogMaterial` from a shared density texture with a
+## per-pocket random density/albedo/emission jitter.
 func _make_pocket_material(tex: Texture3D, rng: RandomNumberGenerator) -> FogMaterial:
 	var m := FogMaterial.new()
 	m.density = density * (0.7 + 0.6 * rng.randf())

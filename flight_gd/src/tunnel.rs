@@ -21,7 +21,7 @@
 //! - Free-stream speed is clamped to 1–120 m/s; particle advection uses a
 //!   fixed RK2 midpoint stepper with step clamping for numerical stability.
 
-use flight_core::aero::compute_forces_moments;
+use flight_core::aero::{compute_forces_moments, ControlInputs};
 use flight_core::config::CollisionPanel;
 use flight_core::nalgebra::Vector3 as NVec3;
 use flight_core::shape::{compute_imported_shape_wind, compute_shape_wind, ImportedAero};
@@ -342,13 +342,13 @@ impl WindTunnelNode {
             self.imported_panels = Vec::new();
             return 0;
         }
-        let mut verts: Vec<[f64; 3]> = Vec::with_capacity(vertices.len() as usize);
+        let mut verts: Vec<[f64; 3]> = Vec::with_capacity(vertices.len());
         for i in 0..vertices.len() {
             let v = vertices[i];
             verts.push([v.x as f64, v.y as f64, v.z as f64]);
         }
-        let mut tris: Vec<[usize; 3]> = Vec::with_capacity(indices.len() as usize / 3);
-        let chunks = indices.len() as usize / 3;
+        let mut tris: Vec<[usize; 3]> = Vec::with_capacity(indices.len() / 3);
+        let chunks = indices.len() / 3;
         for c in 0..chunks {
             tris.push([
                 indices[c * 3] as usize,
@@ -656,17 +656,15 @@ self.particles = (0..PARTICLE_COUNT)
         config.throttle_split = self.throttle_split;
 
         let wind_earth = NVec3::zeros();
-        let (mut forces, mut moments) = compute_forces_moments(
-            &state,
-            &config,
-            self.elevator as f64,
-            self.aileron as f64,
-            self.rudder as f64,
-            self.throttle,
-            0.0,
-            self.flaps_deg.to_radians() as f64,
-            &wind_earth,
-        );
+        let controls = ControlInputs {
+            elevator: self.elevator as f64,
+            aileron: self.aileron as f64,
+            rudder: self.rudder as f64,
+            throttle: self.throttle,
+            flap: self.flaps_deg.to_radians() as f64,
+        };
+        let (mut forces, mut moments) =
+            compute_forces_moments(&state, &config, controls, 0.0, &wind_earth);
 
         // Collision-shape wind interaction: the tunnel flow pours onto the
         // aircraft's flat-plate panels, adding a geometry-dependent force.
@@ -700,14 +698,14 @@ self.particles = (0..PARTICLE_COUNT)
 /// Deterministic pseudo-random hash for a non-negative index → [0,1).
 fn prng(i: usize) -> f32 {
     let x = i as f32 * 0.1031;
-    let s = (x * 12.9898 + 78.233).sin() * 43758.5453;
+    let s = (x * 12.9898 + 78.233).sin() * 43_758.547;
     s - s.floor()
 }
 
 /// A rake nozzle position jittered in the YZ plane by a particle's seed.
 fn jittered(src: Vector3, seed: f32) -> Vector3 {
-    let a1 = seed * 6.2831853;
-    let a2 = (seed * 37.0).fract() * 6.2831853;
+    let a1 = seed * std::f32::consts::TAU;
+    let a2 = (seed * 37.0).fract() * std::f32::consts::TAU;
     let jy = RAKE_JITTER * a1.sin() * a2.cos();
     let jz = RAKE_JITTER * a1.cos() * a2.sin();
     src + Vector3::new(0.0, jy, jz)
@@ -792,22 +790,20 @@ fn euler_to_quat(roll: f64, pitch: f64, yaw: f64) -> (f64, f64, f64, f64) {
     (w, x, y, z)
 }
 
-/// Body-frame flow-perturbation velocity (m/s) at a local position. The
-/// drone's nose is +X and the airstream comes from the front (upstream +X,
-/// downstream -X). `cl` (lift factor) scales circulation, tip vortices and
-/// wake with the *actual* physics lift coefficient from `flight_core`. The
-/// function is SMOOTH (everything is a sine/exp/smoothstep ramp) so streaks
-/// stay continuous, and it ends with a light time-evolving turbulence term
-/// that guarantees the air keeps animating even in perfectly uniform flow.
-fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
+/// Squared spanwise taper factor `(1 − |z/b|)²` that softens the circulation
+/// and tip-vortex strength toward the wing root / centreline.
+fn span_taper_factor(z: f32) -> f32 {
+    let t = (1.0 - (z / WING_HALF_SPAN).abs()).clamp(0.0, 1.0);
+    t * t
+}
+
+/// Solid-body interaction: the fuselage, canopy, wing, V-tail fins and rear
+/// engine nacelle each displace the flow locally, adding a push-along-the-
+/// normal and a thin swirl, plus a speed-up bleed along the roof ahead of the
+/// fuselage. Returns the resulting velocity perturbation (m/s).
+fn solid_body_displacement(local: Vector3, speed: f32) -> Vector3 {
     let (x, y, z) = (local.x, local.y, local.z);
     let mut v = Vector3::ZERO;
-
-    // --- 1) Solid-body interaction -----------------------------------------
-    let span_pos = (z / WING_HALF_SPAN).clamp(-1.0, 1.0);
-    let span_taper = (1.0 - span_pos.abs()).clamp(0.0, 1.0);
-    let span_taper = span_taper * span_taper;
-
     let mut d_over_max = 0.0f32;
     let mut push = Vector3::ZERO;
 
@@ -853,7 +849,7 @@ fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
 
     // (c) V-tail fins (aft, canted ~38°): thin canted slabs at z≈±0.55.
     for zt in [-0.55f32, 0.55] {
-        if x >= -2.7 && x <= -1.4 {
+        if (-2.7..=-1.4).contains(&x) {
             let cant = 38.0_f32.to_radians();
             let s = (-zt).signum();
             let n_nearest = s * ((y - 0.65) * cant.sin() + (z - zt) * cant.cos());
@@ -886,8 +882,14 @@ fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
             v.x += speed * 0.9 * intensity;
         }
     }
+    v
+}
 
-    // --- 2) Turbulent wake behind the solid ----------------------------------
+/// Turbulent wake shed behind the solid body: a broadening, decaying
+/// perturbation that wobbles the downstream streamlines.
+fn turbulent_wake(local: Vector3, speed: f32) -> Vector3 {
+    let (x, y, z) = (local.x, local.y, local.z);
+    let mut v = Vector3::ZERO;
     if x < -1.0 {
         let wake_d = -x - 1.0;
         let wake_breadth = (wake_d / 12.0).clamp(0.0, 1.0);
@@ -899,14 +901,26 @@ fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
         let core = (-(alt * alt) / (2.0 * 2.0)).exp();
         v.x -= speed * 1.0 * wake_breadth * core;
     }
+    v
+}
 
-    // --- 3) Wing circulation (lift): upwash ahead, downwash behind ----------
+/// Wing circulation (lift): smooth upwash ahead of the wing and downwash
+/// behind it, scaled by the physics `cl`.
+fn wing_circulation(local: Vector3, speed: f32, cl: f32, span_taper: f32) -> Vector3 {
+    let (x, y) = (local.x, local.y);
+    let mut v = Vector3::ZERO;
     let r_wing = (x * x + y * y).max(TIP_CORE * TIP_CORE).sqrt();
     let circ_decay = (-((r_wing - TIP_CORE).powi(2)) / (CIRC_DECAY * CIRC_DECAY)).exp();
     let w_circ = CIRC_STRENGTH * speed * cl * (x / r_wing) * circ_decay * span_taper;
     v.y += w_circ;
+    v
+}
 
-    // --- 4) Trailing wingtip vortices ---------------------------------------
+/// Trailing wingtip vortices: a pair of counter-rotating line vortices behind
+/// each tip that curl the flow off the wing plane into the wake.
+fn wingtip_vortices(local: Vector3, speed: f32, cl: f32) -> Vector3 {
+    let (x, y, z) = (local.x, local.y, local.z);
+    let mut v = Vector3::ZERO;
     for (zt, s) in [(WING_HALF_SPAN, -1.0), (-WING_HALF_SPAN, 1.0)] {
         let aft = 0.5 - 0.5 * ((x + 1.2) / TIP_GROW).clamp(-1.0, 1.0);
         let ry = y;
@@ -916,8 +930,14 @@ fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
         v.y += k * (-rz);
         v.z += k * ry;
     }
+    v
+}
 
-    // --- 5) Rear-pusher propeller slipstream --------------------------------
+/// Rear-pusher propeller slipstream: an axially accelerated, tangentially
+/// swirling jet downstream of the prop disc.
+fn propeller_slipstream(local: Vector3, speed: f32) -> Vector3 {
+    let (x, y, z) = (local.x, local.y, local.z);
+    let mut v = Vector3::ZERO;
     let prx = x - PROP_X;
     let pry = y - PROP_Y;
     let pr = (pry * pry + z * z).sqrt();
@@ -939,14 +959,41 @@ fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
         v.y += swirl_mag * (-z / r_safe);
         v.z += swirl_mag * (pry / r_safe);
     }
+    v
+}
 
-    // --- 6) Lattice turbulence (time-evolving, so the air never freezes) -----
+/// Time-evolving lattice turbulence: guarantees the air never freezes into a
+/// static picture even in perfectly uniform free stream.
+fn lattice_turbulence(local: Vector3, speed: f32, t_sec: f32) -> Vector3 {
+    let (x, y, z) = (local.x, local.y, local.z);
+    let mut v = Vector3::ZERO;
     let tu = speed * 0.30;
     let ph = x * 0.55 + z * 0.7 + t_sec * 0.9;
     let ph2 = y * 0.8 + t_sec * 0.6;
     v.y += tu * ph.sin() * ph2.sin();
     v.z += tu * (x * 0.4 - t_sec * 0.8).sin() * (z * 0.9).sin();
     v.x += speed * 0.06 * (z * 1.4 + t_sec * 1.3).sin();
+    v
+}
+
+/// Body-frame flow-perturbation velocity (m/s) at a local position. The
+/// drone's nose is +X and the airstream comes from the front (upstream +X,
+/// downstream -X). `cl` (lift factor) scales circulation, tip vortices and
+/// wake with the *actual* physics lift coefficient from `flight_core`. The
+/// function is SMOOTH (everything is a sine/exp/smoothstep ramp) so streaks
+/// stay continuous, and it ends with a light time-evolving turbulence term
+/// that guarantees the air keeps animating even in perfectly uniform flow.
+fn body_flow(local: Vector3, speed: f32, cl: f32, t_sec: f32) -> Vector3 {
+    let z = local.z;
+    let span_taper = span_taper_factor(z);
+
+    let mut v = Vector3::ZERO;
+    v += solid_body_displacement(local, speed);
+    v += turbulent_wake(local, speed);
+    v += wing_circulation(local, speed, cl, span_taper);
+    v += wingtip_vortices(local, speed, cl);
+    v += propeller_slipstream(local, speed);
+    v += lattice_turbulence(local, speed, t_sec);
 
     // Cap total perturbation so strong shear never blows filaments apart.
     let max_mag = speed * 1.9;

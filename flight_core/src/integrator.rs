@@ -15,6 +15,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
+use crate::aero::ControlInputs;
 use crate::aero::{compute_forces_with_terrain, compute_moments_with_terrain};
 use crate::config::AircraftConfig;
 use crate::shape::compute_shape_wind;
@@ -107,27 +108,13 @@ impl DynState {
 fn derivatives(
     s: &DynState,
     config: &AircraftConfig,
-    elevator: f64,
-    aileron: f64,
-    rudder: f64,
-    throttle: f64,
-    flap: f64,
+    controls: ControlInputs,
     wind_earth: &Vector3<f64>,
     terrain: Option<&Terrain>,
 ) -> DynState {
     // --- Reconstruct an AircraftState to reuse aero/observer logic ------
     let aircraft = s.clone().into_state();
-    let mut forces = compute_forces_with_terrain(
-        &aircraft,
-        config,
-        elevator,
-        aileron,
-        rudder,
-        throttle,
-        flap,
-        wind_earth,
-        terrain,
-    );
+    let mut forces = compute_forces_with_terrain(&aircraft, config, controls, wind_earth, terrain);
 
     // Shape-based wind interaction: the imposed wind pushes on the aircraft's
     // flat-plate collision-shape panels, adding a geometry-dependent force.
@@ -163,12 +150,8 @@ fn derivatives(
     let mut moments = compute_moments_with_terrain(
         &aircraft,
         config,
-        elevator,
-        aileron,
-        rudder,
-        throttle,
+        controls,
         alpha_dot,
-        flap,
         wind_earth,
         terrain,
     );
@@ -206,11 +189,7 @@ fn derivatives(
 pub fn step(
     state: &mut AircraftState,
     config: &AircraftConfig,
-    elevator: f64,
-    aileron: f64,
-    rudder: f64,
-    throttle: f64,
-    flap: f64,
+    controls: ControlInputs,
     wind_earth: Option<&Vector3<f64>>,
     dt: f64,
     terrain: Option<&Terrain>,
@@ -234,16 +213,16 @@ pub fn step(
     }
     let wind = &wind_buf;
 
-    let k1 = derivatives(&s0, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
+    let k1 = derivatives(&s0, config, controls, wind, terrain);
 
     let s2 = add_scaled(&s0, &k1, half);
-    let k2 = derivatives(&s2, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
+    let k2 = derivatives(&s2, config, controls, wind, terrain);
 
     let s3 = add_scaled(&s0, &k2, half);
-    let k3 = derivatives(&s3, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
+    let k3 = derivatives(&s3, config, controls, wind, terrain);
 
     let s4 = add_scaled(&s0, &k3, dt);
-    let k4 = derivatives(&s4, config, elevator, aileron, rudder, throttle, flap, wind, terrain);
+    let k4 = derivatives(&s4, config, controls, wind, terrain);
 
     // Combine the four stage slopes: (k1 + 2k2 + 2k3 + k4)/6.
     let one_sixth = dt / 6.0;

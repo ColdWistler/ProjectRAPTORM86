@@ -305,6 +305,9 @@ pub fn voxelize_panels(
     panels
 }
 
+/// Verification & Validation (V&V) for the voxel mesher: surface-panel
+/// extraction from a density field produces the expected exposed faces with
+/// correct normals.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,12 +339,12 @@ mod tests {
             vertices.push(corners[f[0]]);
             vertices.push(corners[f[1]]);
             vertices.push(corners[f[2]]);
-            let base = (triangles.len() * 3) as usize;
+            let base = triangles.len() * 3;
             triangles.push([base, base + 1, base + 2]);
             vertices.push(corners[f[0]]);
             vertices.push(corners[f[2]]);
             vertices.push(corners[f[3]]);
-            let base = (triangles.len() * 3) as usize;
+            let base = triangles.len() * 3;
             triangles.push([base, base + 1, base + 2]);
         }
 
@@ -356,7 +359,7 @@ mod tests {
         // Every panel must lie on the box shell (|coord| ≈ 0.5 ± cell).
         for p in &panels {
             let maxcoord = p.cp[0].abs().max(p.cp[1].abs()).max(p.cp[2].abs());
-            assert!(maxcoord >= 0.4 && maxcoord <= 0.7, "cp {p:?} not on the hull");
+            assert!((0.4..=0.7).contains(&maxcoord), "cp {p:?} not on the hull");
         }
     }
 

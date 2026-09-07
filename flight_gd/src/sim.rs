@@ -223,7 +223,7 @@ impl FlightSimNode {
     ) {
         let nx = nx.max(2) as usize;
         let nz = nz.max(2) as usize;
-        if (heights.len() as usize) < nx * nz {
+        if heights.len() < nx * nz {
             godot_error!(
                 "configure_terrain: got {} heights, need {} ({}x{})",
                 heights.len(),
