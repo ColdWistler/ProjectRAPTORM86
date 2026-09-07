@@ -78,6 +78,9 @@ func _ready() -> void:
 		_chase_camera()
 
 ## Switch the active aircraft (visual model + physics config) and re-trim.
+## Load an aircraft model by name: switches the Rust physics config, swaps
+## the visual model, grabs the control-surface nodes and re-trims to the
+## mode's cruise altitude/speed.
 func _load_aircraft(name: String) -> void:
 	var is_editor := Engine.is_editor_hint()
 	var ok := true
@@ -180,6 +183,7 @@ func _sample_terrain_grid() -> void:
 	_physics.set_terrain_enabled(true)
 	print("terrain grid configured: ", nx, "x", nz, " @ ", spacing, " m (", minx, "..", maxx, " , ", minz, "..", maxz, " , y ", miny, "..", maxy, " m)")
 
+## Depth-first collect every `MeshInstance3D` under `n` into `out`.
 func _collect_meshes(n: Node, out: Array) -> void:
 	if n is MeshInstance3D:
 		out.append(n)
@@ -222,17 +226,22 @@ func _build_hud() -> Label:
 
 	return label
 
+## Cycle to the next aircraft in the list and reload it.
 func _on_aircraft_swap() -> void:
 	_aircraft_index = (_aircraft_index + 1) % AIRCRAFT_NAMES.size()
 	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 	_update_aircraft_btn_text()
 
+## Refresh the aircraft-swap button label and its "press to switch" tooltip.
 func _update_aircraft_btn_text() -> void:
 	if _aircraft_btn:
 		var next: String = AIRCRAFT_NAMES[(_aircraft_index + 1) % AIRCRAFT_NAMES.size()]
 		_aircraft_btn.text = "Aircraft: %s  [Swap]" % AIRCRAFT_NAMES[_aircraft_index]
 		_aircraft_btn.tooltip_text = "Click or press [M] to switch to %s" % next
 
+## Per-physics-frame tick: read input, push the control set and engine split
+## into Rust, step the sim, then render the drone transform, control surfaces,
+## chase/orbit camera and periodically refresh the HUD.
 func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
@@ -258,6 +267,9 @@ func _physics_process(delta: float) -> void:
 		_telemetry = _physics.telemetry()
 		_update_hud()
 
+## Poll keyboard/mouse inputs into the elevator/aileron/rudder/flap/trim/
+## throttle state, plus camera and aircraft-swap handling. Control stick
+## values auto-center when no pitch/roll input is held (unless autopilot on).
 func _handle_input(delta: float) -> void:
 	# Pitch: W/Up = push DOWN (dive), S/Down = pull UP (climb)
 	var manual_pitch := false
@@ -348,6 +360,7 @@ func _handle_input(delta: float) -> void:
 	if _just_pressed(KEY_ESCAPE):
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
+## Move `value` toward zero at `rate * mult` per second (stick self-centering).
 func _center_control(value: float, rate: float, mult: float, delta: float) -> float:
 	if absf(value) < 0.01:
 		return 0.0
@@ -358,6 +371,7 @@ func _center_control(value: float, rate: float, mult: float, delta: float) -> fl
 func engine_out_side() -> int:
 	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
 
+## True only on the rising edge of `key` (key held tracking via `_held`).
 func _just_pressed(key: Key) -> bool:
 	return Input.is_key_pressed(key) and not _held.get(key, false)
 
@@ -381,6 +395,8 @@ func _input(event: InputEvent) -> void:
 		cam_yaw -= event.relative.x * 0.006
 		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
 
+## Rotate the visual flap and aileron meshes to match the physics control
+## deflections.
 func _update_control_surfaces() -> void:
 	for flap in _flaps:
 		if flap is Node3D:
@@ -389,6 +405,8 @@ func _update_control_surfaces() -> void:
 		if ail is Node3D:
 			ail.rotation.x = -aileron * 0.6
 
+## Position the camera: either a fixed chase offset behind the drone, or a
+## free orbit around `cam_center` driven by the yaw/pitch/dist parameters.
 func _chase_camera() -> void:
 	# Follow the drone from a fixed offset each frame in GLOBAL space. The
 	# camera is NOT a child of the drone so it keeps a horizon-stable up while
@@ -406,6 +424,8 @@ func _chase_camera() -> void:
 		_camera.global_position = tf * Vector3(-32, 7.0, 0)
 		_camera.look_at(tf.origin, Vector3.UP)
 
+## Rewrite the HUD label text from the latest Rust telemetry array
+## (`_telemetry`), including the aircraft-specific mode title and stall flag.
 func _update_hud() -> void:
 	if _telemetry.size() < 25:
 		return

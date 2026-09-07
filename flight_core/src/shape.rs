@@ -267,6 +267,9 @@ pub fn compute_imported_shape_wind(
     }
 }
 
+/// Verification & Validation (V&V) for the flat-plate collision-shape wind
+/// model: the sign/orientation of panel normals and the resulting wind force
+/// and moment from a panel surface.
 #[cfg(test)]
 mod tests {
     use super::*;

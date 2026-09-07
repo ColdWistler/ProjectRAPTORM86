@@ -121,6 +121,47 @@ const SPIRAL_DROP_CM: f64 = 0.10;
 /// unit of body-down projection: fades through ~90° bank over ±12°).
 const PITCH_SENSE_BLEND: f64 = 8.0;
 
+// ---------------------------------------------------------------------------
+// Control-input bundle
+// ---------------------------------------------------------------------------
+
+/// Flight control-surface and throttle inputs bundled into a single struct.
+///
+/// Grouping the five pilot / autopilot degrees of freedom eliminates the
+/// repeated positional-argument lists on the aerodynamic and integrator
+/// functions (IEEE 1003.1 / Rust API Guidelines, identifier-length heuristic).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlInputs {
+    /// Elevator deflection (radians, positive trailing-edge down).
+    pub elevator: f64,
+    /// Aileron deflection (radians, positive trailing-edge down on the right
+    /// wing; produces a positive rolling moment in the right-hand rule).
+    pub aileron: f64,
+    /// Rudder deflection (radians, positive trailing-edge left; produces a
+    /// positive side force / yawing moment).
+    pub rudder: f64,
+    /// Master throttle fraction `[0.0 .. 1.0]`.
+    pub throttle: f64,
+    /// Trailing-edge flap deflection (radians, positive down).
+    pub flap: f64,
+}
+
+impl Default for ControlInputs {
+    fn default() -> Self {
+        Self {
+            elevator: 0.0,
+            aileron: 0.0,
+            rudder: 0.0,
+            throttle: 0.0,
+            flap: 0.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine / propulsion helpers
+// ---------------------------------------------------------------------------
+
 /// Thrust produced by a given throttle fraction against a per-engine thrust and
 /// power ceiling. `thr` is the per-engine power fraction in `[0,1]`.
 ///
@@ -207,20 +248,18 @@ fn engine_thrusts(
 ///
 /// `q`, `r` are the body angular rates (rad/s) and `alpha` is the
 /// aerodynamic angle of attack (rad), both needed by the asymmetric couplings.
-#[allow(clippy::too_many_arguments)]
 fn engine_forces_moments(
+    eng: &EngineFlowInputs,
     config: &AircraftConfig,
-    throttle: f64,
-    v_tas: f64,
-    density_factor: f64,
-    alpha: f64,
-    q: f64,
-    r: f64,
-    pitch_sense: f64,
 ) -> (Vector3<f64>, Vector3<f64>) {
     let split = config.throttle_split;
-    let (t_left, t_right, t_single) =
-        engine_thrusts(config, throttle, split, v_tas, density_factor);
+    let (t_left, t_right, t_single) = engine_thrusts(
+        config,
+        eng.throttle,
+        split,
+        eng.v_tas,
+        eng.density_factor,
+    );
 
     let mut force = Vector3::zeros();
     let mut moment = Vector3::zeros();
@@ -230,7 +269,7 @@ fn engine_forces_moments(
     force.x += thrust_total;
 
     // Trust-line pitching moment (reverses when inverted).
-    moment.y += thrust_total * config.thrust_arm * pitch_sense;
+    moment.y += thrust_total * config.thrust_arm * eng.pitch_sense;
 
     if config.engine_count == 2 {
         let arm = config.engine_lateral_arm;
@@ -253,19 +292,31 @@ fn engine_forces_moments(
             // P-factor: at high power and high AoA the descending blade thrusts
             // more than the ascending one, yawing the nose. Both props rotate the
             // same way (standard right-hand from behind), so they reinforce.
-            let pf = config.p_factor_coeff * thrust_total * alpha;
+            let pf = config.p_factor_coeff * thrust_total * eng.alpha;
             moment.z += pf;
 
             // Gyroscopic precession: the spinning propeller disc resists being
             // pitched or yawed, coupling the two axes. Proportional to the engine
             // angular momentum (modelled by the thrust proxy) and the body rates.
             let gyro = config.gyro_coeff * thrust_total;
-            moment.y += gyro * r;
-            moment.z += -gyro * q;
+            moment.y += gyro * eng.r;
+            moment.z += -gyro * eng.q;
         }
     }
 
     (force, moment)
+}
+
+/// Flow/attitude quantities consumed by the propeller/twin engine couplings,
+/// bundled to keep [`engine_forces_moments`] argument lists short.
+struct EngineFlowInputs {
+    throttle: f64,
+    v_tas: f64,
+    density_factor: f64,
+    alpha: f64,
+    q: f64,
+    r: f64,
+    pitch_sense: f64,
 }
 
 // --- Ground effect (WIG / altitude-in-ground-effect) -------------------------
@@ -341,61 +392,27 @@ pub fn ground_effect_force_delta(
 pub fn compute_forces(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
-    flap_deflection: f64,
+    controls: ControlInputs,
     wind_earth: &Vector3<f64>,
 ) -> Vector3<f64> {
-    compute_forces_impl(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        flap_deflection,
-        wind_earth,
-        None,
-    )
+    compute_forces_impl(state, config, controls, wind_earth, None)
 }
 
 /// `compute_forces` with the optional terrain ground effect.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_forces_with_terrain(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
-    flap_deflection: f64,
+    controls: ControlInputs,
     wind_earth: &Vector3<f64>,
     terrain: Option<&Terrain>,
 ) -> Vector3<f64> {
-    compute_forces_impl(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        flap_deflection,
-        wind_earth,
-        terrain,
-    )
+    compute_forces_impl(state, config, controls, wind_earth, terrain)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compute_forces_impl(
     state: &AircraftState,
     config: &AircraftConfig,
-    _elevator_deflection: f64,
-    _aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
-    flap_deflection: f64,
+    controls: ControlInputs,
     wind_earth: &Vector3<f64>,
     terrain: Option<&Terrain>,
 ) -> Vector3<f64> {
@@ -417,7 +434,7 @@ fn compute_forces_impl(
     let cla_effective = config.cla / pg_factor;
 
     // --- Flap (trailing-edge) increments: lift, induced-drag factor, drag ---
-    let flap = flap_deflection.clamp(0.0, FLAP_MAX_RAD); // ~40 deg max
+    let flap = controls.flap.clamp(0.0, FLAP_MAX_RAD); // ~40 deg max
     let dcl_flap = config.cl_flap * flap;
     let dcd_flap = config.cd_flap * flap * flap.abs();
     // Flaps lower the positive stall angle.
@@ -472,7 +489,7 @@ fn compute_forces_impl(
     let force_z = -lift * alpha.cos() - drag * alpha.sin() * cb;
 
     // --- Lateral Sideforce CY ---
-    let cy = config.cy_beta * beta + config.cy_dr * rudder_deflection;
+    let cy = config.cy_beta * beta + config.cy_dr * controls.rudder;
     let force_y = q_dyn * config.wing_area * cy;
 
     let mut forces = Vector3::new(force_x, force_y, force_z);
@@ -487,17 +504,20 @@ fn compute_forces_impl(
     // where a propeller runs out. Both scale with the atmospheric density
     // ratio, clamped to a sensible range. Multi-engine layouts (twin) split
     // and skew the total across left/right engines.
-    let throttle = throttle.clamp(0.0, 1.0);
+    let throttle = controls.throttle.clamp(0.0, 1.0);
     let density_factor = (atm.density_ratio).clamp(DENSITY_RATIO_CLAMP.0, DENSITY_RATIO_CLAMP.1);
     let (engine_force, _engine_moment) = engine_forces_moments(
+        &EngineFlowInputs {
+            throttle,
+            v_tas,
+            density_factor,
+            alpha,
+            q: state.q,
+            r: state.r,
+            // force only; the thrust-line pitch moment is applied in compute_moments
+            pitch_sense: 1.0,
+        },
         config,
-        throttle,
-        v_tas,
-        density_factor,
-        alpha,
-        state.q,
-        state.r,
-        1.0, // force only; the thrust-line pitch moment is applied in compute_moments
     );
     forces += engine_force;
 
@@ -517,54 +537,23 @@ fn compute_forces_impl(
 pub fn compute_moments(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
+    controls: ControlInputs,
     alpha_dot: f64,
-    flap_deflection: f64,
     wind_earth: &Vector3<f64>,
 ) -> Vector3<f64> {
-    compute_moments_impl(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        alpha_dot,
-        flap_deflection,
-        wind_earth,
-        None,
-    )
+    compute_moments_impl(state, config, controls, alpha_dot, wind_earth, None)
 }
 
 /// `compute_moments` with the optional terrain ground-effect pitching moment.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_moments_with_terrain(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
+    controls: ControlInputs,
     alpha_dot: f64,
-    flap_deflection: f64,
     wind_earth: &Vector3<f64>,
     terrain: Option<&Terrain>,
 ) -> Vector3<f64> {
-    compute_moments_impl(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        alpha_dot,
-        flap_deflection,
-        wind_earth,
-        terrain,
-    )
+    compute_moments_impl(state, config, controls, alpha_dot, wind_earth, terrain)
 }
 
 /// Nose-down pitch tendency in ground effect, as Cm at full effect (σ = 1).
@@ -573,16 +562,11 @@ pub fn compute_moments_with_terrain(
 /// instead of hovering pinned on a level "cushion road".
 const GE_PITCH_CM: f64 = -0.015;
 
-#[allow(clippy::too_many_arguments)]
 fn compute_moments_impl(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
+    controls: ControlInputs,
     alpha_dot: f64,
-    flap_deflection: f64,
     wind_earth: &Vector3<f64>,
     terrain: Option<&Terrain>,
 ) -> Vector3<f64> {
@@ -602,43 +586,18 @@ fn compute_moments_impl(
     let _pg_factor = compressibility_factor(mach);
 
     // --- Engine thrust (used for the thrust-line pitching moment) ---
-    let throttle = throttle.clamp(0.0, 1.0);
+    let throttle = controls.throttle.clamp(0.0, 1.0);
     let density_factor = (atm.density_ratio).clamp(DENSITY_RATIO_CLAMP.0, DENSITY_RATIO_CLAMP.1);
 
     // --- Dimensionless body angular rates ---
-    let p_hat = if v_tas > V_TAS_EPS {
-        state.p * config.wing_span / (2.0 * v_tas)
-    } else {
-        0.0
-    };
-    let q_hat = if v_tas > V_TAS_EPS {
-        state.q * config.chord / (2.0 * v_tas)
-    } else {
-        0.0
-    };
-    let r_hat = if v_tas > V_TAS_EPS {
-        state.r * config.wing_span / (2.0 * v_tas)
-    } else {
-        0.0
-    };
-    let alpha_dot_hat = if v_tas > V_TAS_EPS {
-        alpha_dot * config.chord / (2.0 * v_tas)
-    } else {
-        0.0
-    };
+    let (p_hat, q_hat, r_hat, alpha_dot_hat) = dimensionless_rates(state, config, v_tas, alpha_dot);
 
     // --- Pitching Moment Cm with downwash-lag damping & stall break ---
     // At post-stall, center-of-pressure shifts aft, adding a stabilizing nose-down pitch break.
     // Flaps lower the positive stall angle (incremental lift to the rear drops the break AoA).
-    let flap = flap_deflection.clamp(0.0, FLAP_MAX_RAD);
+    let flap = controls.flap.clamp(0.0, FLAP_MAX_RAD);
     let alpha_stall_pos = config.alpha_stall_pos - config.flap_stall_shift * flap;
-    let stall_pitch_break = if alpha > alpha_stall_pos {
-        -STALL_BREAK_GAIN * (alpha - alpha_stall_pos).min(STALL_BREAK_MAX_ARM)
-    } else if alpha < config.alpha_stall_neg {
-        STALL_BREAK_GAIN * (config.alpha_stall_neg - alpha).min(STALL_BREAK_MAX_ARM)
-    } else {
-        0.0
-    };
+    let stall_pitch_break = pitch_break_moment(config, alpha, alpha_stall_pos);
 
     // --- Steep-bank spiral nose-drop ---
     // A fixed-wing banked past ~45 deg has little/no vertical lift, so gravity
@@ -678,7 +637,7 @@ fn compute_moments_impl(
         + config.cma * alpha
         + config.cmq * q_hat
         + config.cm_adot * alpha_dot_hat
-        + config.cme * elevator_deflection
+        + config.cme * controls.elevator
         + config.cm_flap * flap
         + stall_pitch_break
         // Ground-effect pitch: the reduced downwash near the ground shifts
@@ -697,16 +656,16 @@ fn compute_moments_impl(
     let cl_roll = config.cl_beta * beta
         + config.cl_p * p_hat
         + config.cl_r * r_hat
-        + config.cl_da * aileron_deflection
-        + config.cl_dr * rudder_deflection;
+        + config.cl_da * controls.aileron
+        + config.cl_dr * controls.rudder;
     let roll_moment = q_dyn * config.wing_area * config.wing_span * cl_roll;
 
     // --- Yawing Moment Cn (around body Z) ---
     let cn = config.cn_beta * beta
         + config.cn_p * p_hat
         + config.cn_r * r_hat
-        + config.cn_da * aileron_deflection
-        + config.cn_dr * rudder_deflection;
+        + config.cn_da * controls.aileron
+        + config.cn_dr * controls.rudder;
     let yaw_moment = q_dyn * config.wing_area * config.wing_span * cn;
 
     let mut moments = Vector3::new(roll_moment, pitch_moment, yaw_moment);
@@ -715,18 +674,65 @@ fn compute_moments_impl(
     // Adds the thrust-Line pitching moment plus, for a twin, the asymmetric
     // thrust yaw (Vmc), P-factor, prop torque and gyroscopic precession.
     let (_, engine_moment) = engine_forces_moments(
+        &EngineFlowInputs {
+            throttle,
+            v_tas,
+            density_factor,
+            alpha,
+            q: state.q,
+            r: state.r,
+            pitch_sense,
+        },
         config,
-        throttle,
-        v_tas,
-        density_factor,
-        alpha,
-        state.q,
-        state.r,
-        pitch_sense,
     );
     moments += engine_moment;
 
     moments
+}
+
+/// Dimensionless body angular rates and alpha_dot, each divided by the
+/// appropriate reference length and double true airspeed. Degenerate to zero
+/// when the airspeed is negligible (no meaningful dynamic rotation).
+fn dimensionless_rates(
+    state: &AircraftState,
+    config: &AircraftConfig,
+    v_tas: f64,
+    alpha_dot: f64,
+) -> (f64, f64, f64, f64) {
+    let p_hat = if v_tas > V_TAS_EPS {
+        state.p * config.wing_span / (2.0 * v_tas)
+    } else {
+        0.0
+    };
+    let q_hat = if v_tas > V_TAS_EPS {
+        state.q * config.chord / (2.0 * v_tas)
+    } else {
+        0.0
+    };
+    let r_hat = if v_tas > V_TAS_EPS {
+        state.r * config.wing_span / (2.0 * v_tas)
+    } else {
+        0.0
+    };
+    let alpha_dot_hat = if v_tas > V_TAS_EPS {
+        alpha_dot * config.chord / (2.0 * v_tas)
+    } else {
+        0.0
+    };
+    (p_hat, q_hat, r_hat, alpha_dot_hat)
+}
+
+/// Post-stall pitching break: a stabilizing nose-down moment when the (flap-
+/// shifted) angle of attack exceeds either the positive or negative stall
+/// angle, capping the break arm so it never diverges.
+fn pitch_break_moment(config: &AircraftConfig, alpha: f64, alpha_stall_pos: f64) -> f64 {
+    if alpha > alpha_stall_pos {
+        -STALL_BREAK_GAIN * (alpha - alpha_stall_pos).min(STALL_BREAK_MAX_ARM)
+    } else if alpha < config.alpha_stall_neg {
+        STALL_BREAK_GAIN * (config.alpha_stall_neg - alpha).min(STALL_BREAK_MAX_ARM)
+    } else {
+        0.0
+    }
 }
 
 /// Compute the total body-frame force and moment.
@@ -735,35 +741,12 @@ fn compute_moments_impl(
 pub fn compute_forces_moments(
     state: &AircraftState,
     config: &AircraftConfig,
-    elevator_deflection: f64,
-    aileron_deflection: f64,
-    rudder_deflection: f64,
-    throttle: f64,
+    controls: ControlInputs,
     alpha_dot: f64,
-    flap_deflection: f64,
     wind_earth: &Vector3<f64>,
 ) -> (Vector3<f64>, Vector3<f64>) {
-    let forces = compute_forces(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        flap_deflection,
-        wind_earth,
-    );
-    let moments = compute_moments(
-        state,
-        config,
-        elevator_deflection,
-        aileron_deflection,
-        rudder_deflection,
-        throttle,
-        alpha_dot,
-        flap_deflection,
-        wind_earth,
-    );
+    let forces = compute_forces(state, config, controls, wind_earth);
+    let moments = compute_moments(state, config, controls, alpha_dot, wind_earth);
     (forces, moments)
 }
 

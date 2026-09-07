@@ -235,6 +235,9 @@ impl Terrain {
     }
 }
 
+/// Verification & Validation (V&V) for the terrain height field: flat-ground
+/// baseline, height/gradient sampling and ground-clearance queries used for
+/// collision and ground-effect.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,7 +291,7 @@ mod tests {
         // north=100, east=100 which is 200 m. A query halfway between that cell
         // and the (0,0) cell must interpolate to 50 m.
         let mut heights = vec![0.0f64; 9];
-        heights[1 + 1 * 3] = 200.0;
+        heights[4] = 200.0; // cell (i=1, j=1)
         let t = Terrain::from_grid(0.0, 0.0, 100.0, 3, 3, heights);
 
         assert!((t.height(100.0, 100.0) - 200.0).abs() < 1e-9, "high cell");
@@ -305,7 +308,7 @@ mod tests {
         // Cells with i=2 (north = 200m) are 20 m higher than cells with i=0
         // (north = 0m), i.e. a linear 0.1 m/m climb in north.
         for j in 0..3 {
-            heights[0 + j * 3] = 0.0;
+            heights[j * 3] = 0.0;
             heights[2 + j * 3] = 20.0;
         }
         let t = Terrain::from_grid(0.0, 0.0, 100.0, 3, 3, heights);

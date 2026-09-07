@@ -14,7 +14,7 @@ fn main() {
     } else {
         "../aircraft.toml"
     };
-    let mut sim = Simulator::new(path);
+    let mut sim = Simulator::new(path).expect("aircraft.toml should load");
     let (elev, thr) = sim.trim_level_flight(1000.0, 60.0);
     println!("trim elev={:.4} rad thr={:.3}", elev, thr);
 
@@ -45,8 +45,10 @@ fn main() {
     // Turbulence run: moderate turbulence for 30 s.
     sim.state = sim.state.clone();
     sim.state.trim_level_flight(&sim.config, 1000.0, 60.0);
-    let mut wcfg = WindConfig::default();
-    wcfg.turbulence = flight_core::TurbulenceIntensity::Moderate;
+    let wcfg = WindConfig {
+        turbulence: flight_core::TurbulenceIntensity::Moderate,
+        ..WindConfig::default()
+    };
     let mut wind_env = WindEnvironment::new(wcfg);
     let mut spare = 0.0f64;
     for _ in 0..(30 * 60) {

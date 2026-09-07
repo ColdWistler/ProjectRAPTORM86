@@ -178,6 +178,11 @@ impl Atmosphere {
     }
 }
 
+/// Verification & Validation (V&V) for the Standard Atmosphere model.
+///
+/// Verifies the 1976 US Standard Atmosphere against the tabulated sea-level
+/// condition (101325 Pa, 288.15 K, 1.225 kg/m³) and key reference altitudes,
+/// and validates the documented lapse-rate troposphere behaviour.
 #[cfg(test)]
 mod tests {
     use super::*;

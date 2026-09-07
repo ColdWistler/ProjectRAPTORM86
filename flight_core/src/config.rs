@@ -69,17 +69,16 @@ fn default_spiral_nose_drop_cm() -> f64 { 0.10 }
 ///   with airspeed (only the air-density ratio scales it), so the aircraft can
 ///   keep pushing fast without running out of thrust. Propeller-specific
 ///   couplings (torque, P-factor, gyroscopic precession) do not apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Propulsion {
+    /// Propeller: constant-power thrust ceiling (`P_max·δ/V` above the
+    /// corner speed), plus torque / P-factor / gyroscopic couplings.
+    #[default]
     Propeller,
+    /// Turbojet/turbofan: roughly constant subsonic thrust, no prop-specific
+    /// couplings.
     Jet,
-}
-
-impl Default for Propulsion {
-    fn default() -> Self {
-        Propulsion::Propeller
-    }
 }
 
 /// A fully-parameterized description of the aircraft that the flight
@@ -310,7 +309,10 @@ impl AircraftConfig {
 
 /// Convenience helper that loads a config from `path` and initializes a
 /// fresh flight state.
-pub fn load_config(path: &str) -> AircraftConfig {
+///
+/// Returns an error instead of panicking when the file cannot be read or the
+/// TOML does not deserialize, so callers can surface config problems as
+/// recoverable errors (e.g. through a GDExtension boundary).
+pub fn load_config(path: &str) -> Result<AircraftConfig, Box<dyn std::error::Error>> {
     AircraftConfig::from_file(path)
-        .unwrap_or_else(|e| panic!("failed to load aircraft config from `{}`: {}", path, e))
 }

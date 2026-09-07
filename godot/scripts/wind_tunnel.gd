@@ -193,6 +193,8 @@ func _normalize_mesh(verts: PackedVector3Array) -> void:
 	for i in verts.size():
 		verts[i] = (verts[i] - center) * scale
 
+## Build the ambient environment: a dim world-environment, a key sun, and a
+## large dark floor plane (used only for the wind-tunnel backdrop).
 func _build_world() -> void:
 	var we := WorldEnvironment.new()
 	var env := Environment.new()
@@ -289,6 +291,8 @@ func _build_hud() -> OptionButton:
 	_label = label
 	return menu
 
+## Build a native file dialog for importing a 3D model (`.obj`/`.glb`),
+## wrapped in a high-layer `CanvasLayer` so it renders above the 3D viewport.
 func _build_file_dialog() -> FileDialog:
 	var fd := FileDialog.new()
 	fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
@@ -304,22 +308,29 @@ func _build_file_dialog() -> FileDialog:
 	layer.add_child(fd)
 	return fd
 
+## HUD drop-down: user picked an aircraft, so reload it into the tunnel.
 func _on_aircraft_selected(index: int) -> void:
 	_aircraft_index = index
 	_load_aircraft(AIRCRAFT_NAMES[index])
 
+## HUD import button pressed: pop up the model file dialog.
 func _on_import_pressed() -> void:
 	_file_dialog.popup_centered_ratio(0.6)
 
+## File dialog finished: import the chosen 3D model into the tunnel.
 func _on_import_file_selected(path: String) -> void:
 	_import_model(path)
 
+## Model-import resolution button: bump the voxel grid resolution up/down by
+## 2 (clamped to the Rust voxelizer range 4..=24) and refresh the label.
 func _on_res_pressed(increase: bool) -> void:
 	var step := 2
 	_import_resolution = clampi(_import_resolution + step if increase else _import_resolution - step, 4, 24)
 	if _res_label and is_instance_valid(_res_label):
 		_res_label.text = "Res: %d" % _import_resolution
 
+## (Re)allocate the smoke `MultiMesh` to match the Rust particle-pool size,
+## using a single instanced quad billboard with per-particle colors.
 func _build_smoke_mesh() -> void:
 	_particles = int(_tunnel.particle_count())
 	var puff_count := _particles
@@ -396,6 +407,8 @@ func _physics_process(delta: float) -> void:
 	_camera_orbit()
 	_update_hud()
 
+## Push the current UI sliders/keyboard settings (wind, attitude, controls,
+## engine split) into the Rust `WindTunnelNode`.
 func _apply_settings() -> void:
 	_tunnel.set_wind_speed(wind_speed)
 	_tunnel.set_wind_direction(wind_dir_deg)
@@ -434,6 +447,8 @@ func _rebuild_smoke(_enabled := true) -> void:
 		)
 		_multimesh.set_instance_color(i, tint)
 
+## Orbit the camera around the fixed tunnel origin at yaw/pitch/dist, keeping
+## the aircraft centred in view.
 func _camera_orbit() -> void:
 	var sp := sin(cam_pitch)
 	var cp := cos(cam_pitch)

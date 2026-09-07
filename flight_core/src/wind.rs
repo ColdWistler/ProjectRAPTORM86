@@ -281,6 +281,9 @@ impl WindEnvironment {
     }
 }
 
+/// Verification & Validation (V&V) for the wind field model: steady-wind
+/// direction bowing, Dryden-turbulence statistics, wind affects groundspeed
+/// but not airspeed, and turbulence gust directions.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,10 +292,12 @@ mod tests {
     #[test]
     fn steady_wind_direction_is_bowed_toward_given_bearing() {
         // Wind blowing toward due east => north component 0, east = speed.
-        let mut cfg = WindConfig::default();
-        cfg.wind_speed = 10.0;
-        cfg.wind_direction = std::f64::consts::FRAC_PI_2; // east (pi/2)
-        cfg.wind_shear = false;
+        let cfg = WindConfig {
+            wind_speed: 10.0,
+            wind_direction: std::f64::consts::FRAC_PI_2, // east (pi/2)
+            wind_shear: false,
+            ..WindConfig::default()
+        };
         let w = WindEnvironment::new(cfg);
         let v = w.steady_wind(500.0);
         assert!((v.x).abs() < 1e-9, "north should be ~0, got {}", v.x);
@@ -301,11 +306,13 @@ mod tests {
 
     #[test]
     fn shear_reduces_wind_near_ground() {
-        let mut cfg = WindConfig::default();
-        cfg.wind_speed = 20.0;
-        cfg.reference_altitude = 1000.0;
-        cfg.wind_shear = true;
-        cfg.wind_direction = 0.0; // blows north
+        let cfg = WindConfig {
+            wind_speed: 20.0,
+            reference_altitude: 1000.0,
+            wind_shear: true,
+            wind_direction: 0.0, // blows north
+            ..WindConfig::default()
+        };
         let w = WindEnvironment::new(cfg);
         let low = w.steady_wind(50.0);
         let high = w.steady_wind(2000.0);
@@ -320,8 +327,10 @@ mod tests {
 
     #[test]
     fn turbulence_is_reproducible_and_bounded() {
-        let mut cfg = WindConfig::default();
-        cfg.turbulence = TurbulenceIntensity::Severe; // sigma_u = 5.5
+        let cfg = WindConfig {
+            turbulence: TurbulenceIntensity::Severe, // sigma_u = 5.5
+            ..WindConfig::default()
+        };
         let mut a = WindEnvironment::new(cfg.clone());
         let mut b = WindEnvironment::new(cfg.clone());
 

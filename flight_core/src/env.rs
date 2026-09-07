@@ -10,7 +10,7 @@
 //!   (Farama Foundation, gymnasium v1.0+ specification).
 
 use crate::integrator::step;
-use crate::{Simulator, WindConfig, WindEnvironment};
+use crate::{ControlInputs, Simulator, WindConfig, WindEnvironment};
 use nalgebra::Vector3;
 
 /// A 12-component observation vector (same layout as
@@ -133,20 +133,20 @@ pub struct Environment {
 impl Environment {
     /// Create an environment, loading the aircraft config from
     /// `config_path` and using default reward tuning.
-    pub fn new(config_path: &str) -> Self {
+    pub fn new(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_config(config_path, EnvConfig::default())
     }
 
     /// Create an environment with a custom [`EnvConfig`].
-    pub fn with_config(config_path: &str, config: EnvConfig) -> Self {
-        let sim = Simulator::new(config_path);
+    pub fn with_config(config_path: &str, config: EnvConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let sim = Simulator::new(config_path)?;
         let wind = config.wind_config.clone().map(WindEnvironment::new);
-        Self {
+        Ok(Self {
             sim,
             config,
             step_count: 0,
             wind,
-        }
+        })
     }
 
     /// Reset the aircraft to steady level flight and return the initial
@@ -182,14 +182,17 @@ impl Environment {
             wind_vec = Some(wind_env.total_wind(&self.sim.state, vt_air, self.config.dt));
         }
 
-        step(
-            &mut self.sim.state,
-            &self.sim.config,
+        let controls = ControlInputs {
             elevator,
             aileron,
             rudder,
             throttle,
-            flaps,
+            flap: flaps,
+        };
+        step(
+            &mut self.sim.state,
+            &self.sim.config,
+            controls,
             wind_vec.as_ref(),
             self.config.dt,
             None,
@@ -242,6 +245,9 @@ impl Environment {
     }
 }
 
+/// Verification & Validation (V&V) for the OpenAI-gym-style environment
+/// wrapper: config loading from disk, reset to trimmed level flight, state/
+/// observation mapping and step indexing.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +267,7 @@ mod tests {
                 ..Default::default()
             },
         )
+        .expect("aircraft.toml should load")
     }
 
     #[test]
@@ -328,7 +335,7 @@ mod tests {
         } else {
             "aircraft.toml"
         };
-        let cfg = load_config(path);
+        let cfg = load_config(path).expect("aircraft.toml should load");
         assert!(cfg.mass > 0.0 && cfg.thrust_max > 0.0);
     }
 }
