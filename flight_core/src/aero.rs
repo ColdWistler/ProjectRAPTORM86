@@ -32,8 +32,85 @@ use crate::config::{AircraftConfig, Propulsion};
 use crate::state::AircraftState;
 use crate::terrain::Terrain;
 
-/// Gravitational acceleration (m/s²).
-const G: f64 = 9.80665;
+/// Gravitational acceleration (m/s²). [NASA SP-747 / WGS84]
+pub const G: f64 = 9.80665;
+
+// ---------------------------------------------------------------------------
+// Post-stall / high-AoA model tuning constants
+// (derived from the Viterna-Corrigan separated-flow formulation)
+// ---------------------------------------------------------------------------
+
+/// Minimum airspeed (m/s) guarding dynamic-pressure and Mach computations
+/// against a division near hover/stall. Keeps `T_min(V)` and the
+/// dimensionless-rate normalisation finite.
+pub const V_MIN_GUARD: f64 = 6.0;
+
+/// Slope of the smooth `tanh` blend into positive post-stall separated flow.
+/// 5.0 per radian of overshoot past the stall angle: at +1 rad the blend is
+/// ~99% separated — a fast, physically-motivated transition per
+/// Viterna-Corrigan's empirical flat-plate fall-off.
+const VITERNA_BLEND_POS: f64 = 5.0;
+
+/// Slope of the smooth `tanh` blend into negative (inverted) post-stall.
+const VITERNA_BLEND_NEG: f64 = 5.0;
+
+/// Constant fraction of `Cd_max` used for the separated-flow lift peak
+/// `CL = (Cd_max/2)·sin(2α)`, the classic flat-plate result. The additional
+/// `0.1·cos²α/sinα` term models the residual camber/viscous lift in the
+/// Viterna-Corrigan extension for light aircraft.
+const SEPARATED_LIFT_KC: f64 = 0.5;
+/// Small-lift residual coefficient in the positive post-stall lift term.
+const SEPARATED_LIFT_RESIDUAL: f64 = 0.1;
+/// Denominator guard for the residual `cos²α/sinα` term (no divide-by-zero).
+const SEPARATED_MIN_SIN: f64 = 0.01;
+
+/// Blend slope for the drag transition into the flat-plate separated regime.
+/// 6.0 per radian keeps the drag rise slightly sharper than the lift break
+/// (the drag tripping leads the CL collapse, as measured in wind-tunnel data).
+const VITERNA_DRAG_BLEND: f64 = 6.0;
+
+/// Mach-wave drag-rise gain. `ΔCd = K_M·(ΔM)⁴`, the canonical sharp-4th-power
+/// divergence used by Raymer / Torenbeek above the critical Mach.
+const MACH_DRAG_GAIN_K4: f64 = 20.0;
+
+/// Clamp on the post-stall pitch-break moment arm (radians). Limits how far
+/// the `−0.45·Δα` nose-down break runs past the stall angle.
+const STALL_BREAK_MAX_ARM: f64 = 0.4;
+/// Nose-down pitch break gain at positive stall (dimensionless / Δα).
+const STALL_BREAK_GAIN: f64 = 0.45;
+
+/// Maximum flap deflection accepted by the model (radians ≈ 40°).
+pub const FLAP_MAX_RAD: f64 = 0.7;
+
+/// Density-ratio clamp for the thrust ceiling `(0.1 .. 1.2)` — bounds the
+/// forced/turboshaft density scaling so extreme altitudes can't push the
+/// static thrust term negative or absurd.
+pub const DENSITY_RATIO_CLAMP: (f64, f64) = (0.1, 1.2);
+
+/// Prandtl-Glauert compressibility-band: below this Mach the correction
+/// `β = √(1−M²)` applies; at/above it a fixed subsonic floor is used.
+const PG_MACH_BAND: f64 = 0.85;
+/// Fixed `β` floor applied above the Prandtl-Glauert band (tests show this
+/// bound keeps `cla_effective` sane up to the drag-divergence Mach).
+const PG_BETA_FLOOR: f64 = 0.20;
+/// Smallest `β² = 1−M²` allowed inside the band. 0.04 → β floor ≈ 0.2.
+const PG_BETA2_FLOOR: f64 = 0.04;
+
+/// Ground-effect lift cushion at the surface (+10% of CL). [29-3 Hoerner]
+const GE_LIFT_BOOST: f64 = 0.10;
+/// Ground-effect induced-drag suppression at the surface (−30% of CDi).
+/// [29-6 Hoerner]
+const GE_CDI_SUPPRESS: f64 = 0.30;
+/// Bank-angle ramp (sin of ~35°) where the spiral nose-drop engages.
+/// sin(35°) ≈ 0.574; ramp completes at 90° (sin = 1.0).
+const SPIRAL_ENGAGE_SIN: f64 = 0.574;
+/// Steep-bank spiral nose-drop pitch coefficient at full effect. Negative =
+/// nose-down; value tuned so it overcomes the residual level-trim nose-up
+/// couple (~0.4 kN·m) without dominating normal flight.
+const SPIRAL_DROP_CM: f64 = 0.10;
+/// Knife-edge blend slope for the pitch-sense sign transition (`8.0` per
+/// unit of body-down projection: fades through ~90° bank over ±12°).
+const PITCH_SENSE_BLEND: f64 = 8.0;
 
 /// Thrust produced by a given throttle fraction against a per-engine thrust and
 /// power ceiling. `thr` is the per-engine power fraction in `[0,1]`.
@@ -55,9 +132,9 @@ fn engine_thrust_ceiling(
     match propulsion {
         Propulsion::Jet => thr_max * thr * density_factor,
         Propulsion::Propeller => {
-            let static_thrust = thr_max * thr * density_factor;
-            let power_thrust = pwr_max * thr * density_factor / v_tas.max(6.0);
-            static_thrust.min(power_thrust)
+let static_thrust = thr_max * thr * density_factor;
+    let power_thrust = pwr_max * thr * density_factor / v_tas.max(V_MIN_GUARD);
+    static_thrust.min(power_thrust)
         }
     }
 }
@@ -331,7 +408,7 @@ fn compute_forces_impl(
     let cla_effective = config.cla / pg_factor;
 
     // --- Flap (trailing-edge) increments: lift, induced-drag factor, drag ---
-    let flap = flap_deflection.clamp(0.0, 0.7); // ~40 deg max
+    let flap = flap_deflection.clamp(0.0, FLAP_MAX_RAD); // ~40 deg max
     let dcl_flap = config.cl_flap * flap;
     let dcd_flap = config.cd_flap * flap * flap.abs();
     // Flaps lower the positive stall angle.
@@ -366,7 +443,7 @@ fn compute_forces_impl(
     // Mach wave drag divergence (drag rise above Mach_crit)
     let cd_mach = if mach > config.mach_crit {
         let dm = mach - config.mach_crit;
-        20.0 * dm.powi(4)
+        MACH_DRAG_GAIN_K4 * dm.powi(4)
     } else {
         0.0
     };
@@ -402,7 +479,7 @@ fn compute_forces_impl(
     // ratio, clamped to a sensible range. Multi-engine layouts (twin) split
     // and skew the total across left/right engines.
     let throttle = throttle.clamp(0.0, 1.0);
-    let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
+    let density_factor = (atm.density_ratio).clamp(DENSITY_RATIO_CLAMP.0, DENSITY_RATIO_CLAMP.1);
     let (engine_force, _engine_moment) = engine_forces_moments(
         config,
         throttle,
@@ -517,7 +594,7 @@ fn compute_moments_impl(
 
     // --- Engine thrust (used for the thrust-line pitching moment) ---
     let throttle = throttle.clamp(0.0, 1.0);
-    let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
+    let density_factor = (atm.density_ratio).clamp(DENSITY_RATIO_CLAMP.0, DENSITY_RATIO_CLAMP.1);
 
     // --- Dimensionless body angular rates ---
     let p_hat = if v_tas > 1e-6 {
