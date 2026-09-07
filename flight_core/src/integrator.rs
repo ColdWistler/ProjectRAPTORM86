@@ -5,6 +5,13 @@
 //!   * Body-frame linear velocity `(u, v, w)` — 3
 //!   * Quaternion orientation `(q0, q1, q2, q3)` — 4
 //!   * Body-frame angular rates `(p, q, r)` — 3
+//!
+//! # Standards References
+//! - Runge–Kutta coefficients and stage construction: Press et al.,
+//!   *Numerical Recipes in C*, 2nd ed., §16.1 (classic RK4).
+//! - Quaternion kinematics `dq/dt = ½·q⊗ω`: Stevens & Lewis,
+//!   *Aircraft Control and Simulation*, 2nd ed., §3.2.
+//! - Euler's rigid-body moment equations: Stevens & Lewis §3.3.
 
 use nalgebra::{UnitQuaternion, Vector3};
 

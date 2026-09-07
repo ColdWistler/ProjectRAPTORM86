@@ -1,4 +1,15 @@
 //! Rigid-body aircraft state representation.
+//!
+//! # Conventions
+//! Position is stored in the Earth-fixed **NED** frame (North–East–Down);
+//! velocity and angular rates are expressed in the **body** frame (nose +X,
+//! right +Y, down +Z). All quantities are SI (metres, seconds, radians,
+//! m/s, rad/s). Quaternion orientation rotates Earth frame → body frame.
+//!
+//! # Standards References
+//! - Body-axis sign conventions follow the fixed-wing axis system of
+//!   Stevens & Lewis, *Aircraft Control and Simulation*, 2nd ed., §2.1–2.2.
+//! - Tait–Bryan (roll–pitch–yaw) extraction follows Stevens & Lewis §2.3.
 
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 

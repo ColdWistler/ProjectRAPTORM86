@@ -1,4 +1,14 @@
 //! Aircraft / airframe configuration with TOML deserialization.
+//!
+//! # Units
+//! All configuration quantities use SI units: mass (kg), length (m),
+//! inertia (kg·m²), force (N), power (W), angles (rad).
+//!
+//! # Traceability
+//! Aerodynamic stability-derivative names and conventions follow JSBSim's
+//! `aerodynamics` element / UIUC Low-Speed Airfoil Data conventions where
+//! applicable; the flap model follows standard trailing-edge flap theory
+//! (e.g. Roskam, *Airplane Design Part VI*, §4.1).
 
 use serde::Deserialize;
 use std::fs;

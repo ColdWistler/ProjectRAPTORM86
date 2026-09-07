@@ -10,6 +10,18 @@
 //! air-relative velocity `V_air = V_ground - W` to compute true airspeed,
 //! angle of attack, sideslip, dynamic pressure and Mach, while the trajectory
 //! is still integrated from the ground velocity.
+//!
+//! # Standards References
+//! - **MIL-F-8785C** — "Flying Qualities of Piloted Airplanes",
+//!   U.S. Department of Defense, 5 Nov 1980, Appendix (Dryden gust model,
+//!   turbulence severity categories).
+//! - **MIL-HDBK-1797** — "Flying Qualities of Piloted Aircraft",
+//!   Department of Defense Handbook, 19 Dec 1997, §5.6 (atmospheric
+//!   disturbances / Dryden spectral model).
+//! - The first-order spectral shaping (AR-1 low-pass of white noise with
+//!   `tau = L/V`) realizes the Dryden longitudinal power spectrum; see
+//!   MIL-F-8785C where the integral scale `L = 533 m` below 305 m AGL is the
+//!   standard low-altitude value.
 
 use crate::state::AircraftState;
 use nalgebra::Vector3;

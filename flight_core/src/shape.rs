@@ -14,6 +14,13 @@
 //!
 //! Convention matches the rest of the engine: body frame with nose +X, up +Y,
 //! right +Z; the wind is supplied in the Earth NED frame as everywhere else.
+//!
+//! # Standards References
+//! - Flat-plate pressure model: Hoerner, *Fluid-Dynamic Drag*, 2nd ed., §3-11
+//!   (bluff body drag coefficients; Cd ≈ 1.2 for a flat plate normal to flow).
+//! - Turbulent skin-friction correlation: Schlichting, *Boundary-Layer Theory*,
+//!   8th ed., §9.2 (`C_f = 0.074 / Re^(1/5)`).
+//! - Form-factor estimate: Hoerner, *Fluid-Dynamic Drag*, §6-3.
 
 use nalgebra::Vector3;
 

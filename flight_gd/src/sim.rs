@@ -5,6 +5,12 @@
 //! handed to Godot are in Godot's Y-up world frame: the NED Earth frame
 //! (North, East, Down) maps to world `(north, -down, east)`, and the aircraft
 //! model is built with its nose along local **+X** (up = +Y, right = +Z).
+//!
+//! # Conventions
+//! - Angles between GDScript and Rust are radians except where noted (°).
+//! - Telemetry layout is index-fixed and documented on [`FlightSimNode::telemetry`].
+//! - Environment variables (`RAPTOR_*`) tune the wind without recompiling;
+//!   see [`wind_config_from_env`].
 
 use flight_core::{
     nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator, Terrain,
