@@ -28,7 +28,7 @@
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::atmosphere::Atmosphere;
-use crate::config::AircraftConfig;
+use crate::config::{AircraftConfig, Propulsion};
 use crate::state::AircraftState;
 use crate::terrain::Terrain;
 
@@ -36,18 +36,30 @@ use crate::terrain::Terrain;
 const G: f64 = 9.80665;
 
 /// Thrust produced by a given throttle fraction against a per-engine thrust and
-/// power ceiling, using the constant-power propeller model `T = min(T_max·δ,
-/// P_max·δ / V)`. `thr` is the per-engine power fraction in `[0,1]`.
+/// power ceiling. `thr` is the per-engine power fraction in `[0,1]`.
+///
+/// * **Propeller** — constant-power model `T = min(T_max·δ, P_max·δ / V)`:
+///   below the corner speed the static-thrust ceiling binds, above it the shaft
+///   power limits the thrust.
+/// * **Jet** — turbojet/turbofan thrust is roughly constant across the subsonic
+///   range, so only the static ceiling `T_max·δ` (scaled by air density) binds.
+///   This is what lets a jet keep accelerating past the propeller corner speed.
 fn engine_thrust_ceiling(
     thr_max: f64,
     pwr_max: f64,
     thr: f64,
     v_tas: f64,
     density_factor: f64,
+    propulsion: Propulsion,
 ) -> f64 {
-    let static_thrust = thr_max * thr * density_factor;
-    let power_thrust = pwr_max * thr * density_factor / v_tas.max(6.0);
-    static_thrust.min(power_thrust)
+    match propulsion {
+        Propulsion::Jet => thr_max * thr * density_factor,
+        Propulsion::Propeller => {
+            let static_thrust = thr_max * thr * density_factor;
+            let power_thrust = pwr_max * thr * density_factor / v_tas.max(6.0);
+            static_thrust.min(power_thrust)
+        }
+    }
 }
 
 /// The per-engine thrust vector for the configured propulsion layout.
@@ -79,6 +91,7 @@ fn engine_thrusts(
             throttle,
             v_tas,
             density_factor,
+            config.propulsion,
         );
         return (0.0, 0.0, t);
     }
@@ -90,8 +103,8 @@ fn engine_thrusts(
     let half_p = config.power_max * 0.5;
     let left_thr = (throttle * (1.0 - split)).clamp(0.0, 1.0);
     let right_thr = (throttle * (1.0 + split)).clamp(0.0, 1.0);
-    let t_left = engine_thrust_ceiling(half_t, half_p, left_thr, v_tas, density_factor);
-    let t_right = engine_thrust_ceiling(half_t, half_p, right_thr, v_tas, density_factor);
+    let t_left = engine_thrust_ceiling(half_t, half_p, left_thr, v_tas, density_factor, config.propulsion);
+    let t_right = engine_thrust_ceiling(half_t, half_p, right_thr, v_tas, density_factor, config.propulsion);
     (t_left, t_right, 0.0)
 }
 
@@ -139,26 +152,31 @@ fn engine_forces_moments(
         // Asymmetric-thrust yawing moment: unequal left/right thrust yaws the
         // nose toward the dead engine. The rudder must counter this; below Vmc
         // it cannot, which drives the characteristic engine-out departure.
+        // Applies to any multi-engine layout, propeller or jet.
         moment.z += (t_left - t_right) * arm;
 
-        // Propeller torque: each engine produces a rolling couple about body X
-        // proportional to its thrust. Assumed counter-rotating for a symmetric
-        // twin, so the net is small and scales with any residual asymmetry.
-        let torque = config.prop_torque_coeff * (t_left - t_right) * arm;
-        moment.x += torque;
+        // Propeller-specific couplings (torque, P-factor, gyroscopic
+        // precession) only act on a spinning prop disc; a jet twin has none.
+        if config.propulsion == Propulsion::Propeller {
+            // Propeller torque: each engine produces a rolling couple about body X
+            // proportional to its thrust. Assumed counter-rotating for a symmetric
+            // twin, so the net is small and scales with any residual asymmetry.
+            let torque = config.prop_torque_coeff * (t_left - t_right) * arm;
+            moment.x += torque;
 
-        // P-factor: at high power and high AoA the descending blade thrusts
-        // more than the ascending one, yawing the nose. Both props rotate the
-        // same way (standard right-hand from behind), so they reinforce.
-        let pf = config.p_factor_coeff * thrust_total * alpha;
-        moment.z += pf;
+            // P-factor: at high power and high AoA the descending blade thrusts
+            // more than the ascending one, yawing the nose. Both props rotate the
+            // same way (standard right-hand from behind), so they reinforce.
+            let pf = config.p_factor_coeff * thrust_total * alpha;
+            moment.z += pf;
 
-        // Gyroscopic precession: the spinning propeller disc resists being
-        // pitched or yawed, coupling the two axes. Proportional to the engine
-        // angular momentum (modelled by the thrust proxy) and the body rates.
-        let gyro = config.gyro_coeff * thrust_total;
-        moment.y += gyro * r;
-        moment.z += -gyro * q;
+            // Gyroscopic precession: the spinning propeller disc resists being
+            // pitched or yawed, coupling the two axes. Proportional to the engine
+            // angular momentum (modelled by the thrust proxy) and the body rates.
+            let gyro = config.gyro_coeff * thrust_total;
+            moment.y += gyro * r;
+            moment.z += -gyro * q;
+        }
     }
 
     (force, moment)
@@ -374,12 +392,14 @@ fn compute_forces_impl(
     let mut forces = Vector3::new(force_x, force_y, force_z);
 
     // --- Engine Thrust along body +X ---
-    // Engine thrust is limited by both the static (low-speed) thrust ceiling
+    // Propeller thrust is limited by both the static (low-speed) thrust ceiling
     // and the constant shaft power delivered by the propeller:
     //   T(V) = min(thrust_max * δ, P_max * δ / V)
     // so somewhere above the corner speed the available thrust falls off with
-    // airspeed. Both scale with the atmospheric density ratio (forced / turboshaft
-    // losses), clamped to a sensible range. Multi-engine layouts (twin) split
+    // airspeed. A jet's thrust does not fall off with speed — only the air
+    // density (forced / core flow) scales it — so a jet keeps accelerating
+    // where a propeller runs out. Both scale with the atmospheric density
+    // ratio, clamped to a sensible range. Multi-engine layouts (twin) split
     // and skew the total across left/right engines.
     let throttle = throttle.clamp(0.0, 1.0);
     let density_factor = (atm.density_ratio).clamp(0.1, 1.2);
