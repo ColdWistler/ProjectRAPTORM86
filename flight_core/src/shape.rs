@@ -32,6 +32,44 @@ pub const RHO_SL: f64 = 1.225;
 /// Dynamic viscosity of air at sea level (Pa·s) for Reynolds number.
 const MU_AIR: f64 = 1.81e-5;
 
+/// Stream-velocity guard (m/s): below this the panel wind is treated as
+/// zero and no force is produced (matches the "still air adds nothing"
+/// design note at the top of this module).
+const STREAM_VEL_MIN: f64 = 1e-6;
+
+/// Floor applied to the caller-supplied mesh frontal/wetted areas (m²) so the
+/// load magnitude never collapses if a degenerate metric is passed in.
+const AREA_MIN: f64 = 1e-6;
+
+/// Floor applied to the caller-supplied reference length (m).
+const REFERENCE_LEN_MIN: f64 = 0.1;
+
+/// Floor on the cross-section diameter derived from the frontal area (m).
+const CROSS_DIAM_MIN: f64 = 0.1;
+
+/// Clamp on the body slenderness ratio used for the form factor (a very
+/// stubby body is never *more* separated than a flat plate).
+const THICKNESS_MAX: f64 = 1.0;
+
+/// Flat-plate turbulent skin friction `C_f = 0.074 / Re^(1/5)`
+/// (Schlichting §9.2). Below this Reynolds number the flow is treated as
+/// laminar/low-Re with a fixed `C_f` floor.
+const SKIN_FRICTION_RAW_CONST: f64 = 0.074;
+const SKIN_FRICTION_RE_EXP: f64 = 0.2;
+const SKIN_FRICTION_RE_MIN: f64 = 10.0;
+const SKIN_FRICTION_RE_LOW: f64 = 0.02;
+
+/// Form-factor polynomial coefficients (Hoerner §6-3): skin-friction is
+/// amplified by `1 + 1.5·(t/L)^(3/2) + 7·(t/L)^3`.
+const FORM_FACTOR_A: f64 = 1.5;
+const FORM_FACTOR_B: f64 = 7.0;
+
+/// Pressure (form) drag on the frontal area: `Cd_p = 0.10 + 1.1/(1+(L/D/1.5)²)`
+/// (≈1.2 for a flat plate at L/D→0, ≈0.1 for a long fuselage at L/D≈8).
+const PRESS_CD_BASE: f64 = 0.10;
+const PRESS_CD_BLUF_BODY: f64 = 1.1;
+const CD_SLENDERNESS_CHAR: f64 = 1.5;
+
 /// Compute the body-frame force and moment produced by the wind impinging on
 /// the aircraft's flat-plate collision-shape panels.
 ///
@@ -130,7 +168,7 @@ pub fn compute_imported_shape_wind(
     mesh_reference_len: f64,
 ) -> ImportedAero {
     let v = stream_body.norm();
-    if v < 1e-6 || panels.is_empty() {
+    if v < STREAM_VEL_MIN || panels.is_empty() {
         return ImportedAero {
             force: Vector3::zeros(),
             moment: Vector3::zeros(),
@@ -144,9 +182,9 @@ pub fn compute_imported_shape_wind(
     let s = *stream_body / v; // unit stream direction (body frame)
 
     // Use the resolution-independent mesh metrics supplied by the caller.
-    let frontal_area = mesh_frontal_area.max(1e-6);
-    let wetted_area = mesh_wetted_area.max(1e-6);
-    let reference_len = mesh_reference_len.max(0.1);
+    let frontal_area = mesh_frontal_area.max(AREA_MIN);
+    let wetted_area = mesh_wetted_area.max(AREA_MIN);
+    let reference_len = mesh_reference_len.max(REFERENCE_LEN_MIN);
 
     // Track the panel bounding box only as a fallback centre-of-pressure.
     let mut min_cp = [f64::INFINITY; 3];
@@ -159,23 +197,28 @@ pub fn compute_imported_shape_wind(
     }
 
     // Cross-section diameter from the frontal area -> slenderness L/D.
-    let cross_diam = (4.0 * frontal_area / std::f64::consts::PI).max(0.1).sqrt();
+    let cross_diam = (4.0 * frontal_area / std::f64::consts::PI).max(CROSS_DIAM_MIN).sqrt();
     let slenderness = reference_len / cross_diam; // L / D
 
     // --- Reynolds number & skin friction ------------------------------------
     let re = RHO_SL * v * reference_len / MU_AIR;
     // Turbulent flat-plate skin friction (Schlichting): C_f = 0.074/Re^0.2.
-    let cf = if re > 10.0 { 0.074 / re.powf(0.2) } else { 0.02 };
+    let cf = if re > SKIN_FRICTION_RE_MIN {
+        SKIN_FRICTION_RAW_CONST / re.powf(SKIN_FRICTION_RE_EXP)
+    } else {
+        SKIN_FRICTION_RE_LOW
+    };
     // Hoerner form factor: thicker, blunter body -> more skin-friction drag.
     let thickness = slenderness.recip();
-    let thin = thickness.min(1.0);
-    let form_factor = 1.0 + 1.5 * thin.powf(1.5) + 7.0 * thin.powf(3.0);
+    let thin = thickness.min(THICKNESS_MAX);
+    let form_factor =
+        1.0 + FORM_FACTOR_A * thin.powf(1.5) + FORM_FACTOR_B * thin.powf(3.0);
 
     // --- Pressure / form drag coefficient -----------------------------------
     // Slenderness-based: long smooth bodies are shaped to shed flow (low Cd),
     // compact bluff bodies behave like a flat plate (Cd ~ 1.1-1.2).
-    let cd_pressure = 0.10
-        + 1.1 / (1.0 + (slenderness / 1.5).powf(2.0)); // ~1.2 at lambda~0, ~0.1 at lambda~8
+    let cd_pressure =
+        PRESS_CD_BASE + PRESS_CD_BLUF_BODY / (1.0 + (slenderness / CD_SLENDERNESS_CHAR).powf(2.0));
 
     let drag_coeff_frontal = cd_pressure + form_factor * cf * (wetted_area / frontal_area);
 

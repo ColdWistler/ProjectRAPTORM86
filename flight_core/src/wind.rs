@@ -26,6 +26,51 @@
 use crate::state::AircraftState;
 use nalgebra::Vector3;
 
+// ---------------------------------------------------------------------------
+// Turbulence / shear model constants
+// ---------------------------------------------------------------------------
+
+/// Minimum airspeed (m/s) used to form the Dryden time constant. Placed well
+/// below the ~25 m/s stall of the configured aircraft ratio — near hover the
+/// decorrelation time is gated so the gust AR-1 filter stays stable.
+const DRYDEN_V_GUARD: f64 = 15.0;
+
+/// Smallest allowed Dryden time constant `τ = L/V` (s) — bounds the low-pass
+/// pole so very high airspeeds or tiny integral scales can't make `α = dt/(τ+dt)`
+/// numerically blow the filter.
+const DRYDEN_TAU_MIN: f64 = 0.05;
+
+/// Down-axis (vertical) RMS gust factor: `σ_w = 0.7·σ_u`, per the Dryden
+/// ratios (σ_w/σ_u ≈ 0.7 for the standard spectral shape, MIL-F-8785C).
+const DRYDEN_W_RATIO: f64 = 0.7;
+
+/// Integral length-scale ratio applied to the vertical-axis gust (half the
+/// longitudinal scale, matching the standard exhausted Dryden breakpoints).
+const DRYDEN_L_W_RATIO: f64 = 0.5;
+
+/// Default integral scale `L` (m) at low altitude (below 305 m) per
+/// MIL-F-8785C: 533 m for the longitudinal component.
+pub const DRYDEN_LOW_ALTITUDE_SCALE: f64 = 533.0;
+
+/// Boundary-layer wind-shear exponent `p` of the power-law profile
+/// `V_w(h) = V_ref·(h/h_ref)^p` (outdoor surface boundary layer, ~0.2 over
+/// open terrain per ESDU / standard micrometeorology).
+const SHEAR_POWER_EXPONENT: f64 = 0.2;
+
+/// Prng seed mixing constants (SplitMix64-style integer avalanching).
+const SEED_MIX_A: u64 = 0x9E37_79B9_7F4A_7C15;
+const SEED_MIX_B: u64 = 0xD1B5_4A32_D192_ED03;
+const SEED_MIX_C: u64 = 0x243F_6A88_85A3_08D3;
+/// xorshift64* final-multiplier constant.
+const XSHIFT_MULTIPLIER: u64 = 0x2545_F491_4F6C_DD1D;
+
+/// Tiny uniform-sampling guard preventing `ln(0)` in the Box–Muller transform.
+const BOX_MULLER_MIN: f64 = 1e-12;
+
+/// Smallest accepted turbulence integral scale (m) — keeps the AR-1 filter
+/// time constant physically meaningful for arbitrary user-supplied values.
+const DRYDEN_SCALE_MIN: f64 = 10.0;
+
 /// Turbulence intensity settings. Roughly follows the light/moderate/severe
 /// qualitative categories used in PILOT FRIENDLY pilot handbooks / MIL-STD
 /// gust magnitude bands at typical UAV cruise altitudes.
@@ -87,8 +132,8 @@ impl Default for WindConfig {
             reference_altitude: 1000.0,
             wind_shear: false,
             turbulence: TurbulenceIntensity::Light,
-            turbulence_scale: 533.0,
-            seed: 0x9E37_79B9_7F4A_7C15,
+            turbulence_scale: DRYDEN_LOW_ALTITUDE_SCALE,
+            seed: SEED_MIX_A,
         }
     }
 }
@@ -114,15 +159,14 @@ impl Prng {
         x ^= x << 25;
         x ^= x >> 27;
         self.state = x;
-        // 0x2545_F491_4F6C_DD1D
-        let w = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let w = x.wrapping_mul(XSHIFT_MULTIPLIER);
         (w >> 11) as f64 / (1u64 << 53) as f64
     }
 
     /// Standard normal via Box–Muller.
     fn next_unit_gaussian(&mut self) -> f64 {
-        let u1 = (self.next_f64() + 1e-12).min(0.999_999_999);
-        let u2 = self.next_f64().max(1e-12);
+        let u1 = (self.next_f64() + BOX_MULLER_MIN).min(0.999_999_999);
+        let u2 = self.next_f64().max(BOX_MULLER_MIN);
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
 }
@@ -143,8 +187,8 @@ impl GustState {
         // Dryden time constant for the u-component: tau = L / V.
         // For a target integral scale and airspeed, low-pass with tau = L / V
         // produces the characteristic "long-wavelength" gust build.
-        let v = vt_air.abs().max(15.0); // guard near hover/stall
-        let tau = (l / v).max(0.05);
+        let v = vt_air.abs().max(DRYDEN_V_GUARD); // guard near hover/stall
+        let tau = (l / v).max(DRYDEN_TAU_MIN);
         // Discrete first-order low-pass. For an AR(1) filter
         //   x[n] = a*white + (1-a)*x[n-1]
         // the steady-state variance is a²/(2a−a²) * Var(white). Scaling the
@@ -173,15 +217,15 @@ impl WindEnvironment {
             config,
             gust_u: GustState {
                 velocity: 0.0,
-                prng: Prng::new(base.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1),
+                prng: Prng::new(base.wrapping_mul(SEED_MIX_A) | 1),
             },
             gust_v: GustState {
                 velocity: 0.0,
-                prng: Prng::new(base.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1),
+                prng: Prng::new(base.wrapping_mul(SEED_MIX_B) | 1),
             },
             gust_w: GustState {
                 velocity: 0.0,
-                prng: Prng::new(base.wrapping_mul(0x243F_6A88_85A3_08D3) | 1),
+                prng: Prng::new(base.wrapping_mul(SEED_MIX_C) | 1),
             },
         }
     }
@@ -199,7 +243,7 @@ impl WindEnvironment {
             if alt < z_ref {
                 // Below reference: scale down as ~sqrt or log; use a physically
                 // credible power-law boundary layer profile.
-                mag *= (alt / z_ref).powf(0.2);
+                mag *= (alt / z_ref).powf(SHEAR_POWER_EXPONENT);
             }
             // Above reference: keep the reference wind.
         }
@@ -216,13 +260,13 @@ impl WindEnvironment {
     /// airspeed, advanced by `dt` seconds.
     pub fn turbulence(&mut self, vt_air: f64, dt: f64) -> Vector3<f64> {
         let sigma_u = self.config.turbulence.sigma_u();
-        let l = self.config.turbulence_scale.max(10.0);
+        let l = self.config.turbulence_scale.max(DRYDEN_SCALE_MIN);
         // Dryden scaling of the lateral/vertical RMS from the longitudinal one.
         let sigma_v = sigma_u;
-        let sigma_w = sigma_u.mul_add(0.7, 0.0);
+        let sigma_w = sigma_u.mul_add(DRYDEN_W_RATIO, 0.0);
         let u_g = self.gust_u.step(vt_air, sigma_u, l, dt);
         let v_g = self.gust_v.step(vt_air, sigma_v, l, dt);
-        let w_g = self.gust_w.step(vt_air, sigma_w, l * 0.5, dt);
+        let w_g = self.gust_w.step(vt_air, sigma_w, l * DRYDEN_L_W_RATIO, dt);
         // Wind is expressed in Earth NED; the gust axes were generated in the
         // NED basis (an approximation of the true body-aligned Dryden frame,
         // which for a near-level cruise is a small-angle difference).
