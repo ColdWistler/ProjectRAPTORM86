@@ -1,5 +1,9 @@
 //! Probe: verify wind affects groundspeed (not airspeed) and doesn't destabilize
 //! trimmed flight. Run with the repo root as CWD: `cargo run -p flight_core --example wind_probe`.
+//!
+//! Intended as a CLI sanity check (not part of the automated test suite); the
+//! equivalent assertions live in `flight_core/src/wind.rs` under
+//! `wind_changes_ground_speed_not_air_speed`.
 
 use flight_core::{Simulator, WindConfig, WindEnvironment};
 use nalgebra::Vector3;
