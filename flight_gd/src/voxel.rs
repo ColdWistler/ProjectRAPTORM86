@@ -12,6 +12,13 @@
 //! Geometry is expected in the body frame used everywhere else: nose +X, up +Y,
 //! right +Z. The model should already be centred at the origin (CG) and scaled
 //! to a sensible size; the caller normalizes it before handing the triangles in.
+//!
+//! # Algorithm
+//! - Inside/outside classification uses a parity test (ray increasingly cast
+//!   along +X) — valid for arbitrary, non-manifold triangle soups.
+//! - Triangle sweep is accelerated by bucketing triangles into their `yz`
+//!   footprint so each cell ray test inspects only nearby geometry.
+//! - See the flat-plate force model implemented in [`crate::shape`].
 
 use flight_core::config::CollisionPanel;
 
