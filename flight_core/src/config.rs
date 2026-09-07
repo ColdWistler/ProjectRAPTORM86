@@ -22,6 +22,9 @@ fn default_cm_adot() -> f64 { -3.0 }
 fn default_thrust_arm() -> f64 { 0.0 }
 fn default_power_max() -> f64 { 119_000.0 }
 
+fn default_propulsion() -> Propulsion {
+    Propulsion::Propeller
+}
 fn default_engine_count() -> u32 { 1 }
 fn default_engine_lateral_arm() -> f64 { 0.0 }
 fn default_prop_torque_coeff() -> f64 { 0.0 }
@@ -55,6 +58,29 @@ fn default_flap_stall_shift() -> f64 { 6.0_f64.to_radians() }
 // to overcome the residual nose-up from level-trim coupling (~0.4 kN*m), not
 // dominate normal flight.
 fn default_spiral_nose_drop_cm() -> f64 { 0.10 }
+
+/// Propulsion system type, controlling how the available thrust varies with
+/// airspeed.
+///
+/// * [`Propulsion::Propeller`] — constant-power propeller: thrust is
+///   `min(T_max·δ, P_max·δ / V)`, so above the corner speed it falls off with
+///   airspeed. This caps the top speed (and damps the phugoid).
+/// * [`Propulsion::Jet`] — turbojet/turbofan: thrust stays roughly constant
+///   with airspeed (only the air-density ratio scales it), so the aircraft can
+///   keep pushing fast without running out of thrust. Propeller-specific
+///   couplings (torque, P-factor, gyroscopic precession) do not apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Propulsion {
+    Propeller,
+    Jet,
+}
+
+impl Default for Propulsion {
+    fn default() -> Self {
+        Propulsion::Propeller
+    }
+}
 
 /// A fully-parameterized description of the aircraft that the flight
 /// dynamics and aerodynamic models depend on.
@@ -103,9 +129,16 @@ pub struct AircraftConfig {
     /// Maximum engine shaft power in Watts (W). A fixed-pitch propeller
     /// delivers roughly constant power, so the available thrust falls off as
     /// `P_max / V` once airspeed rises above the corner speed; this caps the
-    /// airspeed and damps the phugoid.
+    /// airspeed and damps the phugoid. The jet model ignores this term.
     #[serde(default = "default_power_max")]
     pub power_max: f64,
+
+    /// Propulsion system type (`"propeller"` or `"jet"`). Defaults to
+    /// propeller, preserving the constant-power model for existing configs.
+    /// A jet's thrust does not fall off with airspeed, which unlocks fast
+    /// long-range cruise for a "normal engine" aircraft.
+    #[serde(default = "default_propulsion")]
+    pub propulsion: Propulsion,
 
     // --- JSBSim-grade High-AoA & Nonlinear Aero Extensions ---
     /// Oswald wing efficiency span factor e (0.75 - 0.85).
