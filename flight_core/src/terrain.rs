@@ -14,6 +14,15 @@
 //! A flat (`Terrain::flat()`) surface is the default and disables terrain
 //! effects, so aircraft configs and the RL environment that don't opt in are
 //! unaffected.
+//!
+//! # Methods
+//! - Bilinear interpolation over the sampled grid follows standard heightfield
+//!   practice (e.g. as used in X-Plane / RealFlight mesh queries).
+//! - Orographic (mountain-wave) vertical wind is the advective term
+//!   `w_z = −(V_wind · ∇h)` with an exponential altitude decay — a reduced
+//!   form of the terrain-induced vertical velocity used in mesoscale
+//!   diagnostics (Markowski & Richardson, *Mesoscale Meteorology in Midlatitudes*,
+//!   §4.4).
 
 use nalgebra::{Vector2, Vector3};
 

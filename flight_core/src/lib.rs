@@ -5,6 +5,17 @@
 //! full rigid-body dynamics using a quaternion-based attitude representation,
 //! 1976 US Standard Atmosphere, nonlinear post-stall aerodynamics, and an
 //! RK4 numerical integrator.
+//!
+//! # Standards & Traceability
+//! - 1976 U.S. Standard Atmosphere — NASA SP-747.
+//! - Post-stall aerodynamics — Viterna & Corrigan, NASA CR 1980.
+//! - Atmospheric turbulence — MIL-F-8785C / MIL-HDBK-1797 (Dryden model).
+//! - Axis conventions & dynamics — Stevens & Lewis, *Aircraft Control and
+//!   Simulation*, 2nd ed.
+//! - Integration — Press et al., *Numerical Recipes in C*, 2nd ed., §16.1 (RK4).
+//!
+//! Each module header carries the specific standard/source it implements.
+//! See the per-module `//!` documentation for units and conventions.
 
 pub mod aero;
 pub mod atmosphere;

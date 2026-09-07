@@ -1,4 +1,13 @@
 //! Reinforcement-learning environment wrapper around [`crate::Simulator`].
+//!
+//! Implements a Gymnasium-compatible single-agent interface
+//! (`reset` / `step` / `observation` / `reward` / `terminated` / `truncated`)
+//! so the flight dynamics engine can be trained with RL libraries
+//! (e.g. stable-baselines3 via a Python bridge).
+//!
+//! # Standards References
+//! - Environment API shape follows the OpenAI Gymnasium environment interface
+//!   (Farama Foundation, gymnasium v1.0+ specification).
 
 use crate::integrator::step;
 use crate::{Simulator, WindConfig, WindEnvironment};

@@ -8,6 +8,16 @@
 //!   autopilot hold, full HUD telemetry, NED→Godot transform).
 //! * `WindTunnelNode` — fixed-aircraft wind-tunnel flow field: physics-driven
 //!   smoke-streak advection plus the aero forces/moments for the HUD.
+//!
+//! # Conventions
+//! Godot world is **Y-up**; NED Earth frame maps to world
+//! `(north, -down, east)`. Aircraft models use the `flight_core` body frame
+//! (nose +X, up +Y, right +Z).
+//!
+//! # Standards & Traceability
+//! Physics semantics (units, frames, derivative conventions) are inherited
+//! verbatim from `flight_core`; see the crate documentation there for the
+//! underlying standards (NASA SP-747, MIL-F-8785C, Viterna-Corrigan, RK4).
 
 mod sim;
 mod tunnel;

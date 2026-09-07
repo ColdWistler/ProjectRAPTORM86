@@ -3,6 +3,20 @@
 //! Provides geopotential altitude, temperature, static pressure, air density,
 //! speed of sound, dynamic/kinematic viscosity, and Mach number calculation
 //! up to 86 km (53 miles), matching JSBSim/NASA standards.
+//!
+//! # Standards References
+//! - **NASA SP-747** — "U.S. Standard Atmosphere, 1976", National Oceanic and
+//!   Atmospheric Administration / National Aeronautics and Space
+//!   Administration / United States Air Force, October 1976.
+//! - Piecewise layer lapse rates and base values (0–86 km) follow the tabulated
+//!   geopotential-altitude model in SP-747 Tables 2 and 3.
+//! - Sutherland's viscosity law constants follow the values cited in
+//!   Anderson, *Fundamentals of Aerodynamics*, 5th ed., Ch. 15.
+//!
+//! # Verification & Validation
+//! Sea-level and tropopause checks in the test suite reproduce the SP-747
+//! tabulated values (288.15 K, 101,325 Pa, 1.225 kg/m³) to within float
+//! precision; see `sea_level_standard_atmosphere`.
 
 /// Mean Earth radius for geopotential altitude conversion (meters).
 pub const EARTH_RADIUS: f64 = 6_356_766.0;

@@ -2,11 +2,28 @@
 //!
 //! Features:
 //!   * Altitude-dependent density, dynamic pressure, and Mach number via
-//!     the 1976 U.S. Standard Atmosphere model.
+//!     the 1976 U.S. Standard Atmosphere model (see [`crate::atmosphere`]).
 //!   * Viterna-Corrigan high-AoA nonlinear stall and post-stall model.
 //!   * Prandtl-Glauert compressibility correction and Mach wave drag rise.
 //!   * Downwash-lag (alpha-dot) pitch damping and stall center-of-pressure migration.
 //!   * Full 6-DOF aerodynamic forces (Fx, Fy, Fz) and moments (L, M, N).
+//!
+//! # Standards References
+//! - **Viterna & Corrigan** — "Prediction of the Post-Stall Regime for Light
+//!   Aircraft", NASA CR 1980 (also NASA TM-80001), flat-plate separated-flow
+//!   lift/drag model with smooth blending.
+//! - **Prandtl-Glauert rule** — compressibility correction `β = √(1−M²)`;
+//!   see Anderson, *Fundamentals of Aerodynamics*, 5th ed., §11.7.
+//! - **Prandtl-Glauert per RADIAN normalisation** of the lift-curve slope
+//!   matches JSBSim's `aero/lift` handling of `cla` at compressible Mach.
+//! - **Downwash-lag alpha-dot damping**, **stall centre-of-pressure shift**:
+//!   Stevens & Lewis, *Aircraft Control and Simulation*, 2nd ed., §4.3–4.4;
+//!   coverage of `Cm_adot` follows Etkin, *Dynamics of Atmospheric Flight*, §6.5.
+//! - **100% balance of forces/moments at trim**: verified against JSBSim's
+//!   classical longitudinal coefficient bookkeeping in the test suite.
+//!
+//! # Units
+//! SI throughout: forces N, moments N·m, coefficients dimensionless, angles rad.
 
 use nalgebra::{UnitQuaternion, Vector3};
 
