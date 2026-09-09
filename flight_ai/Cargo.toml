@@ -1,0 +1,10 @@
+[package]
+name = "flight_ai"
+version.workspace = true
+edition.workspace = true
+description = "Pluggable AI agent framework for Project RAPTOR M86"
+
+[dependencies]
+flight_core = { path = "../flight_core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
