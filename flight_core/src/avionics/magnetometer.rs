@@ -189,8 +189,10 @@ mod tests {
             ..Default::default()
         };
         let mut mag = MagnetometerSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_quat = [1.0, 0.0, 0.0, 0.0]; // identity
+        let mut bus = AvionicsBus {
+            true_quat: [1.0, 0.0, 0.0, 0.0], // identity
+            ..Default::default()
+        };
         mag.init(0.001);
 
         bus.sim_time = 0.06;
@@ -210,8 +212,10 @@ mod tests {
             ..Default::default()
         };
         let mut mag = MagnetometerSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_quat = [1.0, 0.0, 0.0, 0.0];
+        let mut bus = AvionicsBus {
+            true_quat: [1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
         mag.init(0.001);
 
         bus.sim_time = 0.06;
@@ -230,8 +234,10 @@ mod tests {
             ..Default::default()
         };
         let mut mag = MagnetometerSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_quat = [1.0, 0.0, 0.0, 0.0];
+        let mut bus = AvionicsBus {
+            true_quat: [1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
         mag.init(0.001);
 
         bus.sim_time = 0.0;
