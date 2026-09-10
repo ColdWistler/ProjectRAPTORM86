@@ -129,8 +129,10 @@ mod tests {
             ..Default::default()
         };
         let mut baro = BaroSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_altitude = 150.0;
+        let mut bus = AvionicsBus {
+            true_altitude: 150.0,
+            ..Default::default()
+        };
         baro.init(0.002);
 
         bus.sim_time = 0.03;
@@ -147,8 +149,10 @@ mod tests {
             ..Default::default()
         };
         let mut baro = BaroSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_altitude = 100.0;
+        let mut bus = AvionicsBus {
+            true_altitude: 100.0,
+            ..Default::default()
+        };
         baro.init(0.001);
 
         bus.sim_time = 0.0;
@@ -175,8 +179,10 @@ mod tests {
             ..Default::default()
         };
         let mut baro = BaroSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_altitude = 100.0;
+        let mut bus = AvionicsBus {
+            true_altitude: 100.0,
+            ..Default::default()
+        };
         baro.init(0.002);
 
         bus.sim_time = 0.03;

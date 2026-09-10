@@ -234,8 +234,10 @@ mod tests {
             ..Default::default()
         };
         let mut imu = ImuSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_angular_rates = Vector3::new(0.1, 0.2, 0.3);
+        let mut bus = AvionicsBus {
+            true_angular_rates: Vector3::new(0.1, 0.2, 0.3),
+            ..Default::default()
+        };
 
         // Simulate enough time for a sample
         bus.sim_time = 0.01;
@@ -256,8 +258,10 @@ mod tests {
             ..Default::default()
         };
         let mut imu = ImuSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_angular_rates = Vector3::new(1.0, 0.0, 0.0);
+        let mut bus = AvionicsBus {
+            true_angular_rates: Vector3::new(1.0, 0.0, 0.0),
+            ..Default::default()
+        };
         imu.init(0.001); // 1000 Hz physics
 
         // First sample at t=0 should fire
@@ -285,8 +289,10 @@ mod tests {
             ..Default::default()
         };
         let mut imu = ImuSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_angular_rates = Vector3::new(0.0, 0.0, 0.0);
+        let mut bus = AvionicsBus {
+            true_angular_rates: Vector3::new(0.0, 0.0, 0.0),
+            ..Default::default()
+        };
         imu.init(0.0025);
 
         let mut max_gyro = 0.0f64;
