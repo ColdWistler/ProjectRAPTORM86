@@ -244,11 +244,13 @@ mod tests {
         let mut suite = ActuatorSuite::new(cfg.clone(), cfg.clone(), cfg);
         suite.init(0.0);
 
-        let mut bus = AvionicsBus::default();
-        bus.fc_servo_elevator = 10.0;
-        bus.fc_servo_aileron = -5.0;
-        bus.fc_servo_rudder = 3.0;
-        bus.fc_esc_throttle = 0.8;
+        let mut bus = AvionicsBus {
+            fc_servo_elevator: 10.0,
+            fc_servo_aileron: -5.0,
+            fc_servo_rudder: 3.0,
+            fc_esc_throttle: 0.8,
+            ..Default::default()
+        };
 
         suite.step(&mut bus, 0.1);
 

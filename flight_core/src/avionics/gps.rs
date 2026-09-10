@@ -267,10 +267,12 @@ mod tests {
             ..Default::default()
         };
         let mut gps = GpsSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        // Identity quaternion → body = NED
-        bus.true_quat = [1.0, 0.0, 0.0, 0.0];
-        bus.true_velocity_body = Vector3::new(10.0, 0.0, 0.0); // forward
+        let mut bus = AvionicsBus {
+            // Identity quaternion → body = NED
+            true_quat: [1.0, 0.0, 0.0, 0.0],
+            true_velocity_body: Vector3::new(10.0, 0.0, 0.0), // forward
+            ..Default::default()
+        };
         gps.init(0.001);
 
         bus.sim_time = 0.11;
