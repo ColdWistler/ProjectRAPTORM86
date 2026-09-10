@@ -216,8 +216,10 @@ mod tests {
         };
         let mut batt = Battery::new(config);
         batt.set_soc(0.01);
-        let mut bus = AvionicsBus::default();
-        bus.battery_current = 20.0;
+        let mut bus = AvionicsBus {
+            battery_current: 20.0,
+            ..Default::default()
+        };
         for _ in 0..1000 {
             batt.step(&mut bus, 0.01);
         }
