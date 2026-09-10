@@ -213,8 +213,10 @@ mod tests {
             ..Default::default()
         };
         let mut gps = GpsSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_position_ned = Vector3::new(100.0, 200.0, -50.0);
+        let mut bus = AvionicsBus {
+            true_position_ned: Vector3::new(100.0, 200.0, -50.0),
+            ..Default::default()
+        };
         gps.init(0.01);
 
         bus.sim_time = 0.11;
@@ -234,8 +236,10 @@ mod tests {
             ..Default::default()
         };
         let mut gps = GpsSensor::with_seed(config, 42);
-        let mut bus = AvionicsBus::default();
-        bus.true_position_ned = Vector3::new(100.0, 0.0, 0.0);
+        let mut bus = AvionicsBus {
+            true_position_ned: Vector3::new(100.0, 0.0, 0.0),
+            ..Default::default()
+        };
         gps.init(0.001);
 
         // t=0: first sample
