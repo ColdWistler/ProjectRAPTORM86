@@ -138,8 +138,10 @@ mod tests {
         let mut esc = Esc::new(config);
         esc.init(0.0);
 
-        let mut bus = AvionicsBus::default();
-        bus.fc_esc_throttle = 1.0;
+        let mut bus = AvionicsBus {
+            fc_esc_throttle: 1.0,
+            ..Default::default()
+        };
 
         // After a short time, throttle should be > 0 but < 1
         esc.step(&mut bus, 0.1);
@@ -169,8 +171,10 @@ mod tests {
         let mut esc = Esc::new(config);
         esc.init(0.0);
 
-        let mut bus = AvionicsBus::default();
-        bus.fc_esc_throttle = 0.7;
+        let mut bus = AvionicsBus {
+            fc_esc_throttle: 0.7,
+            ..Default::default()
+        };
         for _ in 0..10 {
             esc.step(&mut bus, 0.01);
         }
