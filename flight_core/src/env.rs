@@ -260,7 +260,258 @@ fn shaped_reward(s: &crate::AircraftState, cfg: &EnvConfig) -> f64 {
     reward
 }
 
+/// Size of [`AvionicsObservation`].
+#[cfg(feature = "full-avionics")]
+pub const AVIONICS_OBS_DIM: usize = 19;
+
+/// Observation vector from the *noisy* avionics sensors on the bus (not the
+/// true physics state), so the agent learns to fly on what hardware would
+/// actually report.
+///
+/// Layout (SI unless noted):
+/// ```text
+///  0  gyro_p (rad/s)         10 baro_altitude (m)
+///  1  gyro_q (rad/s)         11 airspeed_indicated (m/s)
+///  2  gyro_r (rad/s)         12 battery_voltage (V)
+///  3  accel_x (m/s²)         13 battery_capacity_remaining_pct (%)
+///  4  accel_y (m/s²)         14 actual_elevator_deg (°)
+///  5  accel_z (m/s²)         15 actual_aileron_deg (°)
+///  6  gps_north (m, NED)     16 actual_rudder_deg (°)
+///  7  gps_east (m, NED)      17 actual_esc_output (0..1)
+///  8  gps_altitude (m)       18 sim_time (s)
+///  9  gps_fix_quality (0..3)
+/// ```
+#[cfg(feature = "full-avionics")]
+pub type AvionicsObservation = [f64; AVIONICS_OBS_DIM];
+
+/// The continuous control action applied to the **flight controller**, not
+/// directly to the aircraft. Commands are attitude setpoints:
+/// roll/pitch angles, yaw rate, and throttle.
+#[cfg(feature = "full-avionics")]
+#[derive(Debug, Clone, Copy)]
+pub struct AvionicsAction {
+    /// Commanded roll attitude offset (radians), clamped internally to ±45°.
+    pub roll_cmd: f64,
+    /// Commanded pitch attitude offset (radians), clamped internally to ±45°.
+    pub pitch_cmd: f64,
+    /// Commanded yaw rate (radians/second).
+    pub yaw_rate_cmd: f64,
+    /// Throttle setting, clamped internally to `[0.0, 1.0]`.
+    pub throttle: f64,
+}
+
+#[cfg(feature = "full-avionics")]
+impl AvionicsAction {
+    /// A level-flight cruise command: wings level, zero yaw rate, mid throttle.
+    pub fn level_cruise(throttle: f64) -> Self {
+        Self {
+            roll_cmd: 0.0,
+            pitch_cmd: 0.0,
+            yaw_rate_cmd: 0.0,
+            throttle,
+        }
+    }
+}
+
+/// Outcome of a single [`AvionicsEnvironment::step`] with a full avionics
+/// observation.
+#[cfg(feature = "full-avionics")]
+#[derive(Debug, Clone, Copy)]
+pub struct AvionicsEnvStep {
+    pub observation: AvionicsObservation,
+    pub reward: f64,
+    /// `true` if the episode ended because the aircraft crashed.
+    pub terminated: bool,
+    /// `true` if the episode ended because the step budget was exhausted.
+    pub truncated: bool,
+}
+
+/// A GPS-style continuous-control environment that flies through the simulated
+/// avionics stack: the action is an attitude command, sensors observe the
+/// noisy bus, the PID flight controller drives servos/ESC, and the actuator
+/// outputs feed the 6-DOF physics. Failures can be injected with
+/// [`AvionicsEnvironment::inject_fault`].
+#[cfg(feature = "full-avionics")]
+pub struct AvionicsEnvironment {
+    sim: Simulator,
+    avionics: AvionicsSystem,
+    pub config: EnvConfig,
+    step_count: usize,
+    wind: Option<WindEnvironment>,
+}
+
+#[cfg(feature = "full-avionics")]
+impl AvionicsEnvironment {
+    /// Load the aircraft config from `config_path` and build a fully-connected
+    /// avionics stack (IMU/GPS/baro/mag/airspeed sensors, attitude PID FC,
+    /// servo suite, ESC, battery) with default hardware characteristics.
+    pub fn new(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_config(config_path, EnvConfig::default())
+    }
+
+    /// Create an avionics environment with a custom [`EnvConfig`].
+    pub fn with_config(
+        config_path: &str,
+        config: EnvConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let sim = Simulator::new(config_path)?;
+        let wind = config.wind_config.clone().map(WindEnvironment::new);
+        let mut avionics = Self::make_avionics(config.dt);
+        avionics.init();
+        Ok(Self {
+            sim,
+            avionics,
+            config,
+            step_count: 0,
+            wind,
+        })
+    }
+
+    /// Build the default hardware stack. Register order matters: ESC and
+    /// battery are generic devices that run after the actuator suite.
+    fn make_avionics(dt: f64) -> AvionicsSystem {
+        let mut sys = AvionicsSystem::new(dt);
+        sys.add_sensor(Box::new(ImuSensor::new(ImuConfig::default())));
+        sys.add_sensor(Box::new(GpsSensor::new(GpsConfig::default())));
+        sys.add_sensor(Box::new(BaroSensor::new(BaroConfig::default())));
+        sys.add_sensor(Box::new(MagnetometerSensor::new(MagConfig::default())));
+        sys.add_sensor(Box::new(AirspeedSensor::new(AirspeedConfig::default())));
+        sys.add_controller(Box::new(FlightController::new(
+            FlightControllerConfig::default(),
+        )));
+        sys.add_actuator(Box::new(ActuatorSuite::new(
+            ServoConfig::default(),
+            ServoConfig::default(),
+            ServoConfig::default(),
+        )));
+        sys.add_component(Box::new(Esc::new(EscConfig::default())));
+        sys.add_component(Box::new(Battery::new(BatteryConfig::default())));
+        sys
+    }
+
+    /// Reset to trimmed level flight and clear all injected faults.
+    pub fn reset(&mut self) -> (AvionicsObservation, usize) {
+        let prev_steps = self.step_count;
+        self.sim.reset();
+        self.avionics.reset();
+        self.step_count = 0;
+        self.avionics.bus_mut().fc_fault_flags = FaultFlags::default();
+        (self.observation(), prev_steps)
+    }
+
+    /// Apply an attitude command, run the avionics stack, advance the physics
+    /// by `dt`, and return the next noisy observation / reward / done-flags.
+    pub fn step(&mut self, action: AvionicsAction) -> AvionicsEnvStep {
+        // 1. Feed the agent command into the bus (the FC will read it).
+        let bus = self.avionics.bus_mut();
+        bus.cmd_roll = action.roll_cmd;
+        bus.cmd_pitch = action.pitch_cmd;
+        bus.cmd_yaw_rate = action.yaw_rate_cmd;
+        bus.cmd_throttle = action.throttle.clamp(0.0, 1.0);
+
+        // 2. Compute wind + dynamic pressure for the true-state write.
+        let mut wind_vec = Vector3::zeros();
+        if let Some(wind_env) = &mut self.wind {
+            let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
+            wind_vec = wind_env.total_wind(&self.sim.state, vt_air, self.config.dt);
+        }
+        let tas = self.sim.state.true_airspeed(&wind_vec);
+        let q_dynamic = Atmosphere::at_altitude(self.sim.state.altitude()).dynamic_pressure(tas);
+
+        // 3. Sample the sim state, run sensors → FC → actuators → devices.
+        self.avionics
+            .bus_mut()
+            .write_true_state(&self.sim.state, &wind_vec, q_dynamic);
+        self.avionics.step();
+
+        // 4. Feed actual actuator outputs back into the physics.
+        let (elev, ail, rud, thr) = self.avionics.bus().read_actuator_outputs();
+        let controls = ControlInputs {
+            elevator: elev,
+            aileron: ail,
+            rudder: rud,
+            throttle: thr,
+            flap: 0.0,
+        };
+        step(
+            &mut self.sim.state,
+            &self.sim.config,
+            controls,
+            self.wind.as_ref().map(|_| &wind_vec),
+            self.config.dt,
+            None,
+        );
+
+        // 5. Bookkeeping, observation, reward, termination.
+        self.step_count += 1;
+        let observation = self.observation();
+        let reward = shaped_reward(&self.sim.state, &self.config);
+        let terminated = self.sim.state.altitude() <= self.config.ground_altitude;
+        let truncated = self.step_count >= self.config.max_steps;
+
+        AvionicsEnvStep {
+            observation,
+            reward,
+            terminated,
+            truncated,
+        }
+    }
+
+    /// Build the current observation array from the noisy bus sensor outputs.
+    pub fn observation(&self) -> AvionicsObservation {
+        let bus = self.avionics.bus();
+        [
+            bus.gyro.x,
+            bus.gyro.y,
+            bus.gyro.z,
+            bus.accel.x,
+            bus.accel.y,
+            bus.accel.z,
+            bus.gps_position_ned.x,
+            bus.gps_position_ned.y,
+            -bus.gps_position_ned.z,
+            bus.gps_fix_quality as f64,
+            bus.baro_altitude,
+            bus.airspeed_indicated,
+            bus.battery_voltage,
+            bus.battery_capacity_remaining_pct,
+            bus.actual_elevator_deg,
+            bus.actual_aileron_deg,
+            bus.actual_rudder_deg,
+            bus.actual_esc_output,
+            bus.sim_time,
+        ]
+    }
+
+    /// Inject a fault; components apply their own failure behaviour.
+    pub fn inject_fault(&mut self, flag: FaultFlag) {
+        self.avionics.inject_fault(flag, true);
+    }
+
+    /// Clear a previously injected fault.
+    pub fn clear_fault(&mut self, flag: FaultFlag) {
+        self.avionics.inject_fault(flag, false);
+    }
+
+    /// Snapshot of the currently injected faults.
+    pub fn faults(&self) -> FaultFlags {
+        self.avionics.faults()
+    }
+
+    /// The crash penalty applied when the episode terminates by impact.
+    pub fn crash_penalty(&self) -> f64 {
+        -self.config.w_crash
+    }
+
+    /// Current step index within the episode (0-based).
+    pub fn step_count(&self) -> usize {
+        self.step_count
+    }
+}
+
 /// Verification & Validation (V&V) for the OpenAI-gym-style environment
+/// wrapper: config loading from disk, reset to trimmed level flight, state/
+/// observation mapping and step indexing.
 #[cfg(test)]
 mod tests {
     use super::*;
