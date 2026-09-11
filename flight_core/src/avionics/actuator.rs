@@ -267,4 +267,63 @@ mod tests {
         assert!((bus.actual_rudder_deg - 3.0).abs() < 0.5);
         assert!((bus.actual_esc_output - 0.8).abs() < 1e-9);
     }
+
+    #[test]
+    fn jammed_servo_freezes_position() {
+        let cfg = ServoConfig {
+            rate_limit_deg_s: 1000.0, // instant otherwise
+            resolution_bits: 0,
+            ..Default::default()
+        };
+        let mut suite = ActuatorSuite::new(cfg.clone(), cfg.clone(), cfg);
+        suite.init(0.0);
+
+        let mut bus = AvionicsBus {
+            fc_servo_elevator: 20.0,
+            fc_servo_aileron: -15.0,
+            fc_servo_rudder: 10.0,
+            fc_fault_flags: crate::avionics::FaultFlags {
+                servo_elevator_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        suite.step(&mut bus, 0.1);
+
+        // Elevator jams at its trim/start position (0), ignoring the +20 command.
+        assert!(
+            (bus.actual_elevator_deg - 0.0).abs() < 1e-9,
+            "jammed elevator must not move, got {}",
+            bus.actual_elevator_deg
+        );
+        // Healthy aileron/rudder track normally.
+        assert!((bus.actual_aileron_deg - (-15.0)).abs() < 0.5);
+        assert!((bus.actual_rudder_deg - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn esc_failure_zeroes_throttle() {
+        let cfg = ServoConfig {
+            rate_limit_deg_s: 1000.0,
+            resolution_bits: 0,
+            ..Default::default()
+        };
+        let mut suite = ActuatorSuite::new(cfg.clone(), cfg.clone(), cfg);
+        suite.init(0.0);
+
+        let mut bus = AvionicsBus {
+            fc_esc_throttle: 0.9,
+            fc_fault_flags: crate::avionics::FaultFlags {
+                esc_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        suite.step(&mut bus, 0.1);
+
+        assert_eq!(
+            bus.actual_esc_output, 0.0,
+            "failed ESC must produce no thrust"
+        );
+    }
 }

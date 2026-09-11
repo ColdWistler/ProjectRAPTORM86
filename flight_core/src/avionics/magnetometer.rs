@@ -269,4 +269,32 @@ mod tests {
             "same attitude → same field"
         );
     }
+
+    #[test]
+    fn mag_failure_zeroes_field() {
+        let config = MagConfig {
+            noise: 0.0,
+            earth_field_ned: [22_000.0, 5_400.0, 42_000.0],
+            ..Default::default()
+        };
+        let mut mag = MagnetometerSensor::with_seed(config, 42);
+        let mut bus = AvionicsBus {
+            true_quat: [1.0, 0.0, 0.0, 0.0],
+            fc_fault_flags: crate::avionics::FaultFlags {
+                mag_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        mag.init(0.001);
+
+        bus.sim_time = 0.06;
+        mag.step(&mut bus, 0.001);
+
+        assert_eq!(
+            bus.mag_field_body,
+            Vector3::zeros(),
+            "failed magnetometer must read null field"
+        );
+    }
 }

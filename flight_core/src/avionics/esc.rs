@@ -99,6 +99,13 @@ impl AvionicsComponent for Esc {
     }
 
     fn step(&mut self, bus: &mut AvionicsBus, dt: f64) {
+        // Failure mode: ESC dead — no throttle output, no current draw
+        if bus.fc_fault_flags.esc_failed {
+            self.current_throttle = 0.0;
+            bus.actual_esc_output = 0.0;
+            return;
+        }
+
         // 1st-order lag on throttle, exponential smoothing
         let tau = self.config.motor_tau.max(1e-6);
         let alpha = dt / (tau + dt);
