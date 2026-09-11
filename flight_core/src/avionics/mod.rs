@@ -50,7 +50,7 @@ pub mod sensor_model;
 pub mod system;
 pub mod traits;
 
-pub use bus::{AvionicsBus, FaultFlags, FcMode};
+pub use bus::{AvionicsBus, FaultFlag, FaultFlags, FcMode};
 pub use system::AvionicsSystem;
 pub use traits::{Actuator, AvionicsComponent, Controller, Sensor};
 

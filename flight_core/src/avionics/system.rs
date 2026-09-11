@@ -9,8 +9,15 @@
 //! 1. Write true aircraft state from physics into the bus
 //! 2. Each sensor samples at its own rate (may skip frames)
 //! 3. Flight controller reads sensors, writes servo/ESC commands
-//! 4. Actuators read commands, write actual positions
+//! 4. Actuators/device components (servos, ESC, battery) write actual outputs
 //! 5. Caller reads actuator outputs and feeds them to physics
+//!
+//! # Failure injection
+//! Components self-check the shared `fc_fault_flags` register (see
+//! [`FaultFlag`]), so injecting a fault is a single flag write and the
+//! failing device drives its own failure behaviour. Use
+//! [`AvionicsSystem::inject_fault`] to inject faults from outside (e.g. the
+//! RL training environment).
 //!
 //! # Usage
 //! ```rust,ignore
@@ -26,8 +33,8 @@
 //! let (elev, ail, rud, thr) = avionics.bus().read_actuator_outputs();
 //! ```
 
-use super::bus::{AvionicsBus, FcMode};
-use super::traits::{Actuator, Controller, Sensor};
+use super::bus::{AvionicsBus, FaultFlag, FaultFlags, FcMode};
+use super::traits::{Actuator, AvionicsComponent, Controller, Sensor};
 
 /// The avionics system: owns the bus and all registered components.
 pub struct AvionicsSystem {
@@ -35,6 +42,7 @@ pub struct AvionicsSystem {
     sensors: Vec<Box<dyn Sensor>>,
     controllers: Vec<Box<dyn Controller>>,
     actuators: Vec<Box<dyn Actuator>>,
+    devices: Vec<Box<dyn AvionicsComponent>>,
     dt: f64,
 }
 
@@ -46,6 +54,7 @@ impl AvionicsSystem {
             sensors: Vec::new(),
             controllers: Vec::new(),
             actuators: Vec::new(),
+            devices: Vec::new(),
             dt,
         }
     }
@@ -84,6 +93,27 @@ impl AvionicsSystem {
         self.actuators.push(actuator);
     }
 
+    /// Register a generic component that is neither a sensor, controller nor
+    /// actuator (e.g. the ESC and battery). Devices run after actuators each
+    /// step. `add_sensor`/`add_controller`/`add_actuator` remain available for
+    /// the trait-specific stages.
+    pub fn add_component(&mut self, device: Box<dyn AvionicsComponent>) {
+        tracing_log(&format!("[Avionics] registered component: {}", device.name()));
+        self.devices.push(device);
+    }
+
+    /// Set (`on = true`) or clear (`on = false`) a fault in the shared
+    /// register. Components self-check the register and apply their own
+    /// failure behaviour.
+    pub fn inject_fault(&mut self, flag: FaultFlag, on: bool) {
+        self.bus.fc_fault_flags.set(flag, on);
+    }
+
+    /// Snapshot of the currently injected faults.
+    pub fn faults(&self) -> FaultFlags {
+        self.bus.fc_fault_flags
+    }
+
     /// Initialize all registered components.
     pub fn init(&mut self) {
         for sensor in &mut self.sensors {
@@ -95,6 +125,9 @@ impl AvionicsSystem {
         for act in &mut self.actuators {
             act.init(self.dt);
         }
+        for dev in &mut self.devices {
+            dev.init(self.dt);
+        }
         tracing_log("[Avionics] system initialized");
     }
 
@@ -105,6 +138,7 @@ impl AvionicsSystem {
     /// 1. Sensors sample at their own rates (skip frames as needed)
     /// 2. Controllers compute servo/ESC commands from sensor data
     /// 3. Actuators process commands into actual positions
+    /// 4. Devices (ESC, battery) finalize power/output state
     pub fn step(&mut self) {
         // 1. Sensors: each samples at its own rate.
         // Sensors handle their own internal timing; we call step() every
@@ -123,6 +157,11 @@ impl AvionicsSystem {
             act.step(&mut self.bus, self.dt);
         }
 
+        // 4. Devices
+        for dev in &mut self.devices {
+            dev.step(&mut self.bus, self.dt);
+        }
+
         self.bus.sim_time += self.dt;
     }
 
@@ -136,6 +175,9 @@ impl AvionicsSystem {
         }
         for act in &mut self.actuators {
             act.reset();
+        }
+        for dev in &mut self.devices {
+            dev.reset();
         }
         self.bus.clear_sensor_outputs();
         self.bus.sim_time = 0.0;

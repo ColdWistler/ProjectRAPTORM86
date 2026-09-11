@@ -114,6 +114,14 @@ impl AvionicsComponent for MagnetometerSensor {
             return;
         }
 
+        // Failure mode: magnetometer reads null field
+        if bus.fc_fault_flags.mag_failed {
+            bus.mag_field_body = Vector3::zeros();
+            self.last_sample_time = bus.sim_time;
+            bus.mag_sample_time = bus.sim_time;
+            return;
+        }
+
         // Earth magnetic field in NED → body frame via DCM
         let b_earth = Vector3::new(
             self.config.earth_field_ned[0],

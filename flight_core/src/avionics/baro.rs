@@ -96,6 +96,12 @@ impl AvionicsComponent for BaroSensor {
             return;
         }
 
+        // Failure mode: baro stuck (hold-last) — output frozen, no update
+        if bus.fc_fault_flags.baro_failed {
+            self.last_sample_time = bus.sim_time;
+            return;
+        }
+
         // Barometric altitude: true altitude + sensor noise + bias.
         // Also subtract dynamic pressure head correction: Δh ≈ q / (ρ g).
         // For simplicity, just pass true altitude through the pipeline.

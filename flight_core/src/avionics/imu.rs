@@ -160,6 +160,16 @@ impl AvionicsComponent for ImuSensor {
             return;
         }
 
+        // Failure mode: dead IMU drives outputs to zero
+        if bus.fc_fault_flags.imu_failed {
+            bus.gyro = Vector3::zeros();
+            bus.accel = Vector3::zeros();
+            bus.imu_sample_time = bus.sim_time;
+            self.last_sample_time = bus.sim_time;
+            self.vibration_phase += dt;
+            return;
+        }
+
         // --- Gyroscope ---
         // True angular rates + vibration noise
         let vibration = if self.config.vibration_scale > 0.0 {

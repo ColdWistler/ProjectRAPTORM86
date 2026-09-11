@@ -167,21 +167,29 @@ impl AvionicsComponent for ActuatorSuite {
     }
 
     fn step(&mut self, bus: &mut AvionicsBus, dt: f64) {
-        // Read FC servo commands from bus
-        self.elevator.command(bus.fc_servo_elevator);
-        self.aileron.command(bus.fc_servo_aileron);
-        self.rudder.command(bus.fc_servo_rudder);
+        // A jammed servo no longer tracks its command: its position is frozen.
+        if !bus.fc_fault_flags.servo_elevator_failed {
+            self.elevator.command(bus.fc_servo_elevator);
+            self.elevator.step(bus, dt);
+        }
+        if !bus.fc_fault_flags.servo_aileron_failed {
+            self.aileron.command(bus.fc_servo_aileron);
+            self.aileron.step(bus, dt);
+        }
+        if !bus.fc_fault_flags.servo_rudder_failed {
+            self.rudder.command(bus.fc_servo_rudder);
+            self.rudder.step(bus, dt);
+        }
 
-        // Step each servo
-        self.elevator.step(bus, dt);
-        self.aileron.step(bus, dt);
-        self.rudder.step(bus, dt);
-
-        // Write actual positions to bus
+        // Write actual positions to bus. A failed ESC produces no thrust.
         bus.actual_elevator_deg = self.elevator.actual_output();
         bus.actual_aileron_deg = self.aileron.actual_output();
         bus.actual_rudder_deg = self.rudder.actual_output();
-        bus.actual_esc_output = bus.fc_esc_throttle;
+        bus.actual_esc_output = if bus.fc_fault_flags.esc_failed {
+            0.0
+        } else {
+            bus.fc_esc_throttle
+        };
     }
 
     fn reset(&mut self) {
