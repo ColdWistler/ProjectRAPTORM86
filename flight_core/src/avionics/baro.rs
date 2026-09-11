@@ -196,4 +196,38 @@ mod tests {
 
         assert!((bus.baro_altitude - 105.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn baro_failure_holds_last() {
+        let config = BaroConfig {
+            noise: 0.0,
+            ..Default::default()
+        };
+        let mut baro = BaroSensor::with_seed(config, 42);
+        let mut bus = AvionicsBus {
+            true_altitude: 100.0,
+            ..Default::default()
+        };
+        baro.init(0.002);
+
+        bus.sim_time = 0.03;
+        baro.step(&mut bus, 0.002);
+        assert!((bus.baro_altitude - 100.0).abs() < 1e-9);
+
+        // Fail the sensor; the aircraft climbs but the reading must hold.
+        bus.fc_fault_flags = crate::avionics::FaultFlags {
+            baro_failed: true,
+            ..Default::default()
+        };
+        bus.true_altitude = 900.0;
+        for _ in 0..20 {
+            bus.sim_time += 0.05;
+            baro.step(&mut bus, 0.002);
+        }
+        assert!(
+            (bus.baro_altitude - 100.0).abs() < 1e-9,
+            "baro must hold last reading on failure, got {}",
+            bus.baro_altitude
+        );
+    }
 }

@@ -294,4 +294,35 @@ mod tests {
             "forward body velocity should map to NED x"
         );
     }
+
+    #[test]
+    fn gps_failure_drops_fix() {
+        let config = GpsConfig::default();
+        let mut gps = GpsSensor::with_seed(config, 42);
+        let mut bus = AvionicsBus {
+            true_position_ned: Vector3::new(500.0, 700.0, -100.0),
+            fc_fault_flags: crate::avionics::FaultFlags {
+                gps_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        gps.init(0.01);
+
+        bus.sim_time = 0.11;
+        gps.step(&mut bus, 0.01);
+
+        assert_eq!(bus.gps_fix_quality, 0, "failed GPS must report no fix");
+        assert!(bus.gps_hdop > 50.0, "failed GPS must report degraded HDOP");
+        assert_eq!(
+            bus.gps_position_ned,
+            Vector3::zeros(),
+            "failed GPS must not report a position"
+        );
+        assert_eq!(
+            bus.gps_velocity_ned,
+            Vector3::zeros(),
+            "failed GPS must not report a velocity"
+        );
+    }
 }
