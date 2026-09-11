@@ -116,7 +116,8 @@ impl AvionicsComponent for Battery {
     }
 
     fn step(&mut self, bus: &mut AvionicsBus, dt: f64) {
-        // Total current = load current (written by ESC etc.) + bus current
+        // Total current = load current (accumulated this step by ESC/consumers)
+        // plus the fixed avionics bus draw.
         let total_current = bus.battery_current + self.config.bus_current;
 
         // Terminal voltage: OCV − I×R (voltage sag under load)
@@ -129,7 +130,8 @@ impl AvionicsComponent for Battery {
         self.soc = self.soc.clamp(0.0, 1.0);
 
         bus.battery_capacity_remaining_pct = self.soc * 100.0;
-        bus.battery_current = total_current;
+        // The step's draw is consumed; consumers re-accumulate on the next step.
+        bus.battery_current = 0.0;
 
         // Depletion flag for failure injection. Sticky OR: once the cell is
         // physically empty (or the flag was injected) it stays set until the
@@ -198,8 +200,8 @@ mod tests {
         batt.init(0.0);
 
         // Draw 10A for 5 minutes = 0.833Ah → SoC drops to ~17%
-        bus.battery_current = 10.0;
         for _ in 0..(5 * 60 * 100) {
+            bus.battery_current = 10.0;
             batt.step(&mut bus, 0.01);
         }
 
@@ -218,11 +220,9 @@ mod tests {
         };
         let mut batt = Battery::new(config);
         batt.set_soc(0.01);
-        let mut bus = AvionicsBus {
-            battery_current: 20.0,
-            ..Default::default()
-        };
+        let mut bus = AvionicsBus::default();
         for _ in 0..1000 {
+            bus.battery_current = 20.0;
             batt.step(&mut bus, 0.01);
         }
         assert!(
