@@ -13,6 +13,17 @@ use crate::integrator::step;
 use crate::{ControlInputs, Simulator, WindConfig, WindEnvironment};
 use nalgebra::Vector3;
 
+#[cfg(feature = "full-avionics")]
+use crate::atmosphere::Atmosphere;
+#[cfg(feature = "full-avionics")]
+use crate::avionics::{
+    ActuatorSuite, AirspeedConfig, AirspeedSensor, AvionicsSystem, BaroConfig, BaroSensor, Battery,
+    BatteryConfig, Esc, EscConfig, FaultFlag, FaultFlags, FlightController, FlightControllerConfig,
+    GpsConfig, GpsSensor, ImuConfig, ImuSensor, MagConfig, MagnetometerSensor, ServoConfig,
+};
+#[cfg(feature = "full-avionics")]
+use crate::AircraftState;
+
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
 pub type Observation = [f64; 12];
@@ -219,19 +230,7 @@ impl Environment {
     /// Shaped reward for the *current* aircraft state plus a crash penalty
     /// handled by the caller via `terminated`.
     fn compute_reward(&self, _alt_before: f64) -> f64 {
-        let cfg = &self.config;
-        let s = &self.sim.state;
-
-        let alt = s.altitude();
-        let airspeed = s.airspeed();
-        let (roll, pitch, _yaw) = s.euler_angles();
-
-        let mut reward = cfg.w_time;
-        reward -= cfg.w_alt * (alt - cfg.target_altitude).abs() / cfg.scale_alt;
-        reward -= cfg.w_spd * (airspeed - cfg.target_airspeed).abs() / cfg.scale_spd;
-        reward -= cfg.w_pitch * pitch * pitch;
-        reward -= cfg.w_roll * roll * roll;
-        reward
+        shaped_reward(&self.sim.state, &self.config)
     }
 
     /// The crash penalty applied when the episode terminates by impact.
@@ -245,9 +244,23 @@ impl Environment {
     }
 }
 
+/// Shaped reward for the current aircraft state: survival time bonus minus
+/// weighted errors on altitude, airspeed, and away-from-level attitude.
+/// Shared by [`Environment`] and [`AvionicsEnvironment`].
+fn shaped_reward(s: &crate::AircraftState, cfg: &EnvConfig) -> f64 {
+    let alt = s.altitude();
+    let airspeed = s.airspeed();
+    let (roll, pitch, _yaw) = s.euler_angles();
+
+    let mut reward = cfg.w_time;
+    reward -= cfg.w_alt * (alt - cfg.target_altitude).abs() / cfg.scale_alt;
+    reward -= cfg.w_spd * (airspeed - cfg.target_airspeed).abs() / cfg.scale_spd;
+    reward -= cfg.w_pitch * pitch * pitch;
+    reward -= cfg.w_roll * roll * roll;
+    reward
+}
+
 /// Verification & Validation (V&V) for the OpenAI-gym-style environment
-/// wrapper: config loading from disk, reset to trimmed level flight, state/
-/// observation mapping and step indexing.
 #[cfg(test)]
 mod tests {
     use super::*;
