@@ -104,6 +104,14 @@ impl AvionicsComponent for AirspeedSensor {
             return;
         }
 
+        // Failure mode: blocked pitot — indicated airspeed reads zero
+        if bus.fc_fault_flags.airspeed_failed {
+            bus.airspeed_indicated = 0.0;
+            bus.airspeed_sample_time = bus.sim_time;
+            self.last_sample_time = bus.sim_time;
+            return;
+        }
+
         // Indicated airspeed ≈ TAS × (1 + position_error) + noise + bias
         let ias = bus.true_airspeed * (1.0 + self.config.position_error);
         bus.airspeed_indicated = self.pipeline.process(ias, dt);

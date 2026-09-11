@@ -136,6 +136,17 @@ impl AvionicsComponent for GpsSensor {
             return;
         }
 
+        // Failure mode: dead GPS — no fix, no position or velocity
+        if bus.fc_fault_flags.gps_failed {
+            bus.gps_fix_quality = 0;
+            bus.gps_hdop = 99.9;
+            bus.gps_position_ned = Vector3::zeros();
+            bus.gps_velocity_ned = Vector3::zeros();
+            self.last_sample_time = bus.sim_time;
+            bus.gps_sample_time = bus.sim_time;
+            return;
+        }
+
         // Position: true NED + noise
         bus.gps_position_ned.x = self
             .pos_noise_x

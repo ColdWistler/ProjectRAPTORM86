@@ -34,6 +34,78 @@ pub struct FaultFlags {
     pub battery_depleted: bool,
 }
 
+impl FaultFlags {
+    /// True when no fault is registered.
+    pub fn all_clear(&self) -> bool {
+        !self.imu_failed
+            && !self.gps_failed
+            && !self.baro_failed
+            && !self.mag_failed
+            && !self.airspeed_failed
+            && !self.servo_elevator_failed
+            && !self.servo_aileron_failed
+            && !self.servo_rudder_failed
+            && !self.esc_failed
+            && !self.battery_depleted
+    }
+
+    /// Set or clear the single fault referenced by `flag`.
+    pub fn set(&mut self, flag: FaultFlag, on: bool) {
+        *flag.field_of(self) = on;
+    }
+
+    /// Read the single fault referenced by `flag`.
+    pub const fn has(&self, flag: FaultFlag) -> bool {
+        match flag {
+            FaultFlag::Imu => self.imu_failed,
+            FaultFlag::Gps => self.gps_failed,
+            FaultFlag::Baro => self.baro_failed,
+            FaultFlag::Mag => self.mag_failed,
+            FaultFlag::Airspeed => self.airspeed_failed,
+            FaultFlag::ServoElevator => self.servo_elevator_failed,
+            FaultFlag::ServoAileron => self.servo_aileron_failed,
+            FaultFlag::ServoRudder => self.servo_rudder_failed,
+            FaultFlag::Esc => self.esc_failed,
+            FaultFlag::BatteryDepleted => self.battery_depleted,
+        }
+    }
+}
+
+/// A single injectable fault source. Each variant maps exactly one bit of
+/// [`FaultFlags`]; components self-check the shared register so failure
+/// behaviour lives with the failing device (same blackboard contract).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultFlag {
+    Imu,
+    Gps,
+    Baro,
+    Mag,
+    Airspeed,
+    ServoElevator,
+    ServoAileron,
+    ServoRudder,
+    Esc,
+    BatteryDepleted,
+}
+
+impl FaultFlag {
+    /// Borrow the exact `bool` field of `flags` that this flag controls.
+    fn field_of(self, flags: &mut FaultFlags) -> &mut bool {
+        match self {
+            Self::Imu => &mut flags.imu_failed,
+            Self::Gps => &mut flags.gps_failed,
+            Self::Baro => &mut flags.baro_failed,
+            Self::Mag => &mut flags.mag_failed,
+            Self::Airspeed => &mut flags.airspeed_failed,
+            Self::ServoElevator => &mut flags.servo_elevator_failed,
+            Self::ServoAileron => &mut flags.servo_aileron_failed,
+            Self::ServoRudder => &mut flags.servo_rudder_failed,
+            Self::Esc => &mut flags.esc_failed,
+            Self::BatteryDepleted => &mut flags.battery_depleted,
+        }
+    }
+}
+
 /// Flight controller mode — determines which loop hierarchy is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FcMode {
