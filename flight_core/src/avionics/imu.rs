@@ -317,4 +317,29 @@ mod tests {
             "gyro noise should be bounded, max was {max_gyro}"
         );
     }
+
+    #[test]
+    fn imu_failure_zeroes_output() {
+        let config = ImuConfig {
+            gyro_noise: 0.1,
+            accel_noise: 0.1,
+            ..Default::default()
+        };
+        let mut imu = ImuSensor::with_seed(config, 42);
+        let mut bus = AvionicsBus {
+            true_angular_rates: Vector3::new(1.0, 2.0, 3.0),
+            fc_fault_flags: crate::avionics::FaultFlags {
+                imu_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        imu.init(0.0025);
+
+        bus.sim_time = 0.01;
+        imu.step(&mut bus, 0.01);
+
+        assert_eq!(bus.gyro, Vector3::zeros(), "gyro must read zero when IMU failed");
+        assert_eq!(bus.accel, Vector3::zeros(), "accel must read zero when IMU failed");
+    }
 }
