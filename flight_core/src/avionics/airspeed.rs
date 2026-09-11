@@ -226,4 +226,30 @@ mod tests {
         as_.step(&mut bus, 0.001);
         assert!((bus.airspeed_indicated - 25.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn airspeed_failure_zeroes_indicated() {
+        let config = AirspeedConfig {
+            noise: 0.3,
+            ..Default::default()
+        };
+        let mut as_ = AirspeedSensor::with_seed(config, 42);
+        let mut bus = AvionicsBus {
+            true_airspeed: 45.0,
+            fc_fault_flags: crate::avionics::FaultFlags {
+                airspeed_failed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        as_.init(0.001);
+
+        bus.sim_time = 0.03;
+        as_.step(&mut bus, 0.002);
+
+        assert_eq!(
+            bus.airspeed_indicated, 0.0,
+            "failed pitot must read zero airspeed"
+        );
+    }
 }

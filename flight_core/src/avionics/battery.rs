@@ -131,8 +131,10 @@ impl AvionicsComponent for Battery {
         bus.battery_capacity_remaining_pct = self.soc * 100.0;
         bus.battery_current = total_current;
 
-        // Depletion flag for failure injection
-        bus.fc_fault_flags.battery_depleted = self.soc <= 0.0;
+        // Depletion flag for failure injection. Sticky OR: once the cell is
+        // physically empty (or the flag was injected) it stays set until the
+        // next reset, so the FC's battery-safety cut keeps working.
+        bus.fc_fault_flags.battery_depleted |= self.soc <= 0.0;
 
         self.sim_time += dt;
     }

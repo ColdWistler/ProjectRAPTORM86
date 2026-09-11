@@ -534,4 +534,33 @@ mod tests {
         assert!(bus.fc_servo_aileron.is_finite());
         assert!(bus.fc_servo_elevator.is_finite());
     }
+
+    #[test]
+    fn battery_depleted_cuts_throttle_keeps_controls() {
+        let (mut fc, mut bus) = make_fc();
+        fc.init(0.0);
+        fc.set_mode(FcMode::Attitude);
+
+        bus.true_quat = [1.0, 0.0, 0.0, 0.0];
+        bus.gyro = Vector3::new(0.0, 0.0, 0.0);
+        bus.cmd_roll = 0.3;
+        bus.cmd_pitch = 0.0;
+        bus.cmd_yaw_rate = 0.0;
+        bus.cmd_throttle = 1.0;
+        bus.fc_fault_flags = crate::avionics::FaultFlags {
+            battery_depleted: true,
+            ..Default::default()
+        };
+
+        fc.step(&mut bus, 0.01);
+
+        assert_eq!(
+            bus.fc_esc_throttle, 0.0,
+            "depleted battery must cut throttle completely"
+        );
+        assert!(
+            bus.fc_servo_aileron.abs() > 1e-6,
+            "surfaces must retain control authority after battery depletion"
+        );
+    }
 }
