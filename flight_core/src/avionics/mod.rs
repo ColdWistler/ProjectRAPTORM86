@@ -80,3 +80,30 @@ pub mod esc;
 
 #[cfg(feature = "battery")]
 pub mod battery;
+
+#[cfg(feature = "imu")]
+pub use imu::ImuSensor;
+
+#[cfg(feature = "servo")]
+pub use actuator::{ActuatorSuite, ServoActuator, ServoConfig};
+
+#[cfg(feature = "flight_controller")]
+pub use flight_controller::{FlightController, FlightControllerConfig, PidConfig};
+
+#[cfg(feature = "gps")]
+pub use gps::GpsSensor;
+
+#[cfg(feature = "baro")]
+pub use baro::BaroSensor;
+
+#[cfg(feature = "magnetometer")]
+pub use magnetometer::MagnetometerSensor;
+
+#[cfg(feature = "airspeed")]
+pub use airspeed::AirspeedSensor;
+
+#[cfg(feature = "esc")]
+pub use esc::Esc;
+
+#[cfg(feature = "battery")]
+pub use battery::Battery;

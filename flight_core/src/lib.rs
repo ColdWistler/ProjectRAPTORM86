@@ -39,6 +39,10 @@ pub use aero::ControlInputs;
 pub use atmosphere::Atmosphere;
 pub use config::{AircraftConfig, Propulsion};
 pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
+#[cfg(feature = "full-avionics")]
+pub use env::{
+    AvionicsAction, AvionicsEnvStep, AvionicsEnvironment, AvionicsObservation, AVIONICS_OBS_DIM,
+};
 pub use nalgebra;
 pub use state::AircraftState;
 pub use terrain::{Terrain, TerrainGrid, TerrainHill};
