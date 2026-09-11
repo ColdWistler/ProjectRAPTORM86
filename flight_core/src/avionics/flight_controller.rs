@@ -281,7 +281,13 @@ impl AvionicsComponent for FlightController {
     }
 
     fn step(&mut self, bus: &mut AvionicsBus, dt: f64) {
-        let thr = bus.cmd_throttle.clamp(0.0, 1.0);
+        // Battery depleted: cut motor power immediately; surfaces keep control
+        // authority so the FC can still manage the glide.
+        let thr = if bus.fc_fault_flags.battery_depleted {
+            0.0
+        } else {
+            bus.cmd_throttle.clamp(0.0, 1.0)
+        };
 
         match self.mode {
             FcMode::Manual => {
