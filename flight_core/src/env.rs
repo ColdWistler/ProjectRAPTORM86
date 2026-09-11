@@ -21,8 +21,6 @@ use crate::avionics::{
     BatteryConfig, Esc, EscConfig, FaultFlag, FaultFlags, FlightController, FlightControllerConfig,
     GpsConfig, GpsSensor, ImuConfig, ImuSensor, MagConfig, MagnetometerSensor, ServoConfig,
 };
-#[cfg(feature = "full-avionics")]
-use crate::AircraftState;
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -601,5 +599,167 @@ mod tests {
         };
         let cfg = load_config(path).expect("aircraft.toml should load");
         assert!(cfg.mass > 0.0 && cfg.thrust_max > 0.0);
+    }
+
+    #[cfg(feature = "full-avionics")]
+    fn test_avionics_env() -> AvionicsEnvironment {
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        AvionicsEnvironment::with_config(
+            path,
+            EnvConfig {
+                dt: 0.05,
+                max_steps: 100_000,
+                ..Default::default()
+            },
+        )
+        .expect("aircraft.toml should load")
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_reset_returns_sensor_observation() {
+        let mut env = test_avionics_env();
+        let (obs, prev) = env.reset();
+        assert_eq!(obs.len(), AVIONICS_OBS_DIM);
+        assert_eq!(prev, 0);
+        // Sensors start idle (first sample fires on the first step) so the bus
+        // still carries its nominal defaults.
+        assert_eq!(obs[9], 3.0, "GPS starts with a 3D fix");
+        assert!((obs[12] - 16.8).abs() < 0.1, "battery starts near full voltage");
+        assert!((obs[13] - 100.0).abs() < 0.1, "battery starts fully charged");
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_cruise_command_holds_flight() {
+        let mut env = test_avionics_env();
+        let (_, trim_thr) = env.sim.trim_level_flight(1000.0, 60.0);
+        env.reset();
+        let action = AvionicsAction::level_cruise(trim_thr);
+        let mut alt_min = f64::INFINITY;
+        let mut alt_max = f64::NEG_INFINITY;
+        let mut last = None;
+        for _ in 0..600 {
+            // 600 * 0.05 s = 30 s of FC-stabilized cruise
+            let r = env.step(action);
+            assert!(!r.terminated, "FC-stabilized cruise crashed");
+            alt_min = alt_min.min(env.sim.state.altitude());
+            alt_max = alt_max.max(env.sim.state.altitude());
+            last = Some(r);
+        }
+        let r = last.expect("stepped the environment");
+        assert!(
+            alt_min > 850.0 && alt_max < 1150.0,
+            "FC must hold cruise altitude (range [{alt_min:.0}, {alt_max:.0}])"
+        );
+        assert!(
+            r.observation[17] > 0.2,
+            "ESC must be producing thrust at cruise, got {}",
+            r.observation[17]
+        );
+        assert!(
+            (r.observation[13] - 100.0).abs() < 2.0,
+            "battery should be nearly undrained after 30 s"
+        );
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_battery_drains_over_cruise() {
+        let mut env = test_avionics_env();
+        let (_, trim_thr) = env.sim.trim_level_flight(1000.0, 60.0);
+        env.reset();
+        let action = AvionicsAction::level_cruise(trim_thr);
+        let mut last = None;
+        for _ in 0..1200 {
+            // 60 s of cruise draws on the pack
+            let r = env.step(action);
+            assert!(!r.terminated);
+            last = Some(r);
+        }
+        let r = last.unwrap();
+        assert!(
+            r.observation[13] < 99.9,
+            "battery capacity must drain under cruise load, got {}%",
+            r.observation[13]
+        );
+        assert!(
+            r.observation[12] < 16.75,
+            "battery voltage must sag under load, got {} V",
+            r.observation[12]
+        );
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_gps_failure_degrades_observation() {
+        let mut env = test_avionics_env();
+        env.reset();
+        let action = AvionicsAction::level_cruise(0.6);
+
+        env.step(action);
+        assert_eq!(env.observation()[9], 3.0, "GPS fix healthy before failure");
+
+        env.inject_fault(FaultFlag::Gps);
+        // GPS self-checks the flag on its next sample; a couple of steps
+        // guarantee a 10 Hz sample elapses at dt=50 ms.
+        env.step(action);
+        env.step(action);
+        let obs = env.observation();
+        assert_eq!(obs[9], 0.0, "failed GPS must report no fix");
+        assert_eq!(obs[6], 0.0, "failed GPS must zero the north position");
+        assert_eq!(obs[7], 0.0, "failed GPS must zero the east position");
+
+        env.clear_fault(FaultFlag::Gps);
+        for _ in 0..4 {
+            env.step(action);
+        }
+        assert_eq!(
+            env.observation()[9],
+            3.0,
+            "GPS fix must recover after clearing the fault"
+        );
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_imu_failure_zeroes_gyro_observation() {
+        let mut env = test_avionics_env();
+        env.reset();
+        env.inject_fault(FaultFlag::Imu);
+
+        let r = env.step(AvionicsAction::level_cruise(0.6));
+        assert_eq!(r.observation[0], 0.0, "gyro p must read zero on IMU failure");
+        assert_eq!(r.observation[1], 0.0, "gyro q must read zero on IMU failure");
+        assert_eq!(r.observation[2], 0.0, "gyro r must read zero on IMU failure");
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn avionics_battery_depletion_cuts_thrust_and_glides() {
+        let mut env = test_avionics_env();
+        let (_, trim_thr) = env.sim.trim_level_flight(1000.0, 60.0);
+        env.reset();
+        env.inject_fault(FaultFlag::BatteryDepleted);
+        let action = AvionicsAction::level_cruise(trim_thr.max(0.8));
+
+        for _ in 0..1200 {
+            // 60 s of "cruise" with a dead pack
+            let r = env.step(action);
+            assert!(
+                r.observation[17] < 0.05,
+                "depleted battery must produce no thrust, got {}",
+                r.observation[17]
+            );
+        }
+        assert!(
+            env.sim.state.altitude() < 950.0,
+            "with no thrust the aircraft must descend (alt {:.0} m)",
+            env.sim.state.altitude()
+        );
     }
 }
