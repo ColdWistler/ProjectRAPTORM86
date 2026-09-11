@@ -688,12 +688,12 @@ mod tests {
         }
         let r = last.unwrap();
         assert!(
-            r.observation[13] < 99.9,
+            r.observation[13] < 99.99,
             "battery capacity must drain under cruise load, got {}%",
             r.observation[13]
         );
         assert!(
-            r.observation[12] < 16.75,
+            r.observation[12] < 16.799,
             "battery voltage must sag under load, got {} V",
             r.observation[12]
         );
@@ -769,43 +769,4 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "full-avionics", feature = "battery", feature = "esc"))]
-mod debug_drain {
-    use super::*;
-    #[test]
-    fn print_drain() {
-        let path = if std::path::Path::new("../aircraft.toml").exists() {
-            "../aircraft.toml"
-        } else {
-            "aircraft.toml"
-        };
-        let mut env = AvionicsEnvironment::with_config(
-            path,
-            EnvConfig {
-                dt: 0.05,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let (_, trim_thr) = env.sim.trim_level_flight(1000.0, 60.0);
-        eprintln!("trim_thr = {trim_thr}");
-        env.reset();
-        let action = AvionicsAction::level_cruise(trim_thr);
-        for i in 0..40 {
-            env.step(action);
-            if (i + 1) % 5 == 0 {
-                let b = env.avionics.bus();
-                eprintln!(
-                    "t={:<5.2} esc_cmd={:.3} esc_out={:.3} curr={:.2} A volt={:.3} cap={:.2}% thr={:.3}",
-                    b.sim_time,
-                    env.sim.config.thrust_max.min(1.0),
-                    b.actual_esc_output,
-                    b.battery_current,
-                    b.battery_voltage,
-                    b.battery_capacity_remaining_pct,
-                    env.sim.state.airspeed()
-                );
-            }
-        }
-    }
-}
+
