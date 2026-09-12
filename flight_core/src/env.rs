@@ -16,11 +16,7 @@ use nalgebra::Vector3;
 #[cfg(feature = "full-avionics")]
 use crate::atmosphere::Atmosphere;
 #[cfg(feature = "full-avionics")]
-use crate::avionics::{
-    ActuatorSuite, AirspeedConfig, AirspeedSensor, AvionicsSystem, BaroConfig, BaroSensor, Battery,
-    BatteryConfig, Esc, EscConfig, FaultFlag, FaultFlags, FlightController, FlightControllerConfig,
-    GpsConfig, GpsSensor, ImuConfig, ImuSensor, MagConfig, MagnetometerSensor, ServoConfig,
-};
+use crate::avionics::{AvionicsSystem, FaultFlag, FaultFlags};
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -260,7 +256,7 @@ fn shaped_reward(s: &crate::AircraftState, cfg: &EnvConfig) -> f64 {
 
 /// Size of [`AvionicsObservation`].
 #[cfg(feature = "full-avionics")]
-pub const AVIONICS_OBS_DIM: usize = 19;
+pub const AVIONICS_OBS_DIM: usize = crate::avionics::bus::SENSOR_OBSERVATION_DIM;
 
 /// Observation vector from the *noisy* avionics sensors on the bus (not the
 /// true physics state), so the agent learns to fly on what hardware would
@@ -365,28 +361,10 @@ impl AvionicsEnvironment {
         })
     }
 
-    /// Build the default hardware stack. Register order matters: ESC and
-    /// battery are generic devices that run after the actuator suite.
+    /// Build the default hardware stack, sharing the exact same component
+    /// order as the Godot bridge via [`crate::avionics::standard_stack`].
     fn make_avionics(dt: f64) -> AvionicsSystem {
-        let mut sys = AvionicsSystem::new(dt);
-        sys.add_sensor(Box::new(ImuSensor::new(ImuConfig::default())));
-        sys.add_sensor(Box::new(GpsSensor::new(GpsConfig::default())));
-        sys.add_sensor(Box::new(BaroSensor::new(BaroConfig::default())));
-        sys.add_sensor(Box::new(MagnetometerSensor::new(MagConfig::default())));
-        sys.add_sensor(Box::new(AirspeedSensor::new(AirspeedConfig::default())));
-        sys.add_controller(Box::new(FlightController::new(
-            FlightControllerConfig::default(),
-        )));
-        // Servos/ESC/battery are generic components (not trait-typed actuators);
-        // they run in insertion order after the controller stage.
-        sys.add_component(Box::new(ActuatorSuite::new(
-            ServoConfig::default(),
-            ServoConfig::default(),
-            ServoConfig::default(),
-        )));
-        sys.add_component(Box::new(Esc::new(EscConfig::default())));
-        sys.add_component(Box::new(Battery::new(BatteryConfig::default())));
-        sys
+        crate::avionics::standard_stack(dt)
     }
 
     /// Reset to trimmed level flight and clear all injected faults.
@@ -459,28 +437,7 @@ impl AvionicsEnvironment {
 
     /// Build the current observation array from the noisy bus sensor outputs.
     pub fn observation(&self) -> AvionicsObservation {
-        let bus = self.avionics.bus();
-        [
-            bus.gyro.x,
-            bus.gyro.y,
-            bus.gyro.z,
-            bus.accel.x,
-            bus.accel.y,
-            bus.accel.z,
-            bus.gps_position_ned.x,
-            bus.gps_position_ned.y,
-            -bus.gps_position_ned.z,
-            bus.gps_fix_quality as f64,
-            bus.baro_altitude,
-            bus.airspeed_indicated,
-            bus.battery_voltage,
-            bus.battery_capacity_remaining_pct,
-            bus.actual_elevator_deg,
-            bus.actual_aileron_deg,
-            bus.actual_rudder_deg,
-            bus.actual_esc_output,
-            bus.sim_time,
-        ]
+        self.avionics.bus().sensor_observation()
     }
 
     /// Inject a fault; components apply their own failure behaviour.

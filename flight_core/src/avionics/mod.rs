@@ -107,3 +107,35 @@ pub use esc::{Esc, EscConfig};
 
 #[cfg(feature = "battery")]
 pub use battery::{Battery, BatteryConfig};
+
+/// Build the standard fixed-wing hardware stack with default characteristics:
+/// IMU, GPS, barometer, magnetometer and airspeed sensors; attitude PID flight
+/// controller; elevator/aileron/rudder servo suite; ESC and battery.
+///
+/// The returned system is **not** initialised; callers should invoke
+/// [`AvionicsSystem::init`] before stepping it. Shared by the RL environment
+/// and the Godot bridge so both fly the exact same hardware model.
+#[cfg(feature = "full-avionics")]
+pub fn standard_stack(dt: f64) -> AvionicsSystem {
+    let mut sys = AvionicsSystem::new(dt);
+    sys.add_sensor(Box::new(imu::ImuSensor::new(imu::ImuConfig::default())));
+    sys.add_sensor(Box::new(gps::GpsSensor::new(gps::GpsConfig::default())));
+    sys.add_sensor(Box::new(baro::BaroSensor::new(baro::BaroConfig::default())));
+    sys.add_sensor(Box::new(magnetometer::MagnetometerSensor::new(
+        magnetometer::MagConfig::default(),
+    )));
+    sys.add_sensor(Box::new(airspeed::AirspeedSensor::new(
+        airspeed::AirspeedConfig::default(),
+    )));
+    sys.add_controller(Box::new(flight_controller::FlightController::new(
+        flight_controller::FlightControllerConfig::default(),
+    )));
+    sys.add_component(Box::new(actuator::ActuatorSuite::new(
+        actuator::ServoConfig::default(),
+        actuator::ServoConfig::default(),
+        actuator::ServoConfig::default(),
+    )));
+    sys.add_component(Box::new(esc::Esc::new(esc::EscConfig::default())));
+    sys.add_component(Box::new(battery::Battery::new(battery::BatteryConfig::default())));
+    sys
+}

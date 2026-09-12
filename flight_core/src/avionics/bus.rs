@@ -19,6 +19,9 @@
 
 use nalgebra::Vector3;
 
+/// Number of channels returned by [`AvionicsBus::sensor_observation`].
+pub const SENSOR_OBSERVATION_DIM: usize = 19;
+
 /// Fault flags carried on the bus for failure injection.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FaultFlags {
@@ -305,6 +308,47 @@ impl AvionicsBus {
         let rud = self.cmd_yaw_rate.clamp(-30.0, 30.0);
         let thr = self.cmd_throttle.clamp(0.0, 1.0);
         (elev, ail, rud, thr)
+    }
+
+    /// Build the fixed-order noisy sensor observation shared by the RL
+    /// environment and the Godot bridge. Channels are read from the bus
+    /// sensor/actuator outputs, never from the true physics state.
+    ///
+    /// Layout (SI unless noted):
+    /// ```text
+    ///  0  gyro_p (rad/s)         10 baro_altitude (m)
+    ///  1  gyro_q (rad/s)         11 airspeed_indicated (m/s)
+    ///  2  gyro_r (rad/s)         12 battery_voltage (V)
+    ///  3  accel_x (m/s²)         13 battery_capacity_remaining_pct (%)
+    ///  4  accel_y (m/s²)         14 actual_elevator_deg (°)
+    ///  5  accel_z (m/s²)         15 actual_aileron_deg (°)
+    ///  6  gps_north (m, NED)     16 actual_rudder_deg (°)
+    ///  7  gps_east (m, NED)      17 actual_esc_output (0..1)
+    ///  8  gps_altitude (m)       18 sim_time (s)
+    ///  9  gps_fix_quality (0..3)
+    /// ```
+    pub fn sensor_observation(&self) -> [f64; SENSOR_OBSERVATION_DIM] {
+        [
+            self.gyro.x,
+            self.gyro.y,
+            self.gyro.z,
+            self.accel.x,
+            self.accel.y,
+            self.accel.z,
+            self.gps_position_ned.x,
+            self.gps_position_ned.y,
+            -self.gps_position_ned.z,
+            self.gps_fix_quality as f64,
+            self.baro_altitude,
+            self.airspeed_indicated,
+            self.battery_voltage,
+            self.battery_capacity_remaining_pct,
+            self.actual_elevator_deg,
+            self.actual_aileron_deg,
+            self.actual_rudder_deg,
+            self.actual_esc_output,
+            self.sim_time,
+        ]
     }
 
     /// Clear all sensor outputs (used on reset).
