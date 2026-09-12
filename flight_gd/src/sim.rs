@@ -12,6 +12,7 @@
 //! - Environment variables (`RAPTOR_*`) tune the wind without recompiling;
 //!   see [`wind_config_from_env`].
 
+use flight_core::avionics::{standard_stack, AvionicsSystem, FaultFlag};
 use flight_core::{
     nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator, Terrain,
     TurbulenceIntensity, WindConfig, WindEnvironment,
@@ -85,6 +86,13 @@ fn wind_config_from_env() -> WindConfig {
 struct FlightSimNode {
     sim: Option<(Simulator, WindEnvironment)>,
     last_wind: NVec3<f64>,
+    /// Avionics hardware stack (sensors → PID flight controller → servos/ESC
+    /// → battery). Built in [`FlightSimNode::start`]; the main control mode.
+    avionics: Option<AvionicsSystem>,
+    /// True while `step` flies through the avionics stack. Calling
+    /// [`FlightSimNode::set_avionics_command`] enables it;
+    /// [`FlightSimNode::set_controls`] bypasses it for direct manual control.
+    avionics_active: bool,
     /// Manual stick input (radians).
     elevator: f64,
     /// Baseline pitch trim tab (radians).
@@ -137,6 +145,8 @@ impl FlightSimNode {
         let mut state = AircraftState::default();
         let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
+        self.avionics = Some(Self::build_avionics());
+        self.avionics_active = true;
         self.elevator = 0.0;
         self.elevator_trim = trim_elev;
         self.aileron = 0.0;
@@ -155,9 +165,10 @@ impl FlightSimNode {
         self.sim.is_some()
     }
 
-    /// Advance the 6-DOF simulation by `dt` seconds (0 => 1/60 s). Applies any
-    /// active autopilot/altitude-hold assist first, then steps the aircraft
-    /// through the turbulence/steady-wind model produced by `flight_core`.
+    /// Advance the 6-DOF simulation by `dt` seconds (0 => 1/60 s). By default
+    /// the aircraft flies through the avionics stack (sensors → PID flight
+    /// controller → servos/ESC → battery); direct manual surface control is
+    /// used instead only while [`set_controls`](Self::set_controls) bypasses it.
     #[func]
     fn step(&mut self, dt: f64) {
         let Some((sim, wind)) = self.sim.as_mut() else {
@@ -165,8 +176,11 @@ impl FlightSimNode {
         };
         let dt = dt.clamp(0.0, 0.1).max(1e-4);
 
-        // Autopilot: wing leveler + altitude/pitch hold while engaged.
-        if self.auto_level {
+        let avionics_active = self.avionics_active && self.avionics.is_some();
+
+        // Autopilot: wing leveler + altitude/pitch hold (manual path only;
+        // the flight controller already stabilizes attitude in avionics mode).
+        if self.auto_level && !avionics_active {
             let (roll, pitch, _) = sim.state.euler_angles();
             let state = &sim.state;
 
@@ -188,6 +202,37 @@ impl FlightSimNode {
         self.last_wind = wind_earth;
         // Apply the asymmetric engine split (engine-out) to the active config.
         sim.config.throttle_split = self.throttle_split;
+
+        let terrain = if self.terrain_enabled {
+            Some(&self.terrain)
+        } else {
+            None
+        };
+
+        // Avionics path (main mode): the FC reads the attitude commands, the
+        // sensor→controller→actuator→battery chain runs, and the resulting
+        // surface deflections + ESC throttle drive the 6-DOF physics.
+        if avionics_active {
+            if let Some(av) = self.avionics.as_mut() {
+                let tas = sim.state.true_airspeed(&wind_earth);
+                let q_dynamic = Atmosphere::at_altitude(sim.state.altitude()).dynamic_pressure(tas);
+                av.bus_mut().write_true_state(&sim.state, &wind_earth, q_dynamic);
+                av.step();
+                let (elev, ail, rud, thr) = av.bus().read_actuator_outputs();
+                sim.step_6dof(
+                    elev,
+                    ail,
+                    rud,
+                    thr,
+                    self.flaps_deg.to_radians(),
+                    Some(&wind_earth),
+                    dt,
+                    terrain,
+                );
+                return;
+            }
+        }
+
         sim.step_6dof(
             total_elevator,
             self.aileron,
@@ -196,11 +241,7 @@ impl FlightSimNode {
             self.flaps_deg.to_radians(),
             Some(&wind_earth),
             dt,
-            if self.terrain_enabled {
-                Some(&self.terrain)
-            } else {
-                None
-            },
+            terrain,
         );
     }
 
