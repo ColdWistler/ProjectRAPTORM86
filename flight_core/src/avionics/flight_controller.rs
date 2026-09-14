@@ -252,15 +252,27 @@ impl FlightController {
 
     /// Current estimated attitude (roll/pitch) in radians.
     /// Derived from gyro integration, or (future) the EKF estimate.
+    ///
+    /// The **roll** extraction matches the physics engine's
+    /// [`AircraftState::euler_angles`](crate::state::AircraftState::euler_angles)
+    /// convention (NED body axes in earth frame, positive roll = right wing
+    /// down) so the aileron loop sees the same sign the aero model applies to
+    /// the deflection. The **pitch** term keeps the controller's historical
+    /// sign convention (positive pitch rate = nose-up, matching the elevator
+    /// transport term in the integrator), which the trim/elevator chain is
+    /// calibrated against.
     fn estimate_attitude(&self, bus: &AvionicsBus) -> (f64, f64) {
         // In the initial implementation we use the true quaternion from
         // the bus converted to Euler. A real FC would run an estimator.
         let q = bus.true_quat;
         let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
-        // Roll (φ) about X: atan2(2(wx + yz), 1 - 2(x² + y²))
-        let roll = (2.0 * (w * x + y * z))
-            .atan2(1.0 - 2.0 * (x * x + y * y));
-        // Pitch (θ) about Y: asin(2(wy - zx))
+        // Roll (φ) about X from the body-right axis in the NED earth frame
+        // (right.z = 2(yz - xw), down.z = 1 - 2(x² + y²)), matching
+        // `AircraftState::euler_angles` so a real bank reads with the right
+        // sign and the aileron loop damps instead of diverging.
+        let roll = (2.0 * (y * z - x * w)).atan2(1.0 - 2.0 * (x * x + y * y));
+        // Pitch (θ) about Y: historical convention, nose-up positive and
+        // consistent with the elevator/gyro chain.
         let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
         (roll, pitch)
     }
@@ -295,6 +307,7 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = bus.cmd_roll.clamp(-30.0, 30.0);
                 bus.fc_servo_elevator = bus.cmd_pitch.clamp(-30.0, 30.0);
                 bus.fc_servo_rudder = bus.cmd_yaw_rate.clamp(-30.0, 30.0);
+                self.throttle_filter = thr;
                 bus.fc_esc_throttle = thr;
             }
             FcMode::Rate => {
@@ -306,11 +319,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
             FcMode::Attitude => {
                 // Outer loop: attitude (roll/pitch angle) → rate command
@@ -328,11 +338,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
             FcMode::Stabilize => {
                 // Hold wings-level: zero roll command, damp yaw, keep pitch
@@ -344,11 +351,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
         }
     }
