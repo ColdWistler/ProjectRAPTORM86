@@ -38,6 +38,29 @@ var _telemetry := PackedFloat64Array()
 var _hud_timer := 0.0
 var _aircraft_btn: Button = null
 
+## Control path: true = fly through the avionics stack (attitude commands to
+## the PID flight controller); false = manual surface passthrough. [L] toggles.
+var avionics_mode := true
+var _avionics_snap := PackedFloat64Array()
+var _panel: PanelContainer = null
+var _panel_values: RichTextLabel = null
+var _fault_buttons := {}
+
+## Fault names exposed on the visualization panel; the labels shown and the
+## exact names Rust's `inject_fault` / `clear_fault` recognise.
+const _FAULTS := [
+	{"label": "IMU", "name": "imu"},
+	{"label": "GPS", "name": "gps"},
+	{"label": "BARO", "name": "baro"},
+	{"label": "MAG", "name": "mag"},
+	{"label": "AIRSPD", "name": "airspeed"},
+	{"label": "ELEV", "name": "servo_elevator"},
+	{"label": "AIL", "name": "servo_aileron"},
+	{"label": "RUD", "name": "servo_rudder"},
+	{"label": "ESC", "name": "esc"},
+	{"label": "BATT", "name": "battery_depleted"},
+]
+
 var cam_orbit := false
 var cam_yaw := 0.0
 var cam_pitch := 0.3
@@ -224,6 +247,8 @@ func _build_hud() -> Label:
 	hud.add_child(_aircraft_btn)
 	_update_aircraft_btn_text()
 
+	_build_avionics_panel(hud)
+
 	return label
 
 ## Cycle to the next aircraft in the list and reload it.
@@ -248,7 +273,10 @@ func _physics_process(delta: float) -> void:
 
 	_handle_input(delta)
 
-	_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
+	if avionics_mode:
+		_physics.set_avionics_command(aileron, elevator, rudder, throttle)
+	else:
+		_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
 	_physics.set_elevator_trim(elevator_trim)
 	_physics.set_throttle_split(float(engine_out_side()))
 	_physics.step(delta)
@@ -265,7 +293,9 @@ func _physics_process(delta: float) -> void:
 	if _hud_timer >= 0.2:
 		_hud_timer = 0.0
 		_telemetry = _physics.telemetry()
+		_avionics_snap = _physics.avionics_snapshot()
 		_update_hud()
+		_update_avionics_panel()
 
 ## Poll keyboard/mouse inputs into the elevator/aileron/rudder/flap/trim/
 ## throttle state, plus camera and aircraft-swap handling. Control stick
@@ -325,6 +355,18 @@ func _handle_input(delta: float) -> void:
 	if _just_pressed(KEY_H) or _just_pressed(KEY_T):
 		auto_level = not auto_level
 		_physics.set_auto_level(auto_level)
+
+	# Avionics / manual path: L
+	if _just_pressed(KEY_L):
+		avionics_mode = not avionics_mode
+		if avionics_mode:
+			_physics.set_avionics_command(aileron, elevator, rudder, throttle)
+		else:
+			_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
+
+	# Avionics component panel: P
+	if _just_pressed(KEY_P) and _panel:
+		_panel.visible = not _panel.visible
 
 	# Camera view toggle: V
 	if _just_pressed(KEY_V):
@@ -424,6 +466,114 @@ func _chase_camera() -> void:
 		_camera.global_position = tf * Vector3(-32, 7.0, 0)
 		_camera.look_at(tf.origin, Vector3.UP)
 
+## Build the avionics component-visualization panel (right side of the HUD
+## canvas): a live readout of every component on the bus plus a fault-injection
+## toggle for each. Updates come from `_physics.avionics_snapshot()`.
+func _build_avionics_panel(hud: CanvasLayer) -> void:
+	var panel := PanelContainer.new()
+	panel.name = "AvionicsPanel"
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.02, 0.12, 0.09, 0.88)
+	style.set_corner_radius_all(6)
+	style.set_content_margin_all(10)
+	panel.add_theme_stylebox_override("panel", style)
+	panel.position = Vector2(12, 12)
+	hud.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	panel.add_child(vbox)
+
+	var values := RichTextLabel.new()
+	values.name = "Values"
+	values.bbcode_enabled = true
+	values.fit_content = true
+	values.scroll_active = false
+	values.add_theme_font_size_override("normal_font_size", 12)
+	vbox.add_child(values)
+
+	var faults_header := Label.new()
+	faults_header.text = "FAILURE INJECTION"
+	faults_header.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(faults_header)
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	vbox.add_child(grid)
+	for fault in _FAULTS:
+		var btn := CheckButton.new()
+		btn.text = fault.label
+		btn.add_theme_font_size_override("font_size", 11)
+		btn.toggled.connect(_on_fault_toggled.bind(fault.name))
+		grid.add_child(btn)
+		_fault_buttons[fault.name] = btn
+
+	_panel = panel
+	_panel_values = values
+
+	# Dock the panel on the right edge using its content minimum size.
+	var vp_w := float(hud.get_viewport().get_visible_rect().size.x)
+	var min_w := float(panel.get_combined_minimum_size().x)
+	panel.position = Vector2(maxf(vp_w - min_w - 12.0, 12.0), 12.0)
+
+## React to a fault CheckButton: inject or clear the named fault in Rust.
+func _on_fault_toggled(on: bool, name: String) -> void:
+	if on:
+		_physics.inject_fault(name)
+	else:
+		_physics.clear_fault(name)
+
+## A red "! FAIL" warning tag when the matching bus fault flag is set.
+func _fault_note(failed: bool) -> String:
+	return " [color=#ff5454][b]! FAIL[/b][/color]" if failed else ""
+
+## Rewrite the avionics panel from the latest `avionics_snapshot()` array,
+## and keep the fault toggle buttons in sync with the bus fault flags.
+func _update_avionics_panel() -> void:
+	if _panel == null or not _panel.visible:
+		return
+	var snap := _avionics_snap
+	if snap.size() < 46:
+		return
+	var mode := "ATTITUDE"
+	if snap[4] < 0.5:
+		mode = "RATE"
+	elif snap[4] >= 1.5:
+		mode = "MANUAL"
+	var path := "AVIONICS" if avionics_mode else "MANUAL BYPASS"
+
+	var txt := "[b]AVIONICS STACK[/b]  fc=[color=#5ad7ff]%s[/color]  path=[color=#7cfc00]%s[/color]\n" % [mode, path]
+	txt += "─────────────────────────\n"
+	txt += "[b]AGENT → FC (commands)[/b]\n"
+	txt += "  roll %+0.003f  pitch %+0.003f  yaw %+0.003f  thr %0.3f\n" % [snap[0], snap[1], snap[2], snap[3]]
+	txt += "[b]FLIGHT CONTROL (PID → servos/ESC)[/b]\n"
+	txt += "  elev %+0.1f°   ail %+0.1f°   rud %+0.1f°   esc %0.3f\n" % [snap[5], snap[6], snap[7], snap[8]]
+	txt += "[b]IMU[/b]%s\n" % _fault_note(snap[35] > 0.5)
+	txt += "  gyro  %+0.003f / %+0.003f / %+0.003f rad/s\n" % [snap[9], snap[10], snap[11]]
+	txt += "  accel %+0.1f / %+0.1f / %+0.1f m/s²\n" % [snap[12], snap[13], snap[14]]
+	txt += "[b]GPS[/b]%s\n" % _fault_note(snap[36] > 0.5)
+	txt += "  N %+0.1f   E %+0.1f   alt %0.1f m\n" % [snap[15], snap[16], snap[17]]
+	txt += "  N/E/D %+0.1f/%+0.1f/%+0.1f m/s  fix %d  HDOP %0.1f\n" % [snap[18], snap[19], snap[20], int(snap[21]), snap[22]]
+	txt += "[b]BARO[/b]%s\n" % _fault_note(snap[37] > 0.5)
+	txt += "  altitude %0.1f m\n" % snap[23]
+	txt += "[b]MAG[/b]%s\n" % _fault_note(snap[38] > 0.5)
+	txt += "  field %+0.0f / %+0.0f / %+0.0f nT\n" % [snap[24], snap[25], snap[26]]
+	txt += "[b]AIRSPEED[/b]%s\n" % _fault_note(snap[39] > 0.5)
+	txt += "  IAS %0.1f m/s\n" % snap[27]
+	txt += "[b]SERVOS (actual feedback)[/b]\n"
+	txt += "  elev %+0.1f°%s  ail %+0.1f°%s  rud %+0.1f°%s\n" % [snap[31], _fault_note(snap[40] > 0.5), snap[32], _fault_note(snap[41] > 0.5), snap[33], _fault_note(snap[42] > 0.5)]
+	txt += "[b]ESC[/b]%s\n" % _fault_note(snap[43] > 0.5)
+	txt += "  output %0.3f\n" % snap[34]
+	txt += "[b]BATTERY[/b]%s\n" % _fault_note(snap[44] > 0.5)
+	txt += "  %0.2f V   %0.2f A   %0.1f %% left\n" % [snap[28], snap[29], snap[30]]
+	txt += "─────────────────────────\n"
+	txt += "sim t = %0.1f s\n" % snap[45]
+	_panel_values.set_text(txt)
+
+	var names := ["imu", "gps", "baro", "mag", "airspeed", "servo_elevator", "servo_aileron", "servo_rudder", "esc", "battery_depleted"]
+	for i in names.size():
+		var btn: CheckButton = _fault_buttons[names[i]]
+		btn.set_pressed_no_signal(snap[35 + i] > 0.5)
+
 ## Rewrite the HUD label text from the latest Rust telemetry array
 ## (`_telemetry`), including the aircraft-specific mode title and stall flag.
 func _update_hud() -> void:
@@ -469,6 +619,7 @@ Flaps:     [F] 0 -> 15 -> 30
 Engine:    [G] both -> left out -> right out (twin)
 Trim:      [[] Down / []] Up
 Throttle:  [Shift] Up / [Ctrl] Down
+Avionics:  [L] Attitude / Manual    Panel: [P]
 	Autopilot: [H]/[T] Hold    Reset: [R]
 	Camera:   [V] Chase/Orbit  [RMB-drag] [Scroll]
 Menu: [Esc]""" % [
