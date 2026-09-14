@@ -70,7 +70,7 @@ var cam_center := Vector3.ZERO
 @onready var _physics = $Physics
 @onready var _drone: Node3D = $DroneView
 @onready var _camera: Camera3D = $Camera
-@onready var _label: Label = _build_hud()
+@onready var _label: RichTextLabel = _build_hud()
 
 func _ready() -> void:
 	var is_editor := Engine.is_editor_hint()
@@ -214,7 +214,7 @@ func _collect_meshes(n: Node, out: Array) -> void:
 		_collect_meshes(c, out)
 
 ## Build the on-screen HUD (telemetry panel + aircraft-swap button).
-func _build_hud() -> Label:
+func _build_hud() -> RichTextLabel:
 	var hud := CanvasLayer.new()
 	hud.name = "HUDCanvas"
 	add_child(hud)
@@ -226,10 +226,37 @@ func _build_hud() -> Label:
 	panel.add_theme_stylebox_override("panel", style)
 	panel.position = Vector2(12, 12)
 	hud.add_child(panel)
-	var label := Label.new()
-	label.add_theme_font_size_override("font_size", 13)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	panel.add_child(vbox)
+
+	# Telemetry: colored section headers + value highlighting via BBCode.
+	var label := RichTextLabel.new()
+	label.bbcode_enabled = true
+	label.fit_content = true
+	label.scroll_active = false
+	label.add_theme_font_size_override("normal_font_size", 13)
 	label.text = "Initializing..."
-	panel.add_child(label)
+	vbox.add_child(label)
+
+	# Controls legend as a separate plain label (its [..] keys are literal).
+	var legend := Label.new()
+	legend.add_theme_font_size_override("font_size", 12)
+	legend.text = """CONTROLS & DRONE SYSTEMS
+------------------------------------
+Pitch:     [W] Down / [S] Up
+Roll:      [A] Left / [D] Right
+Rudder:    [Q] Left / [E] Right (or [Z]/[C])
+Flaps:     [F] 0 -> 15 -> 30
+Engine:    [G] both -> left out -> right out (twin)
+Trim:      [ [ ] Down / [ ] ] Up
+Throttle:  [Shift] Up / [Ctrl] Down
+Avionics:  [L] Attitude / Manual    Panel: [P]
+Autopilot: [H]/[T] Hold    Reset: [R]
+Camera:    [V] Chase/Orbit  [RMB-drag] [Scroll]
+Menu: [Esc]"""
+	vbox.add_child(legend)
 
 	_aircraft_btn = Button.new()
 	_aircraft_btn.position = Vector2(12, 620)
@@ -576,6 +603,7 @@ func _update_avionics_panel() -> void:
 
 ## Rewrite the HUD label text from the latest Rust telemetry array
 ## (`_telemetry`), including the aircraft-specific mode title and stall flag.
+## Rendered as BBCode: section headers in accent color, warning values tinted.
 func _update_hud() -> void:
 	if _telemetry.size() < 25:
 		return
@@ -585,46 +613,40 @@ func _update_hud() -> void:
 		flap_str = "TAKEOFF (15deg)"
 	if flaps_deg >= 20.0:
 		flap_str = "LANDING (30deg)"
-	var ap := " [AUTOPILOT ON]" if auto_level else ""
-	var stall := " [! STALL !]" if t[23] > 0.5 else ""
+	var ap := " [color=#7cfc00][AUTOPILOT ON][/color]" if auto_level else ""
+	var stall := " [color=#ff5454][! STALL !][/color]" if t[23] > 0.5 else ""
+	var engine_col := "#ffffff"
 	var engine_str := "BOTH RUNNING"
 	if engine_out == 1:
 		engine_str = "LEFT ENGINE OUT [G]"
+		engine_col = "#ffb545"
 	elif engine_out == 2:
 		engine_str = "RIGHT ENGINE OUT [G]"
+		engine_col = "#ffb545"
 	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
-	var mode_title: String = "ENGINE MODE — FAST LONG-RANGE JET" if ac_name == "Engine" else "TACTICAL UAV DRONE TELEMETRY"
-	_label.text = """%s%s%s
-Aircraft:       %s (model: %s, press [M] to switch)
-------------------------------------
-Altitude:       %6.0f m (%6.0f ft)
-Airspeed (TAS): %6.1f m/s (%5.0f kts)
-Ground Speed:   %6.1f m/s
-Wind:           %5.1f m/s from %3.0f deg
-Airspeed (IAS): %6.0f kts  (Mach %4.2f)
-Dyn. Pressure:  %6.0f Pa  (OAT: %+4.1f degC)
-AoA / Slip:     %+5.1f deg / %+5.1f deg
-Pitch / Roll:   %+5.1f deg / %+5.1f deg
-Heading (Yaw):  %5.1f deg (Climb: %+4.1f deg)
-Throttle:       %5.0f %%  (Flaps: %s)
-Engines:        %s
-Surfaces:       Ail: %+4.1f deg | Elev: %+4.1f deg (Trim %+4.1f) | Rud: %+4.1f deg
-
-CONTROLS & DRONE SYSTEMS
-------------------------------------
-Pitch:     [W] Down / [S] Up
-Roll:      [A] Left / [D] Right
-Rudder:    [Q] Left / [E] Right (or [Z]/[C])
-Flaps:     [F] 0 -> 15 -> 30
-Engine:    [G] both -> left out -> right out (twin)
-Trim:      [[] Down / []] Up
-Throttle:  [Shift] Up / [Ctrl] Down
-Avionics:  [L] Attitude / Manual    Panel: [P]
-	Autopilot: [H]/[T] Hold    Reset: [R]
-	Camera:   [V] Chase/Orbit  [RMB-drag] [Scroll]
-Menu: [Esc]""" % [
+	var mode_title: String = "ENGINE MODE [color=#8ab4ff]- FAST LONG-RANGE JET[/color]" if ac_name == "Engine" else "TACTICAL UAV DRONE TELEMETRY"
+	var path_col := "#5ad7ff" if avionics_mode else "#ffb545"
+	var path_str := "AVIONICS" if avionics_mode else "MANUAL BYPASS"
+	_label.text = """[b][color=#5ad7ff]%s[/color][/b][color=#7cfc00]%s[/color][color=#ff5454]%s[/color]
+[color=#8a9bb0]%s · control path: [color=#%s]%s[/color][/color]
+--------------------------------------------------------------------------------
+[color=#5ad7ff]FLIGHT DATA[/color]
+  Altitude       %6.0f m  (%6.0f ft)
+  Airspeed TAS   %6.1f m/s (%5.0f kts)
+  Ground Speed   %6.1f m/s
+  Wind           %5.1f m/s from %03.0f deg
+  Airspeed IAS   %6.0f kts  [color=#8a9bb0](Mach %4.2f)[/color]
+  Dyn. Pressure  %6.0f Pa  [color=#8a9bb0](OAT %+5.1f degC)[/color]
+[color=#5ad7ff]ATTITUDE[/color]
+  AoA / Slip     %+5.1f deg / %+5.1f deg
+  Pitch / Roll   %+5.1f deg / %+5.1f deg
+  Heading (Yaw)  %5.1f deg  [color=#8a9bb0](Climb %+5.1f deg)[/color]
+[color=#5ad7ff]POWER & SYSTEMS[/color]
+  Throttle       %5.0f %%  [color=#8a9bb0](Flaps: %s)[/color]
+  Engines        [color=#%s]%s[/color]
+  Surfaces       [color=#8a9bb0]Ail %+5.1f[/color] | [color=#8a9bb0]Elev %+5.1f[/color] [color=#6a7b90](Trim %+5.1f)[/color] | [color=#8a9bb0]Rud %+5.1f[/color] deg""" % [
 		mode_title, ap, stall,
-		ac_name, ac_name,
+		ac_name, path_col, path_str,
 		t[0], t[1],
 		t[2], t[3],
 		t[4],
@@ -635,6 +657,6 @@ Menu: [Esc]""" % [
 		t[11], t[12],
 		t[13], t[14],
 		t[15], flap_str,
-		engine_str,
+		engine_col, engine_str,
 		t[17], t[18], t[19], t[20],
 	]
