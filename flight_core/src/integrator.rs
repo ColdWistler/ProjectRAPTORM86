@@ -259,6 +259,12 @@ pub fn step(
             state.v = corrected.y;
             state.w = corrected.z;
         }
+        // Kill the body angular rates on contact so an aircraft that touches
+        // down with residual roll/pitch/yaw momentum settles instead of
+        // tumbling/skipping along the surface.
+        state.p = 0.0;
+        state.q = 0.0;
+        state.r = 0.0;
     }
 }
 

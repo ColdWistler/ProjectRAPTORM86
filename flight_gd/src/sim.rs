@@ -12,6 +12,7 @@
 //! - Environment variables (`RAPTOR_*`) tune the wind without recompiling;
 //!   see [`wind_config_from_env`].
 
+use flight_core::avionics::{standard_stack, AvionicsSystem, FaultFlag};
 use flight_core::{
     nalgebra::Vector3 as NVec3, AircraftConfig, AircraftState, Atmosphere, Simulator, Terrain,
     TurbulenceIntensity, WindConfig, WindEnvironment,
@@ -85,6 +86,13 @@ fn wind_config_from_env() -> WindConfig {
 struct FlightSimNode {
     sim: Option<(Simulator, WindEnvironment)>,
     last_wind: NVec3<f64>,
+    /// Avionics hardware stack (sensors → PID flight controller → servos/ESC
+    /// → battery). Built in [`FlightSimNode::start`]; the main control mode.
+    avionics: Option<AvionicsSystem>,
+    /// True while `step` flies through the avionics stack. Calling
+    /// [`FlightSimNode::set_avionics_command`] enables it;
+    /// [`FlightSimNode::set_controls`] bypasses it for direct manual control.
+    avionics_active: bool,
     /// Manual stick input (radians).
     elevator: f64,
     /// Baseline pitch trim tab (radians).
@@ -137,6 +145,11 @@ impl FlightSimNode {
         let mut state = AircraftState::default();
         let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
+        self.avionics = Some(Self::build_avionics());
+        self.avionics_active = true;
+        if let Some(av) = self.avionics.as_mut() {
+            av.bus_mut().cmd_throttle = trim_throttle;
+        }
         self.elevator = 0.0;
         self.elevator_trim = trim_elev;
         self.aileron = 0.0;
@@ -155,9 +168,10 @@ impl FlightSimNode {
         self.sim.is_some()
     }
 
-    /// Advance the 6-DOF simulation by `dt` seconds (0 => 1/60 s). Applies any
-    /// active autopilot/altitude-hold assist first, then steps the aircraft
-    /// through the turbulence/steady-wind model produced by `flight_core`.
+    /// Advance the 6-DOF simulation by `dt` seconds (0 => 1/60 s). By default
+    /// the aircraft flies through the avionics stack (sensors → PID flight
+    /// controller → servos/ESC → battery); direct manual surface control is
+    /// used instead only while [`set_controls`](Self::set_controls) bypasses it.
     #[func]
     fn step(&mut self, dt: f64) {
         let Some((sim, wind)) = self.sim.as_mut() else {
@@ -165,8 +179,11 @@ impl FlightSimNode {
         };
         let dt = dt.clamp(0.0, 0.1).max(1e-4);
 
-        // Autopilot: wing leveler + altitude/pitch hold while engaged.
-        if self.auto_level {
+        let avionics_active = self.avionics_active && self.avionics.is_some();
+
+        // Autopilot: wing leveler + altitude/pitch hold (manual path only;
+        // the flight controller already stabilizes attitude in avionics mode).
+        if self.auto_level && !avionics_active {
             let (roll, pitch, _) = sim.state.euler_angles();
             let state = &sim.state;
 
@@ -188,6 +205,37 @@ impl FlightSimNode {
         self.last_wind = wind_earth;
         // Apply the asymmetric engine split (engine-out) to the active config.
         sim.config.throttle_split = self.throttle_split;
+
+        let terrain = if self.terrain_enabled {
+            Some(&self.terrain)
+        } else {
+            None
+        };
+
+        // Avionics path (main mode): the FC reads the attitude commands, the
+        // sensor→controller→actuator→battery chain runs, and the resulting
+        // surface deflections + ESC throttle drive the 6-DOF physics.
+        if avionics_active {
+            if let Some(av) = self.avionics.as_mut() {
+                let tas = sim.state.true_airspeed(&wind_earth);
+                let q_dynamic = Atmosphere::at_altitude(sim.state.altitude()).dynamic_pressure(tas);
+                av.bus_mut().write_true_state(&sim.state, &wind_earth, q_dynamic);
+                av.step();
+                let (elev, ail, rud, thr) = av.bus().read_actuator_outputs();
+                sim.step_6dof(
+                    elev,
+                    ail,
+                    rud,
+                    thr,
+                    self.flaps_deg.to_radians(),
+                    Some(&wind_earth),
+                    dt,
+                    terrain,
+                );
+                return;
+            }
+        }
+
         sim.step_6dof(
             total_elevator,
             self.aileron,
@@ -196,11 +244,7 @@ impl FlightSimNode {
             self.flaps_deg.to_radians(),
             Some(&wind_earth),
             dt,
-            if self.terrain_enabled {
-                Some(&self.terrain)
-            } else {
-                None
-            },
+            terrain,
         );
     }
 
@@ -260,6 +304,7 @@ impl FlightSimNode {
     }
 
     /// Replace all control inputs in one call (angles in radians, flaps in °).
+    /// This bypasses the avionics stack and drives the surfaces directly.
     #[func]
     fn set_controls(&mut self, elevator: f64, aileron: f64, rudder: f64, throttle: f64, flaps_deg: f64) {
         self.elevator = elevator.clamp(-MAX_ELEVATOR, MAX_ELEVATOR);
@@ -267,6 +312,154 @@ impl FlightSimNode {
         self.rudder = rudder.clamp(-MAX_RUDDER, MAX_RUDDER);
         self.throttle = throttle.clamp(0.0, 1.0);
         self.flaps_deg = flaps_deg;
+        self.avionics_active = false;
+    }
+
+    /// Command the flight controller's attitude setpoints and switch to the
+    /// avionics path (the main mode): `roll`/`pitch` in radians, `yaw_rate`
+    /// in rad/s, `throttle` 0..=1. `step` then flies through the sensors,
+    /// PID flight controller, servos/ESC and battery.
+    #[func]
+    fn set_avionics_command(&mut self, roll: f64, pitch: f64, yaw_rate: f64, throttle: f64) {
+        if let Some(av) = self.avionics.as_mut() {
+            let bus = av.bus_mut();
+            bus.cmd_roll = roll;
+            bus.cmd_pitch = pitch;
+            bus.cmd_yaw_rate = yaw_rate;
+            bus.cmd_throttle = throttle.clamp(0.0, 1.0);
+            self.avionics_active = true;
+        }
+    }
+
+    /// True while `step` flies through the avionics stack (main mode).
+    #[func]
+    fn is_avionics_active(&self) -> bool {
+        self.avionics_active && self.avionics.is_some()
+    }
+
+    /// Inject a named fault into the avionics stack, e.g. `"imu"`, `"gps"`,
+    /// `"baro"`, `"mag"`, `"airspeed"`, `"servo_elevator"`,
+    /// `"servo_aileron"`, `"servo_rudder"`, `"esc"` or
+    /// `"battery_depleted"`. Returns `false` if the name is not recognised.
+    #[func]
+    fn inject_fault(&mut self, name: GString) -> bool {
+        let Some(flag) = fault_flag_from_str(&name.to_string()) else {
+            return false;
+        };
+        if let Some(av) = self.avionics.as_mut() {
+            av.inject_fault(flag, true);
+            return true;
+        }
+        false
+    }
+
+    /// Clear a previously injected fault. Returns `false` if the name is not
+    /// recognised.
+    #[func]
+    fn clear_fault(&mut self, name: GString) -> bool {
+        let Some(flag) = fault_flag_from_str(&name.to_string()) else {
+            return false;
+        };
+        if let Some(av) = self.avionics.as_mut() {
+            av.inject_fault(flag, false);
+            return true;
+        }
+        false
+    }
+
+    /// The 19-channel noisy sensor observation from the avionics bus. See the
+    /// layout documented on `flight_core::avionics::AvionicsBus::sensor_observation`.
+    /// Returns an empty array before [`start`](Self::start).
+    #[func]
+    fn avionics_observation(&self) -> PackedFloat64Array {
+        let Some(av) = &self.avionics else {
+            return PackedFloat64Array::new();
+        };
+        PackedFloat64Array::from(av.bus().sensor_observation().to_vec())
+    }
+
+    /// Full snapshot of the avionics bus for the component-visualization panel.
+    /// Every component's live readback is included, plus the agent commands,
+    /// flight-controller mode and fault flags. Returns an empty array before
+    /// [`start`](Self::start). Layout (angles in degrees, SI otherwise):
+    /// ```text
+    ///   0  cmd_roll (rad)           23 baro_altitude (m)
+    ///   1  cmd_pitch (rad)          24-26 mag field body (nT)
+    ///   2  cmd_yaw_rate (rad/s)     27 airspeed_indicated (m/s)
+    ///   3  cmd_throttle (0..1)      28 battery_voltage (V)
+    ///   4  fc_mode (0 rate / 1 att) 29 battery_current (A)
+    ///   5  fc_servo_elevator (deg)  30 battery_capacity (pct)
+    ///   6  fc_servo_aileron (deg)   31 actual_elevator (deg)
+    ///   7  fc_servo_rudder (deg)    32 actual_aileron (deg)
+    ///   8  fc_esc_throttle (0..1)   33 actual_rudder (deg)
+    ///   9-11 gyro p/q/r (rad/s)     34 actual_esc_output (0..1)
+    ///   12-14 accel x/y/z (m/s²)    35 imu_failed
+    ///   15-17 gps pos N/E/alt (m)   36 gps_failed
+    ///   18-20 gps vel N/E/D (m/s)   37 baro_failed
+    ///   21 gps_fix_quality          38 mag_failed
+    ///   22 gps_hdop                 39 airspeed_failed
+    ///                               40 servo_elev_failed
+    ///                               41 servo_ail_failed
+    ///                               42 servo_rud_failed
+    ///                               43 esc_failed
+    ///                               44 battery_depleted
+    ///                               45 sim_time (s)
+    /// ```
+    #[func]
+    fn avionics_snapshot(&self) -> PackedFloat64Array {
+        let Some(av) = &self.avionics else {
+            return PackedFloat64Array::new();
+        };
+        let bus = av.bus();
+        let f = &bus.fc_fault_flags;
+        PackedFloat64Array::from(vec![
+            bus.cmd_roll,
+            bus.cmd_pitch,
+            bus.cmd_yaw_rate,
+            bus.cmd_throttle,
+            bus.fc_mode as u8 as f64,
+            bus.fc_servo_elevator,
+            bus.fc_servo_aileron,
+            bus.fc_servo_rudder,
+            bus.fc_esc_throttle,
+            bus.gyro.x,
+            bus.gyro.y,
+            bus.gyro.z,
+            bus.accel.x,
+            bus.accel.y,
+            bus.accel.z,
+            bus.gps_position_ned.x,
+            bus.gps_position_ned.y,
+            -bus.gps_position_ned.z,
+            bus.gps_velocity_ned.x,
+            bus.gps_velocity_ned.y,
+            bus.gps_velocity_ned.z,
+            bus.gps_fix_quality as f64,
+            bus.gps_hdop,
+            bus.baro_altitude,
+            bus.mag_field_body.x,
+            bus.mag_field_body.y,
+            bus.mag_field_body.z,
+            bus.airspeed_indicated,
+            bus.battery_voltage,
+            bus.battery_current,
+            bus.battery_capacity_remaining_pct,
+            bus.actual_elevator_deg,
+            bus.actual_aileron_deg,
+            bus.actual_rudder_deg,
+            bus.actual_esc_output,
+            f.imu_failed as u8 as f64,
+            f.gps_failed as u8 as f64,
+            f.baro_failed as u8 as f64,
+            f.mag_failed as u8 as f64,
+            f.airspeed_failed as u8 as f64,
+            f.servo_elevator_failed as u8 as f64,
+            f.servo_aileron_failed as u8 as f64,
+            f.servo_rudder_failed as u8 as f64,
+            f.esc_failed as u8 as f64,
+            f.battery_depleted as u8 as f64,
+            bus.sim_time,
+        ])
     }
 
     /// Set the asymmetric engine throttle split (`-1..=1`). `0` runs both
@@ -295,6 +488,11 @@ impl FlightSimNode {
         let mut state = AircraftState::default();
         let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
+        self.avionics = Some(Self::build_avionics());
+        self.avionics_active = true;
+        if let Some(av) = self.avionics.as_mut() {
+            av.bus_mut().cmd_throttle = trim_throttle;
+        }
         self.elevator = 0.0;
         self.elevator_trim = trim_elev;
         self.aileron = 0.0;
@@ -355,6 +553,11 @@ impl FlightSimNode {
             return Vector2::ZERO;
         };
         let (e, t) = sim.trim_level_flight(50.0, 60.0);
+        self.avionics = Some(Self::build_avionics());
+        self.avionics_active = true;
+        if let Some(av) = self.avionics.as_mut() {
+            av.bus_mut().cmd_throttle = t;
+        }
         self.elevator = 0.0;
         self.elevator_trim = e;
         self.aileron = 0.0;
@@ -405,6 +608,11 @@ impl FlightSimNode {
     ///   20 rudder °,           21 wind speed m/s,
     ///   22 wind direction °,   23 stall flag (0/1),
     ///   24 autopilot flag (0/1).
+    ///
+    /// When the avionics stack is active, channels 25..=43 are appended (the
+    /// noisy sensor observation, see
+    /// `flight_core::avionics::AvionicsBus::sensor_observation`); HUD indices
+    /// 0..=24 never change.
     #[func]
     fn telemetry(&self) -> PackedFloat64Array {
         let Some((sim, _)) = &self.sim else {
@@ -433,7 +641,9 @@ impl FlightSimNode {
         let stall = if alpha > 14.5 { 1.0 } else { 0.0 };
         let ap = if self.auto_level { 1.0 } else { 0.0 };
 
-        PackedFloat64Array::from(vec![
+        // Append the noisy avionics sensor observation (25..=43) when the
+        // stack is active; base HUD indices 0..=24 stay stable.
+        let mut t = vec![
             alt_m,
             alt_m * 3.28084,
             tas_ms,
@@ -459,7 +669,12 @@ impl FlightSimNode {
             wind_dir,
             stall,
             ap,
-        ])
+        ];
+        if let Some(av) = &self.avionics {
+            t.extend_from_slice(&av.bus().sensor_observation());
+        }
+
+        PackedFloat64Array::from(t)
     }
 }
 
@@ -467,6 +682,32 @@ impl FlightSimNode {
     fn wind_environment(&self) -> WindEnvironment {
         WindEnvironment::new(wind_config_from_env())
     }
+
+    /// Build the standard avionics hardware stack at the default 60 Hz step,
+    /// initialised, mirroring the RL environment's exact component order.
+    fn build_avionics() -> AvionicsSystem {
+        let mut av = standard_stack(1.0 / 60.0);
+        av.init();
+        av
+    }
+}
+
+/// Map a fault name (`"imu"`, `"gps"`, `"esc"`, …) to a [`FaultFlag`], used
+/// by [`FlightSimNode::inject_fault`] / [`FlightSimNode::clear_fault`].
+fn fault_flag_from_str(name: &str) -> Option<FaultFlag> {
+    Some(match name {
+        "imu" => FaultFlag::Imu,
+        "gps" => FaultFlag::Gps,
+        "baro" => FaultFlag::Baro,
+        "mag" | "magnetometer" => FaultFlag::Mag,
+        "airspeed" => FaultFlag::Airspeed,
+        "servo_elevator" | "servo_elev" => FaultFlag::ServoElevator,
+        "servo_aileron" | "servo_ail" => FaultFlag::ServoAileron,
+        "servo_rudder" | "servo_rud" => FaultFlag::ServoRudder,
+        "esc" => FaultFlag::Esc,
+        "battery_depleted" | "battery" => FaultFlag::BatteryDepleted,
+        _ => return None,
+    })
 }
 
 /// Map an NED `AircraftState` to a Godot `Transform3D`. The NED→Godot frame

@@ -12,7 +12,7 @@ rand = { version = "0.8", optional = true }
 rand_distr = { version = "0.4", optional = true }
 
 [features]
-default = []
+default = ["full-avionics"]
 imu = ["rand", "rand_distr"]
 gps = ["rand", "rand_distr"]
 baro = ["rand", "rand_distr"]

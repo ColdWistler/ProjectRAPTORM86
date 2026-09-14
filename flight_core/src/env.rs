@@ -16,11 +16,7 @@ use nalgebra::Vector3;
 #[cfg(feature = "full-avionics")]
 use crate::atmosphere::Atmosphere;
 #[cfg(feature = "full-avionics")]
-use crate::avionics::{
-    ActuatorSuite, AirspeedConfig, AirspeedSensor, AvionicsSystem, BaroConfig, BaroSensor, Battery,
-    BatteryConfig, Esc, EscConfig, FaultFlag, FaultFlags, FlightController, FlightControllerConfig,
-    GpsConfig, GpsSensor, ImuConfig, ImuSensor, MagConfig, MagnetometerSensor, ServoConfig,
-};
+use crate::avionics::{AvionicsSystem, FaultFlag, FaultFlags};
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -260,7 +256,7 @@ fn shaped_reward(s: &crate::AircraftState, cfg: &EnvConfig) -> f64 {
 
 /// Size of [`AvionicsObservation`].
 #[cfg(feature = "full-avionics")]
-pub const AVIONICS_OBS_DIM: usize = 19;
+pub const AVIONICS_OBS_DIM: usize = crate::avionics::bus::SENSOR_OBSERVATION_DIM;
 
 /// Observation vector from the *noisy* avionics sensors on the bus (not the
 /// true physics state), so the agent learns to fly on what hardware would
@@ -365,28 +361,10 @@ impl AvionicsEnvironment {
         })
     }
 
-    /// Build the default hardware stack. Register order matters: ESC and
-    /// battery are generic devices that run after the actuator suite.
+    /// Build the default hardware stack, sharing the exact same component
+    /// order as the Godot bridge via [`crate::avionics::standard_stack`].
     fn make_avionics(dt: f64) -> AvionicsSystem {
-        let mut sys = AvionicsSystem::new(dt);
-        sys.add_sensor(Box::new(ImuSensor::new(ImuConfig::default())));
-        sys.add_sensor(Box::new(GpsSensor::new(GpsConfig::default())));
-        sys.add_sensor(Box::new(BaroSensor::new(BaroConfig::default())));
-        sys.add_sensor(Box::new(MagnetometerSensor::new(MagConfig::default())));
-        sys.add_sensor(Box::new(AirspeedSensor::new(AirspeedConfig::default())));
-        sys.add_controller(Box::new(FlightController::new(
-            FlightControllerConfig::default(),
-        )));
-        // Servos/ESC/battery are generic components (not trait-typed actuators);
-        // they run in insertion order after the controller stage.
-        sys.add_component(Box::new(ActuatorSuite::new(
-            ServoConfig::default(),
-            ServoConfig::default(),
-            ServoConfig::default(),
-        )));
-        sys.add_component(Box::new(Esc::new(EscConfig::default())));
-        sys.add_component(Box::new(Battery::new(BatteryConfig::default())));
-        sys
+        crate::avionics::standard_stack(dt)
     }
 
     /// Reset to trimmed level flight and clear all injected faults.
@@ -459,28 +437,7 @@ impl AvionicsEnvironment {
 
     /// Build the current observation array from the noisy bus sensor outputs.
     pub fn observation(&self) -> AvionicsObservation {
-        let bus = self.avionics.bus();
-        [
-            bus.gyro.x,
-            bus.gyro.y,
-            bus.gyro.z,
-            bus.accel.x,
-            bus.accel.y,
-            bus.accel.z,
-            bus.gps_position_ned.x,
-            bus.gps_position_ned.y,
-            -bus.gps_position_ned.z,
-            bus.gps_fix_quality as f64,
-            bus.baro_altitude,
-            bus.airspeed_indicated,
-            bus.battery_voltage,
-            bus.battery_capacity_remaining_pct,
-            bus.actual_elevator_deg,
-            bus.actual_aileron_deg,
-            bus.actual_rudder_deg,
-            bus.actual_esc_output,
-            bus.sim_time,
-        ]
+        self.avionics.bus().sensor_observation()
     }
 
     /// Inject a fault; components apply their own failure behaviour.
@@ -765,6 +722,65 @@ mod tests {
             env.sim.state.altitude() < 950.0,
             "with no thrust the aircraft must descend (alt {:.0} m)",
             env.sim.state.altitude()
+        );
+    }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn fc_estimate_matches_physics_euler_angles() {
+        use crate::avionics::{AvionicsSystem, standard_stack};
+        use crate::state::AircraftState;
+        use crate::config::load_config;
+        use nalgebra::Vector3;
+        use std::f64::consts::FRAC_PI_6;
+
+        let mut av: AvionicsSystem = standard_stack(1.0 / 60.0);
+        av.init();
+
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        let mut state = AircraftState::default();
+        let config = load_config(path).expect("aircraft.toml should load");
+        state.trim_level_flight(&config, 50.0, 60.0);
+
+        // Apply a known 30° roll (right wing down)
+        let phi = FRAC_PI_6;
+        let half = phi / 2.0;
+        state.q0 = half.cos();
+        state.q1 = half.sin();
+        state.q2 = 0.0;
+        state.q3 = 0.0;
+        state.p = 0.0;
+        state.q = 0.0;
+        state.r = 0.0;
+        state.u = 60.0;
+        state.v = 0.0;
+        state.w = 0.0;
+
+        let (physics_roll, physics_pitch, _) = state.euler_angles();
+        assert!(physics_roll < 0.0, "setup must produce a bank, got {:.1}°", physics_roll.to_degrees());
+
+        let wind = Vector3::zeros();
+        let q_dyn = 2000.0;
+        av.bus_mut().write_true_state(&state, &wind, q_dyn);
+        av.bus_mut().cmd_roll = 0.0;
+        av.bus_mut().cmd_pitch = 0.0;
+        av.bus_mut().cmd_yaw_rate = 0.0;
+        av.bus_mut().cmd_throttle = 0.6;
+        av.step();
+
+        // Reconstruct the FC roll estimate from the quaternion stored on the bus
+        let q = &av.bus().true_quat;
+        let fc_roll = (2.0 * (q[2] * q[3] - q[1] * q[0]))
+            .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+        assert!(
+            (fc_roll - physics_roll).abs() < 1e-9,
+            "FC roll estimate must match physics euler: fc {:.1}° vs phys {:.1}°",
+            fc_roll.to_degrees(),
+            physics_roll.to_degrees()
         );
     }
 }
