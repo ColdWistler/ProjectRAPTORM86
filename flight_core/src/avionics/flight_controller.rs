@@ -295,6 +295,11 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = bus.cmd_roll.clamp(-30.0, 30.0);
                 bus.fc_servo_elevator = bus.cmd_pitch.clamp(-30.0, 30.0);
                 bus.fc_servo_rudder = bus.cmd_yaw_rate.clamp(-30.0, 30.0);
+                self.throttle_filter = if bus.fc_fault_flags.battery_depleted {
+                    0.0
+                } else {
+                    bus.cmd_throttle.clamp(0.0, 1.0)
+                };
                 bus.fc_esc_throttle = thr;
             }
             FcMode::Rate => {
@@ -306,11 +311,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
             FcMode::Attitude => {
                 // Outer loop: attitude (roll/pitch angle) → rate command
@@ -328,11 +330,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
             FcMode::Stabilize => {
                 // Hold wings-level: zero roll command, damp yaw, keep pitch
@@ -344,11 +343,8 @@ impl AvionicsComponent for FlightController {
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
                 bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
-                bus.fc_esc_throttle = Self::smooth_throttle(
-                    self.throttle_filter,
-                    thr,
-                    dt,
-                );
+                self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
+                bus.fc_esc_throttle = self.throttle_filter;
             }
         }
     }

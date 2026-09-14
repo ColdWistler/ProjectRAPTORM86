@@ -724,6 +724,49 @@ mod tests {
             env.sim.state.altitude()
         );
     }
+
+    #[cfg(feature = "full-avionics")]
+    #[test]
+    fn debug_repro_godot_flypath() {
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        let mut env = AvionicsEnvironment::with_config(
+            path,
+            EnvConfig {
+                dt: 1.0 / 60.0,
+                max_steps: 100_000,
+                ..Default::default()
+            },
+        )
+        .expect("aircraft.toml should load");
+        let (_, trim_thr) = env.sim.trim_level_flight(50.0, 60.0);
+        env.avionics.bus_mut().cmd_throttle = trim_thr;
+        let action = AvionicsAction::level_cruise(trim_thr);
+        for i in 1..=1200 {
+            let r = env.step(action);
+            if i % 60 == 0 {
+                let s = &env.sim.state;
+                let (roll, pitch, yaw) = s.euler_angles();
+                println!(
+                    "t={:4.1}s alt={:+8.2} tas={:+7.2} thr={:+6.3} elev(deg)={:+6.2} ail={:+6.2} rud={:+6.2} | roll={:+6.1}° pitch={:+6.1}° yaw={:+6.1}°",
+                    i as f64 / 60.0,
+                    s.altitude(),
+                    s.airspeed(),
+                    env.observation()[17],
+                    env.observation()[14],
+                    env.observation()[15],
+                    env.observation()[16],
+                    roll.to_degrees(),
+                    pitch.to_degrees(),
+                    yaw.to_degrees(),
+                );
+            }
+            assert!(!r.terminated);
+        }
+    }
 }
 
 
