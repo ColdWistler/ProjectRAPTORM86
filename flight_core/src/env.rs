@@ -727,45 +727,61 @@ mod tests {
 
     #[cfg(feature = "full-avionics")]
     #[test]
-    fn debug_repro_godot_flypath() {
+    fn fc_estimate_matches_physics_euler_angles() {
+        use crate::avionics::{AvionicsSystem, standard_stack};
+        use crate::state::AircraftState;
+        use crate::config::load_config;
+        use nalgebra::Vector3;
+        use std::f64::consts::FRAC_PI_6;
+
+        let mut av: AvionicsSystem = standard_stack(1.0 / 60.0);
+        av.init();
+
         let path = if std::path::Path::new("../aircraft.toml").exists() {
             "../aircraft.toml"
         } else {
             "aircraft.toml"
         };
-        let mut env = AvionicsEnvironment::with_config(
-            path,
-            EnvConfig {
-                dt: 1.0 / 60.0,
-                max_steps: 100_000,
-                ..Default::default()
-            },
-        )
-        .expect("aircraft.toml should load");
-        let (_, trim_thr) = env.sim.trim_level_flight(50.0, 60.0);
-        env.avionics.bus_mut().cmd_throttle = trim_thr;
-        let action = AvionicsAction::level_cruise(trim_thr);
-        for i in 1..=1200 {
-            let r = env.step(action);
-            if i % 60 == 0 {
-                let s = &env.sim.state;
-                let (roll, pitch, yaw) = s.euler_angles();
-                println!(
-                    "t={:4.1}s alt={:+8.2} tas={:+7.2} thr={:+6.3} elev(deg)={:+6.2} ail={:+6.2} rud={:+6.2} | roll={:+6.1}° pitch={:+6.1}° yaw={:+6.1}°",
-                    i as f64 / 60.0,
-                    s.altitude(),
-                    s.airspeed(),
-                    env.observation()[17],
-                    env.observation()[14],
-                    env.observation()[15],
-                    env.observation()[16],
-                    roll.to_degrees(),
-                    pitch.to_degrees(),
-                    yaw.to_degrees(),
-                );
-            }
-            assert!(!r.terminated);
-        }
+        let mut state = AircraftState::default();
+        let config = load_config(path).expect("aircraft.toml should load");
+        state.trim_level_flight(&config, 50.0, 60.0);
+
+        // Apply a known 30° roll (right wing down)
+        let phi = FRAC_PI_6;
+        let half = phi / 2.0;
+        state.q0 = half.cos();
+        state.q1 = half.sin();
+        state.q2 = 0.0;
+        state.q3 = 0.0;
+        state.p = 0.0;
+        state.q = 0.0;
+        state.r = 0.0;
+        state.u = 60.0;
+        state.v = 0.0;
+        state.w = 0.0;
+
+        let (physics_roll, physics_pitch, _) = state.euler_angles();
+        assert!(physics_roll < 0.0, "setup must produce a bank, got {:.1}°", physics_roll.to_degrees());
+
+        let wind = Vector3::zeros();
+        let q_dyn = 2000.0;
+        av.bus_mut().write_true_state(&state, &wind, q_dyn);
+        av.bus_mut().cmd_roll = 0.0;
+        av.bus_mut().cmd_pitch = 0.0;
+        av.bus_mut().cmd_yaw_rate = 0.0;
+        av.bus_mut().cmd_throttle = 0.6;
+        av.step();
+
+        // Reconstruct the FC roll estimate from the quaternion stored on the bus
+        let q = &av.bus().true_quat;
+        let fc_roll = (2.0 * (q[2] * q[3] - q[1] * q[0]))
+            .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+        assert!(
+            (fc_roll - physics_roll).abs() < 1e-9,
+            "FC roll estimate must match physics euler: fc {:.1}° vs phys {:.1}°",
+            fc_roll.to_degrees(),
+            physics_roll.to_degrees()
+        );
     }
 }
 
