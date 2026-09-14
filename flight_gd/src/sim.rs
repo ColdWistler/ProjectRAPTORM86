@@ -378,6 +378,90 @@ impl FlightSimNode {
         PackedFloat64Array::from(av.bus().sensor_observation().to_vec())
     }
 
+    /// Full snapshot of the avionics bus for the component-visualization panel.
+    /// Every component's live readback is included, plus the agent commands,
+    /// flight-controller mode and fault flags. Returns an empty array before
+    /// [`start`](Self::start). Layout (angles in degrees, SI otherwise):
+    /// ```text
+    ///   0  cmd_roll (rad)           23 baro_altitude (m)
+    ///   1  cmd_pitch (rad)          24-26 mag field body (nT)
+    ///   2  cmd_yaw_rate (rad/s)     27 airspeed_indicated (m/s)
+    ///   3  cmd_throttle (0..1)      28 battery_voltage (V)
+    ///   4  fc_mode (0 rate / 1 att) 29 battery_current (A)
+    ///   5  fc_servo_elevator (deg)  30 battery_capacity (pct)
+    ///   6  fc_servo_aileron (deg)   31 actual_elevator (deg)
+    ///   7  fc_servo_rudder (deg)    32 actual_aileron (deg)
+    ///   8  fc_esc_throttle (0..1)   33 actual_rudder (deg)
+    ///   9-11 gyro p/q/r (rad/s)     34 actual_esc_output (0..1)
+    ///   12-14 accel x/y/z (m/s²)    35 imu_failed
+    ///   15-17 gps pos N/E/alt (m)   36 gps_failed
+    ///   18-20 gps vel N/E/D (m/s)   37 baro_failed
+    ///   21 gps_fix_quality          38 mag_failed
+    ///   22 gps_hdop                 39 airspeed_failed
+    ///                               40 servo_elev_failed
+    ///                               41 servo_ail_failed
+    ///                               42 servo_rud_failed
+    ///                               43 esc_failed
+    ///                               44 battery_depleted
+    ///                               45 sim_time (s)
+    /// ```
+    #[func]
+    fn avionics_snapshot(&self) -> PackedFloat64Array {
+        let Some(av) = &self.avionics else {
+            return PackedFloat64Array::new();
+        };
+        let bus = av.bus();
+        let f = &bus.fc_fault_flags;
+        PackedFloat64Array::from(vec![
+            bus.cmd_roll,
+            bus.cmd_pitch,
+            bus.cmd_yaw_rate,
+            bus.cmd_throttle,
+            bus.fc_mode as u8 as f64,
+            bus.fc_servo_elevator,
+            bus.fc_servo_aileron,
+            bus.fc_servo_rudder,
+            bus.fc_esc_throttle,
+            bus.gyro.x,
+            bus.gyro.y,
+            bus.gyro.z,
+            bus.accel.x,
+            bus.accel.y,
+            bus.accel.z,
+            bus.gps_position_ned.x,
+            bus.gps_position_ned.y,
+            -bus.gps_position_ned.z,
+            bus.gps_velocity_ned.x,
+            bus.gps_velocity_ned.y,
+            bus.gps_velocity_ned.z,
+            bus.gps_fix_quality as f64,
+            bus.gps_hdop,
+            bus.baro_altitude,
+            bus.mag_field_body.x,
+            bus.mag_field_body.y,
+            bus.mag_field_body.z,
+            bus.airspeed_indicated,
+            bus.battery_voltage,
+            bus.battery_current,
+            bus.battery_capacity_remaining_pct,
+            bus.actual_elevator_deg,
+            bus.actual_aileron_deg,
+            bus.actual_rudder_deg,
+            bus.actual_esc_output,
+            f.imu_failed as u8 as f64,
+            f.gps_failed as u8 as f64,
+            f.baro_failed as u8 as f64,
+            f.mag_failed as u8 as f64,
+            f.airspeed_failed as u8 as f64,
+            f.servo_elevator_failed as u8 as f64,
+            f.servo_aileron_failed as u8 as f64,
+            f.servo_rudder_failed as u8 as f64,
+            f.esc_failed as u8 as f64,
+            f.battery_depleted as u8 as f64,
+            bus.sim_time,
+        ])
+    }
+
     /// Set the asymmetric engine throttle split (`-1..=1`). `0` runs both
     /// engines together; `-1` shuts the left engine down, `+1` the right.
     #[func]
