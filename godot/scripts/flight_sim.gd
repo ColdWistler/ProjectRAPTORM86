@@ -20,6 +20,7 @@ var auto_level := false
 
 const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
+const _HudScript := preload("res://scripts/hud.gd")
 
 ## Trim (altitude m, airspeed m/s) each mode re-trims to on load/reset. ENGINE
 ## MODE is the fast long-range jet: it starts at high-altitude fast cruise so
@@ -70,7 +71,7 @@ var cam_center := Vector3.ZERO
 @onready var _physics = $Physics
 @onready var _drone: Node3D = $DroneView
 @onready var _camera: Camera3D = $Camera
-@onready var _label: RichTextLabel = _build_hud()
+@onready var _hud: Control = _build_hud()
 
 func _ready() -> void:
 	var is_editor := Engine.is_editor_hint()
@@ -213,50 +214,19 @@ func _collect_meshes(n: Node, out: Array) -> void:
 	for c in n.get_children():
 		_collect_meshes(c, out)
 
-## Build the on-screen HUD (telemetry panel + aircraft-swap button).
-func _build_hud() -> RichTextLabel:
+## Build the on-screen HUD: a full-screen pilot HUD overlay (instruments
+## drawn by `FlightHUD`), the avionics component panel and the aircraft-swap
+## button. Returns the overlay so the physics loop can feed it telemetry.
+func _build_hud() -> Control:
 	var hud := CanvasLayer.new()
 	hud.name = "HUDCanvas"
 	add_child(hud)
-	var panel := PanelContainer.new()
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.04, 0.07, 0.11, 0.85)
-	style.set_corner_radius_all(6)
-	style.set_content_margin_all(12)
-	panel.add_theme_stylebox_override("panel", style)
-	panel.position = Vector2(12, 12)
-	hud.add_child(panel)
 
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 8)
-	panel.add_child(vbox)
-
-	# Telemetry: colored section headers + value highlighting via BBCode.
-	var label := RichTextLabel.new()
-	label.bbcode_enabled = true
-	label.fit_content = true
-	label.scroll_active = false
-	label.add_theme_font_size_override("normal_font_size", 13)
-	label.text = "Initializing..."
-	vbox.add_child(label)
-
-	# Controls legend as a separate plain label (its [..] keys are literal).
-	var legend := Label.new()
-	legend.add_theme_font_size_override("font_size", 12)
-	legend.text = """CONTROLS & DRONE SYSTEMS
-------------------------------------
-Pitch:     [W] Down / [S] Up
-Roll:      [A] Left / [D] Right
-Rudder:    [Q] Left / [E] Right (or [Z]/[C])
-Flaps:     [F] 0 -> 15 -> 30
-Engine:    [G] both -> left out -> right out (twin)
-Trim:      [ [ ] Down / [ ] ] Up
-Throttle:  [Shift] Up / [Ctrl] Down
-Avionics:  [L] Attitude / Manual    Panel: [P]
-Autopilot: [H]/[T] Hold    Reset: [R]
-Camera:    [V] Chase/Orbit  [RMB-drag] [Scroll]
-Menu: [Esc]"""
-	vbox.add_child(legend)
+	# Full-screen instrument overlay (drawn first, so it sits behind the panels).
+	var overlay := _HudScript.new()
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(overlay)
 
 	_aircraft_btn = Button.new()
 	_aircraft_btn.position = Vector2(12, 620)
@@ -276,7 +246,7 @@ Menu: [Esc]"""
 
 	_build_avionics_panel(hud)
 
-	return label
+	return overlay
 
 ## Cycle to the next aircraft in the list and reload it.
 func _on_aircraft_swap() -> void:
@@ -316,12 +286,15 @@ func _physics_process(delta: float) -> void:
 		if prop is Node3D:
 			prop.rotate_x(delta * (throttle * 60.0 + 3.0))
 
+	# Feed the instrument overlay every frame so the tapes/ladder feel live.
+	_telemetry = _physics.telemetry()
+	_hud.update_telemetry(_telemetry, _avionics_snap, avionics_mode, auto_level, engine_out)
+
+	# The avionics panel only needs a lower refresh rate.
 	_hud_timer += delta
 	if _hud_timer >= 0.2:
 		_hud_timer = 0.0
-		_telemetry = _physics.telemetry()
 		_avionics_snap = _physics.avionics_snapshot()
-		_update_hud()
 		_update_avionics_panel()
 
 ## Poll keyboard/mouse inputs into the elevator/aileron/rudder/flap/trim/
@@ -601,62 +574,3 @@ func _update_avionics_panel() -> void:
 		var btn: CheckButton = _fault_buttons[names[i]]
 		btn.set_pressed_no_signal(snap[35 + i] > 0.5)
 
-## Rewrite the HUD label text from the latest Rust telemetry array
-## (`_telemetry`), including the aircraft-specific mode title and stall flag.
-## Rendered as BBCode: section headers in accent color, warning values tinted.
-func _update_hud() -> void:
-	if _telemetry.size() < 25:
-		return
-	var t := _telemetry
-	var flap_str := "UP (0deg)"
-	if flaps_deg < 20.0:
-		flap_str = "TAKEOFF (15deg)"
-	if flaps_deg >= 20.0:
-		flap_str = "LANDING (30deg)"
-	var ap := " [color=#7cfc00][AUTOPILOT ON][/color]" if auto_level else ""
-	var stall := " [color=#ff5454][! STALL !][/color]" if t[23] > 0.5 else ""
-	var engine_col := "#ffffff"
-	var engine_str := "BOTH RUNNING"
-	if engine_out == 1:
-		engine_str = "LEFT ENGINE OUT [G]"
-		engine_col = "#ffb545"
-	elif engine_out == 2:
-		engine_str = "RIGHT ENGINE OUT [G]"
-		engine_col = "#ffb545"
-	var ac_name: String = AIRCRAFT_NAMES[_aircraft_index]
-	var mode_title: String = "ENGINE MODE [color=#8ab4ff]- FAST LONG-RANGE JET[/color]" if ac_name == "Engine" else "TACTICAL UAV DRONE TELEMETRY"
-	var path_col := "#5ad7ff" if avionics_mode else "#ffb545"
-	var path_str := "AVIONICS" if avionics_mode else "MANUAL BYPASS"
-	_label.text = """[b][color=#5ad7ff]%s[/color][/b][color=#7cfc00]%s[/color][color=#ff5454]%s[/color]
-[color=#8a9bb0]%s · control path: [color=#%s]%s[/color][/color]
---------------------------------------------------------------------------------
-[color=#5ad7ff]FLIGHT DATA[/color]
-  Altitude       %6.0f m  (%6.0f ft)
-  Airspeed TAS   %6.1f m/s (%5.0f kts)
-  Ground Speed   %6.1f m/s
-  Wind           %5.1f m/s from %03.0f deg
-  Airspeed IAS   %6.0f kts  [color=#8a9bb0](Mach %4.2f)[/color]
-  Dyn. Pressure  %6.0f Pa  [color=#8a9bb0](OAT %+5.1f degC)[/color]
-[color=#5ad7ff]ATTITUDE[/color]
-  AoA / Slip     %+5.1f deg / %+5.1f deg
-  Pitch / Roll   %+5.1f deg / %+5.1f deg
-  Heading (Yaw)  %5.1f deg  [color=#8a9bb0](Climb %+5.1f deg)[/color]
-[color=#5ad7ff]POWER & SYSTEMS[/color]
-  Throttle       %5.0f %%  [color=#8a9bb0](Flaps: %s)[/color]
-  Engines        [color=#%s]%s[/color]
-  Surfaces       [color=#8a9bb0]Ail %+5.1f[/color] | [color=#8a9bb0]Elev %+5.1f[/color] [color=#6a7b90](Trim %+5.1f)[/color] | [color=#8a9bb0]Rud %+5.1f[/color] deg""" % [
-		mode_title, ap, stall,
-		ac_name, path_col, path_str,
-		t[0], t[1],
-		t[2], t[3],
-		t[4],
-		t[21], t[22],
-		t[5], t[6],
-		t[7], t[8],
-		t[9], t[10],
-		t[11], t[12],
-		t[13], t[14],
-		t[15], flap_str,
-		engine_col, engine_str,
-		t[17], t[18], t[19], t[20],
-	]
