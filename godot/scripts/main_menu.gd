@@ -45,6 +45,31 @@ const AIRCRAFT := {
 	},
 }
 
+## Per-aircraft 3D model alignment (mirrors `aircraft_view.gd`). `rot` brings
+## the raw GLB axis convention onto body axes (nose +X, up +Y, right +Z);
+## `scale` normalizes it to a usable on-screen size. `"procedural": true`
+## builds the jet from primitives via `EngineFactory`.
+const MODEL_ALIGN := {
+	"MQI": {
+		"scene": "res://assets/aircraft/MQI.glb",
+		"rot": Vector3(0, 90, 0),
+		"scale": 0.35,
+		"cam_dist": 5.5,
+	},
+	"TwinEngine": {
+		"scene": "res://assets/aircraft/TwinEngine.glb",
+		"rot": Vector3(0, 0, 0),
+		"scale": 0.16,
+		"cam_dist": 7.5,
+	},
+	"Engine": {
+		"procedural": true,
+		"cam_dist": 32.0,
+	},
+}
+
+const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
+
 const AVIONICS := {
 	"IMU": "Inertial Measurement Unit — 6-axis accelerometer/gyroscope (MEMS ICM-42688-P class) providing body-frame angular rates and specific force.",
 	"GPS": "Global Positioning System — lat/lon/alt at 5 Hz with selectable noise model; provides Earth-frame position and ground speed.",
@@ -63,10 +88,27 @@ var _current_page := "Home"
 var _tab_buttons: Dictionary = {}
 var _tab_styles: Dictionary = {}
 
+# ── 3D viewport state ────────────────────────────────────────────────
+var _ac_containers: Dictionary = {}   # name → SubViewportContainer
+var _ac_viewports: Dictionary = {}    # name → SubViewport
+var _ac_models: Dictionary = {}       # name → Node3D (turntable root)
+var _ac_spin_root: Dictionary = {}    # name → Node3D (model wrapper that rotates)
+
 # ── Build ────────────────────────────────────────────────────────────
 func _ready() -> void:
 	_build_ui()
 	_switch_page("Home")
+
+## Spin the aircraft preview models about Y (turntable) only while the
+## Aircraft page is visible.
+func _process(delta: float) -> void:
+	if _current_page != "Aircraft":
+		return
+	var speed := 0.35 * delta
+	for name in _ac_spin_root:
+		var root: Node3D = _ac_spin_root[name]
+		if root != null:
+			root.rotation.y += speed
 
 func _build_ui() -> void:
 	# Full-screen dark background
@@ -199,6 +241,14 @@ func _switch_page(name: String) -> void:
 	_current_page = name
 	for key in _pages:
 		_pages[key].visible = (key == name)
+	# Pause 3D preview rendering unless the Aircraft page is active.
+	var aircraft_active := (name == "Aircraft")
+	for key in _ac_viewports:
+		var vp: SubViewport = _ac_viewports[key]
+		if vp != null:
+			vp.render_target_update_mode = (
+				SubViewport.UPDATE_ALWAYS if aircraft_active
+				else SubViewport.UPDATE_DISABLED)
 	# Update tab button styles
 	for key in _tab_buttons:
 		var styles: Dictionary = _tab_styles[key]
@@ -395,16 +445,20 @@ func _make_aircraft_card(ac_name: String, data: Dictionary) -> PanelContainer:
 	outer_h.add_theme_constant_override("separation", 32)
 	panel.add_child(outer_h)
 
-	# ── Left column: name + role + description ──
-	var left := VBoxContainer.new()
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.custom_minimum_size.x = 360
-	left.add_theme_constant_override("separation", 8)
-	outer_h.add_child(left)
+	# ── Left: live 3D preview (rotating turntable) ──
+	var preview := _build_3d_viewport(ac_name)
+	preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	outer_h.add_child(preview)
+
+	# ── Right: name, role, description, specs ──
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.add_theme_constant_override("separation", 8)
+	outer_h.add_child(right)
 
 	var name_row := HBoxContainer.new()
 	name_row.add_theme_constant_override("separation", 12)
-	left.add_child(name_row)
+	right.add_child(name_row)
 
 	var ac_label := Label.new()
 	ac_label.text = ac_name
@@ -424,35 +478,151 @@ func _make_aircraft_card(ac_name: String, data: Dictionary) -> PanelContainer:
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc.add_theme_font_size_override("font_size", 13)
 	desc.add_theme_color_override("font_color", TEXT_DIM)
-	left.add_child(desc)
+	right.add_child(desc)
 
-	# ── Right column: specs table ──
-	var right := GridContainer.new()
-	right.columns = 2
-	right.add_theme_constant_override("h_separation", 12)
-	right.add_theme_constant_override("v_separation", 6)
-	right.custom_minimum_size.x = 320
-	outer_h.add_child(right)
+	right.add_child(HSeparator.new())
 
-	_add_spec_row(right, "Mass", "%.0f kg" % data["mass"])
-	_add_spec_row(right, "Wingspan", "%.1f m" % data["span"])
-	_add_spec_row(right, "Wing area", "%.1f m²" % data["area"])
-	_add_spec_row(right, "MAC chord", "%.2f m" % data["chord"])
-	_add_spec_row(right, "Propulsion", data["propulsion"])
-	_add_spec_row(right, "Max thrust", "%.0f N" % data["thrust"])
+	# Specs table
+	var specs := GridContainer.new()
+	specs.columns = 2
+	specs.add_theme_constant_override("h_separation", 12)
+	specs.add_theme_constant_override("v_separation", 6)
+	specs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.add_child(specs)
+
+	_add_spec_row(specs, "Mass", "%.0f kg" % data["mass"])
+	_add_spec_row(specs, "Wingspan", "%.1f m" % data["span"])
+	_add_spec_row(specs, "Wing area", "%.1f m²" % data["area"])
+	_add_spec_row(specs, "MAC chord", "%.2f m" % data["chord"])
+	_add_spec_row(specs, "Propulsion", data["propulsion"])
+	_add_spec_row(specs, "Max thrust", "%.0f N" % data["thrust"])
 	if data["power"] > 0:
-		_add_spec_row(right, "Max power", "%.0f kW" % (data["power"] / 1000.0))
+		_add_spec_row(specs, "Max power", "%.0f kW" % (data["power"] / 1000.0))
 	if data.has("mach_crit"):
-		_add_spec_row(right, "Mach crit", "%.2f" % data["mach_crit"])
+		_add_spec_row(specs, "Mach crit", "%.2f" % data["mach_crit"])
 
-	right.add_child(_make_spacer_label())  # row gap
+	specs.add_child(_make_spacer_label())  # row gap
 
-	_add_spec_row(right, "CL₀", "%.2f" % data["cl0"])
-	_add_spec_row(right, "CLα", "%.1f /rad" % data["cla"])
-	_add_spec_row(right, "CD₀", "%.4f" % data["cd0"])
-	_add_spec_row(right, "K (induced)", "%.4f" % data["k"])
+	_add_spec_row(specs, "CL₀", "%.2f" % data["cl0"])
+	_add_spec_row(specs, "CLα", "%.1f /rad" % data["cla"])
+	_add_spec_row(specs, "CD₀", "%.4f" % data["cd0"])
+	_add_spec_row(specs, "K (induced)", "%.4f" % data["k"])
 
 	return panel
+
+## Build a framed live 3D viewport previewing the given aircraft. The model
+## spins slowly (see `_process`) and renders into a SubViewport layered over a
+## radial-gradient backdrop. Registering the viewport lets `_switch_page`
+## pause rendering whenever the Aircraft page is hidden.
+func _build_3d_viewport(ac_name: String) -> Control:
+	var frame := PanelContainer.new()
+	frame.custom_minimum_size = Vector2(430, 350)
+
+	var fstyle := StyleBoxFlat.new()
+	fstyle.bg_color = Color(0.045, 0.06, 0.10)
+	fstyle.border_width_left = 2
+	fstyle.border_width_right = 2
+	fstyle.border_width_top = 2
+	fstyle.border_width_bottom = 2
+	fstyle.border_color = BORDER_LIGHT
+	fstyle.corner_radius_top_left = 10
+	fstyle.corner_radius_top_right = 10
+	fstyle.corner_radius_bottom_left = 10
+	fstyle.corner_radius_bottom_right = 10
+	fstyle.content_margin_left = 6
+	fstyle.content_margin_right = 6
+	fstyle.content_margin_top = 6
+	fstyle.content_margin_bottom = 6
+	frame.add_theme_stylebox_override("panel", fstyle)
+
+	# Radial-gradient backdrop drawn behind the transparent viewport.
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 1.0])
+	grad.colors = PackedColorArray([Color(0.09, 0.13, 0.21), Color(0.025, 0.035, 0.06)])
+	var tex := GradientTexture2D.new()
+	tex.gradient = grad
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.35)
+	tex.fill_to = Vector2(0.82, 1.0)
+
+	var bg_tex := TextureRect.new()
+	bg_tex.texture = tex
+	bg_tex.stretch_mode = TextureRect.STRETCH_SCALE
+	bg_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	bg_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(bg_tex)
+
+	# 3D layer
+	var container := SubViewportContainer.new()
+	container.stretch = true
+	container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(container)
+
+	var vp := SubViewport.new()
+	vp.size = Vector2i(418, 338)
+	vp.transparent_bg = true
+	vp.own_world_3d = true
+	vp.world_3d = World3D.new()
+	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	container.add_child(vp)
+
+	# Camera — fixed 3/4 perspective framing the origin.
+	var cam := Camera3D.new()
+	cam.fov = 45.0
+	var d := float(MODEL_ALIGN[ac_name]["cam_dist"])
+	cam.position = Vector3(0.25 * d, 0.35 * d, 0.9 * d)
+	cam.look_at(Vector3.ZERO, Vector3.UP)
+	vp.add_child(cam)
+
+	# Key light (warm, with shadows).
+	var key := DirectionalLight3D.new()
+	key.rotation_degrees = Vector3(-45, -35, 0)
+	key.light_energy = 1.3
+	key.shadow_enabled = true
+	vp.add_child(key)
+
+	# Fill light (cool, softens the shadow side).
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(35, 25, 0)
+	fill.light_energy = 0.4
+	fill.light_color = Color(0.55, 0.65, 0.85)
+	vp.add_child(fill)
+
+	# Rim / back light (cool blue) to pop the silhouette.
+	var rim := DirectionalLight3D.new()
+	rim.rotation_degrees = Vector3(-25, 150, 0)
+	rim.light_energy = 0.55
+	rim.light_color = Color(0.45, 0.6, 1.0)
+	vp.add_child(rim)
+
+	# Turntable root that holds the model.
+	var spin := Node3D.new()
+	vp.add_child(spin)
+	_load_3d_model(ac_name, spin)
+
+	_ac_containers[ac_name] = container
+	_ac_viewports[ac_name] = vp
+	_ac_models[ac_name] = spin.get_child(0) if spin.get_child_count() > 0 else null
+	_ac_spin_root[ac_name] = spin
+	return frame
+
+## Load `ac_name`'s model under `root`. GLB models are aligned with the same
+## rotation/scale convention as `aircraft_view.gd`; the jet is built from
+## primitives via `EngineFactory`.
+func _load_3d_model(ac_name: String, root: Node3D) -> void:
+	var align: Dictionary = MODEL_ALIGN[ac_name]
+	if align.get("procedural", false):
+		_EngineFactoryScript.build(root)
+		return
+	var packed: PackedScene = load(align["scene"])
+	if packed == null:
+		push_error("MainMenu: failed to load '%s'" % align["scene"])
+		return
+	var inst := packed.instantiate()
+	inst.rotation_degrees = align["rot"]
+	var s := float(align["scale"])
+	inst.scale = Vector3(s, s, s)
+	root.add_child(inst)
 
 func _add_spec_row(parent: Container, label_text: String, value_text: String) -> void:
 	var lbl := Label.new()
