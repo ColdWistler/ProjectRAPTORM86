@@ -61,6 +61,7 @@ const AVIONICS := {
 var _pages: Dictionary = {}
 var _current_page := "Home"
 var _tab_buttons: Dictionary = {}
+var _tab_styles: Dictionary = {}
 
 # ── Build ────────────────────────────────────────────────────────────
 func _ready() -> void:
@@ -165,9 +166,16 @@ func _build_nav_bar() -> PanelContainer:
 		btn_hover.bg_color = Color(0.12, 0.15, 0.22)
 		btn.add_theme_stylebox_override("hover", btn_hover)
 
-		var btn_pressed := btn_style.duplicate()
-		btn_pressed.bg_color = ACCENT_DIM
-		btn.add_theme_stylebox_override("pressed", btn_pressed)
+		var btn_active := btn_style.duplicate()
+		btn_active.bg_color = Color(0.16, 0.22, 0.32)
+		btn_active.border_width_bottom = 2
+		btn_active.border_color = ACCENT
+
+		_tab_styles[tab_name] = {
+			"normal": btn_style,
+			"hover": btn_hover,
+			"active": btn_active,
+		}
 
 		btn.pressed.connect(_bind_tab(tab_name))
 		_tab_buttons[tab_name] = btn
@@ -193,11 +201,13 @@ func _switch_page(name: String) -> void:
 		_pages[key].visible = (key == name)
 	# Update tab button styles
 	for key in _tab_buttons:
-		_tab_buttons[key].button_pressed = (key == name)
+		var styles: Dictionary = _tab_styles[key]
 		if key == name:
+			_tab_buttons[key].add_theme_stylebox_override("normal", styles["active"])
 			_tab_buttons[key].add_theme_color_override("font_color", ACCENT)
 			_tab_buttons[key].add_theme_color_override("font_hover_color", ACCENT)
 		else:
+			_tab_buttons[key].add_theme_stylebox_override("normal", styles["normal"])
 			_tab_buttons[key].add_theme_color_override("font_color", TEXT_MID)
 			_tab_buttons[key].add_theme_color_override("font_hover_color", TEXT_LIGHT)
 
@@ -350,7 +360,10 @@ func _build_aircraft_page() -> Control:
 	vbox.add_child(sub)
 
 	vbox.add_child(HSeparator.new())
-	vbox.add_child(Spacer.new())  # small gap
+
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 4
+	vbox.add_child(gap)
 
 	for ac_name in ["MQI", "TwinEngine", "Engine"]:
 		vbox.add_child(_make_aircraft_card(ac_name, AIRCRAFT[ac_name]))
