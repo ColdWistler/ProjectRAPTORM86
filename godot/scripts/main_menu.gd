@@ -570,8 +570,7 @@ func _build_3d_viewport(ac_name: String) -> Control:
 	var cam := Camera3D.new()
 	cam.fov = 45.0
 	var d := float(MODEL_ALIGN[ac_name]["cam_dist"])
-	cam.position = Vector3(0.25 * d, 0.35 * d, 0.9 * d)
-	cam.look_at(Vector3.ZERO, Vector3.UP)
+	cam.look_at_from_position(Vector3(0.25 * d, 0.35 * d, 0.9 * d), Vector3.ZERO, Vector3.UP)
 	vp.add_child(cam)
 
 	# Key light (warm, with shadows).
