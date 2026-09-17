@@ -129,7 +129,8 @@ fn derivatives(
 
     // --- Translational dynamics (Newton's 2nd law, rotating frame) ------
     let omega = Vector3::new(s.p, s.q, s.r);
-    let accel = forces / config.mass - omega.cross(&body_vel);
+    let mass = config.mass.max(1e-6);
+    let accel = forces / mass - omega.cross(&body_vel);
 
     // --- Rotational kinematics: quaternion propagation ------------------
     // Positive q (pitch rate about body +Y) is a nose-up rotation for this
@@ -156,9 +157,9 @@ fn derivatives(
         terrain,
     );
     moments += shape_moment;
-    let ixx = config.ixx;
-    let iyy = config.iyy;
-    let izz = config.izz;
+    let ixx = config.ixx.max(1e-6);
+    let iyy = config.iyy.max(1e-6);
+    let izz = config.izz.max(1e-6);
     let p_dot = (moments.x + (iyy - izz) * s.q * s.r) / ixx;
     let q_dot = (moments.y + (izz - ixx) * s.p * s.r) / iyy;
     let r_dot = (moments.z + (ixx - iyy) * s.p * s.q) / izz;

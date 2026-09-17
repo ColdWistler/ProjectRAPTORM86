@@ -28,7 +28,7 @@
 //! // ...
 //!
 //! // Each physics frame:
-//! avionics.write_true_state(&aircraft_state, &wind_earth, q_dynamic);
+//! avionics.bus_mut().write_true_state(&aircraft_state, &wind_earth, q_dynamic);
 //! avionics.step();  // dt fixed at construction
 //! let (elev, ail, rud, thr) = avionics.bus().read_actuator_outputs();
 //! ```
@@ -180,13 +180,35 @@ impl AvionicsSystem {
             dev.reset();
         }
         self.bus.clear_sensor_outputs();
+        // Clear injected/failure flags so the next episode starts clean.
+        // (Battery SoC itself resets inside the battery device.)
+        self.bus.fc_fault_flags = FaultFlags::default();
+        self.bus.fc_servo_elevator = 0.0;
+        self.bus.fc_servo_aileron = 0.0;
+        self.bus.fc_servo_rudder = 0.0;
+        self.bus.fc_esc_throttle = 0.0;
+        self.bus.actual_elevator_deg = 0.0;
+        self.bus.actual_aileron_deg = 0.0;
+        self.bus.actual_rudder_deg = 0.0;
+        self.bus.actual_esc_output = 0.0;
+        self.bus.cmd_roll = 0.0;
+        self.bus.cmd_pitch = 0.0;
+        self.bus.cmd_yaw_rate = 0.0;
+        // Sync bus mode copy from the first controller if present.
+        if let Some(ctrl) = self.controllers.first() {
+            self.bus.fc_mode = ctrl.mode();
+        }
         self.bus.sim_time = 0.0;
         tracing_log("[Avionics] system reset");
     }
 
     /// Get the current flight controller mode.
     pub fn fc_mode(&self) -> FcMode {
-        self.bus.fc_mode
+        // Prefer the live controller state; fall back to the bus copy.
+        self.controllers
+            .first()
+            .map(|c| c.mode())
+            .unwrap_or(self.bus.fc_mode)
     }
 
     /// Number of registered sensors.

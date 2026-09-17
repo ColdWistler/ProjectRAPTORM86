@@ -65,7 +65,7 @@ pub struct ServoActuator {
 impl ServoActuator {
     pub fn new(config: ServoConfig, label: &str) -> Self {
         let range = config.max_deg - config.min_deg;
-        let quant_step = if config.resolution_bits > 0 {
+        let quant_step = if config.resolution_bits > 0 && config.resolution_bits < 64 {
             range / (1u64 << config.resolution_bits) as f64
         } else {
             0.0
@@ -97,16 +97,16 @@ impl AvionicsComponent for ServoActuator {
         let max_move = self.config.rate_limit_deg_s * dt;
         self.position += error.clamp(-max_move, max_move);
 
-        // Deadband: snap to zero if within deadband of center
+        // Deadband: hold near trim center to avoid chatter.
         let half_band = self.config.deadband_pct * (self.config.max_deg - self.config.min_deg);
-        if self.position.abs() < half_band {
-            self.position = 0.0;
+        if (self.position - self.config.trim_deg).abs() < half_band {
+            self.position = self.config.trim_deg;
         }
 
-        // Quantization
+        // Quantization (round to nearest LSB, not floor, to avoid -0.5 LSB bias)
         if self.quant_step > 0.0 {
             let offset = self.position - self.config.min_deg;
-            let q = (offset / self.quant_step).floor();
+            let q = (offset / self.quant_step).round();
             self.position = q * self.quant_step + self.config.min_deg;
         }
 
@@ -133,7 +133,7 @@ impl Actuator for ServoActuator {
     }
 
     fn actual_output(&self) -> f64 {
-        self.position + self.config.trim_deg
+        self.position
     }
 }
 

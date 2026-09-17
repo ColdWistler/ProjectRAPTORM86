@@ -613,11 +613,18 @@ func _load_3d_model(ac_name: String, root: Node3D) -> void:
 	if align.get("procedural", false):
 		_EngineFactoryScript.build(root)
 		return
-	var packed: PackedScene = load(align["scene"])
+	var scene_path: String = align["scene"]
+	if not ResourceLoader.exists(scene_path):
+		push_error("MainMenu: missing model '%s' (expected at '%s')" % [ac_name, scene_path])
+		return
+	var packed: PackedScene = load(scene_path)
 	if packed == null:
-		push_error("MainMenu: failed to load '%s'" % align["scene"])
+		push_error("MainMenu: failed to load '%s'" % scene_path)
 		return
 	var inst := packed.instantiate()
+	if inst == null:
+		push_error("MainMenu: failed to instantiate '%s'" % scene_path)
+		return
 	inst.rotation_degrees = align["rot"]
 	var s := float(align["scale"])
 	inst.scale = Vector3(s, s, s)

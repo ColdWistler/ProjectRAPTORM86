@@ -12,12 +12,13 @@
 //! # Standards & Traceability
 //! - Pipeline order follows JSBSim `FGSensor::ProcessSensorSignal()`:
 //!   lag → noise → drift → bias → gain → delay → quantize → clip.
-//! - Lag is a 2nd-order Butterworth-like low-pass (bilinear transform):
-//!   `y[n] = ca * (x[n] + x[n-1]) + cb * y[n-1]`.
+//! - Lag is a 1st-order low-pass with exact discretization:
+//!   `y += (1 - exp(-dt/τ)) * (x - y)`.
 //! - Noise supports Gaussian and uniform distributions, absolute or
 //!   percent (relative) variance.
 //! - Drift is a linear time-dependent bias walk: `drift += rate * dt`.
-//! - Quantization models ADC bit-depth with configurable range.
+//! - Quantization models ADC bit-depth with configurable range
+//!   (round to nearest LSB).
 
 use serde::Deserialize;
 
@@ -65,7 +66,8 @@ pub struct SensorConfig {
     /// Fixed bias (units). 0 = no bias.
     #[serde(default)]
     pub bias: f64,
-    /// Gain error (dimensionless). 1.0 = perfect. 0 = disabled.
+    /// Gain error (dimensionless). 1.0 = perfect. 0.0 = passthrough/disabled
+    /// (explicit zeroing requires clip or a small gain, not gain = 0).
     #[serde(default)]
     pub gain: f64,
     /// ADC quantization bits. 0 = no quantization.
@@ -130,7 +132,7 @@ pub struct SensorModel {
 impl SensorModel {
     /// Create a new sensor model from configuration.
     pub fn new(config: SensorConfig) -> Self {
-        let (quant_step, _quant_divisions) = if config.quantization_bits > 0 {
+        let (quant_step, _quant_divisions) = if config.quantization_bits > 0 && config.quantization_bits < 64 {
             let divisions = (1u64 << config.quantization_bits) as f64;
             let step = (config.quantize_max - config.quantize_min) / divisions;
             (step, divisions)
@@ -250,13 +252,13 @@ impl SensorModel {
         }
     }
 
-    /// Quantize output to ADC bit-depth.
+    /// Quantize output to ADC bit-depth (round to nearest LSB).
     fn quantize(&self, value: f64) -> f64 {
         let clamped = value
             .max(self.config.quantize_min)
             .min(self.config.quantize_max);
         let portion = clamped - self.config.quantize_min;
-        let q = (portion / self.quant_step).floor();
+        let q = (portion / self.quant_step).round();
         q * self.quant_step + self.config.quantize_min
     }
 }
@@ -373,7 +375,7 @@ mod tests {
         let out = s.process(100.0, 0.001);
         // Should be quantized to nearest step boundary
         let step: f64 = 1000.0 / 256.0;
-        let expected = (100.0 / step).floor() * step;
+        let expected = (100.0 / step).round() * step;
         assert!(
             (out - expected).abs() < 1e-6,
             "quantized: got {out}, expected {expected}"

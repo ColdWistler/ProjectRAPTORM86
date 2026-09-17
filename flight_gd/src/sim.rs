@@ -1,10 +1,11 @@
 //! Interactive 6-DOF flight simulation bridge.
 //!
 //! Kinematics/forces run inside Rust (`flight_core`); Godot only reads the
-//! resulting transform + telemetry and writes control inputs. All coordinates
-//! handed to Godot are in Godot's Y-up world frame: the NED Earth frame
-//! (North, East, Down) maps to world `(north, -down, east)`, and the aircraft
-//! model is built with its nose along local **+X** (up = +Y, right = +Z).
+//! resulting transform + telemetry and writes control inputs. `flight_core`
+//! body frame is nose +X / right +Y / down +Z (see `state.rs`); Godot world
+//! is Y-up with the visual model built nose +X / up +Y / right +Z. All
+//! coordinates handed to Godot convert via NED Earth (North, East, Down)
+//! to world `(north, -down, east)` plus the body-axis rotation below.
 //!
 //! # Conventions
 //! - Angles between GDScript and Rust are radians except where noted (°).
@@ -25,7 +26,7 @@ use godot::prelude::*;
 /// contain aircraft config TOML files. When launched via `godot --path godot`
 /// the CWD is `godot/`, so the workspace root is two levels up. When run from
 /// the editor the CWD is the project root, so `..` and `../..` cover that too.
-const CONFIG_PATHS: [&str; 6] = ["", "..", "../..", "../../..", "../../...", "../../../.."];
+const CONFIG_PATHS: [&str; 6] = ["", "..", "../..", "../../..", "../../../..", "../../../../.."];
 /// Max elevator/aileron/rudder deflection (radians).
 const MAX_ELEVATOR: f64 = 0.35;
 const MAX_AILERON: f64 = 0.35;
@@ -103,7 +104,7 @@ struct FlightSimNode {
     flaps_deg: f64,
     /// Engine thrust setting (0..=1).
     throttle: f64,
-    /// Asymmetric engine throttle split (-1 = left engine out, +1 = right out).
+    /// Asymmetric engine throttle split (-1 = right engine out, +1 = left out).
     throttle_split: f64,
     /// Wing-leveler / altitude-hold assist.
     auto_level: bool,
@@ -311,7 +312,7 @@ impl FlightSimNode {
         self.aileron = aileron.clamp(-MAX_AILERON, MAX_AILERON);
         self.rudder = rudder.clamp(-MAX_RUDDER, MAX_RUDDER);
         self.throttle = throttle.clamp(0.0, 1.0);
-        self.flaps_deg = flaps_deg;
+        self.flaps_deg = flaps_deg.clamp(0.0, 40.0);
         self.avionics_active = false;
     }
 
@@ -463,7 +464,8 @@ impl FlightSimNode {
     }
 
     /// Set the asymmetric engine throttle split (`-1..=1`). `0` runs both
-    /// engines together; `-1` shuts the left engine down, `+1` the right.
+    /// engines together; `-1` shuts the right engine down, `+1` the left
+    /// (matching `flight_core` `throttle_split` convention).
     #[func]
     fn set_throttle_split(&mut self, split: f64) {
         self.throttle_split = split.clamp(-1.0, 1.0);
@@ -622,7 +624,10 @@ impl FlightSimNode {
 
         let alt_m = state.altitude();
         let tas_ms = state.true_airspeed(&self.last_wind);
-        let gs_ms = state.airspeed();
+        // Horizontal ground speed (NED north/east), not total inertial speed.
+        let body_vel = NVec3::new(state.u, state.v, state.w);
+        let earth_vel = state.rotation_earth_to_body().inverse().transform_vector(&body_vel);
+        let gs_ms = (earth_vel.x * earth_vel.x + earth_vel.y * earth_vel.y).sqrt();
         let atm = Atmosphere::at_altitude(alt_m);
         let ias_kts = atm.calibrated_airspeed(tas_ms) * 1.94384;
         let mach = atm.mach_number(tas_ms);
