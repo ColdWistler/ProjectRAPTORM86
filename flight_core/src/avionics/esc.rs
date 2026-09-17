@@ -20,8 +20,8 @@ use super::traits::AvionicsComponent;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EscConfig {
-    /// Throttle deadband fraction (0.0–0.1 typical). Commands below
-    /// 0 work in reverse-thrust mode (for future VTOL configs).
+    /// Throttle deadband fraction (0.0–0.1 typical). Commands at or below
+    /// the deadband produce zero output.
     #[serde(default)]
     pub throttle_deadband: f64,
     /// Maximum thrust-to-power efficiency (N/W). Typical 8-10 N/kW.
@@ -112,19 +112,18 @@ impl AvionicsComponent for Esc {
         let target = bus.fc_esc_throttle.clamp(0.0, 1.0);
         self.current_throttle += alpha * (target - self.current_throttle);
 
-        // Deadband handling
+        // Deadband handling: commands at/below deadband produce zero output.
         let db = self.config.throttle_deadband;
-        if self.current_throttle.abs() < db && target <= db {
-            self.current_throttle = if target <= db { 0.0 } else { self.current_throttle };
+        if target <= db {
+            self.current_throttle = 0.0;
         }
 
         // Write actual ESC output (throttle fraction) to bus
         bus.actual_esc_output = self.current_throttle;
 
-        // Estimate current draw (simplified: proportional to throttle²)
+        // Estimate current draw (simplified: proportional to smoothed throttle²)
         // With a 4S battery at ~16.8V and ~10A max, current ≈ throttle² * max_current.
-        // Actual current depends on battery + prop load; battery.rs reads the bus.
-        bus.battery_current += bus.fc_esc_throttle.clamp(0.0, 1.0).powi(2) * 10.0 * 0.5;
+        bus.battery_current += self.current_throttle.clamp(0.0, 1.0).powi(2) * 10.0;
     }
 
     fn reset(&mut self) {

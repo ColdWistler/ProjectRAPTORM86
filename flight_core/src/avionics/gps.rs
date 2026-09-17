@@ -159,12 +159,13 @@ impl AvionicsComponent for GpsSensor {
             .process(bus.true_position_ned.z, dt);
 
         // Velocity: body-frame velocity rotated to NED + noise.
-        // DCM from true quaternion.
+        // quat_to_dcm returns the Earth->body DCM, so transpose it
+        // (body->Earth) for the body-to-NED velocity transform.
         let (d00, d01, d02, d10, d11, d12, d20, d21, d22) = quat_to_dcm(bus.true_quat);
         let v_ned = Vector3::new(
-            d00 * bus.true_velocity_body.x + d01 * bus.true_velocity_body.y + d02 * bus.true_velocity_body.z,
-            d10 * bus.true_velocity_body.x + d11 * bus.true_velocity_body.y + d12 * bus.true_velocity_body.z,
-            d20 * bus.true_velocity_body.x + d21 * bus.true_velocity_body.y + d22 * bus.true_velocity_body.z,
+            d00 * bus.true_velocity_body.x + d10 * bus.true_velocity_body.y + d20 * bus.true_velocity_body.z,
+            d01 * bus.true_velocity_body.x + d11 * bus.true_velocity_body.y + d21 * bus.true_velocity_body.z,
+            d02 * bus.true_velocity_body.x + d12 * bus.true_velocity_body.y + d22 * bus.true_velocity_body.z,
         );
 
         bus.gps_velocity_ned.x = self.vel_noise_x.process(v_ned.x, dt);
@@ -186,7 +187,7 @@ impl AvionicsComponent for GpsSensor {
         self.vel_noise_x.reset();
         self.vel_noise_y.reset();
         self.vel_noise_z.reset();
-        self.last_sample_time = 0.0;
+        self.last_sample_time = -1.0 / self.config.update_hz;
     }
 }
 
@@ -196,8 +197,9 @@ impl Sensor for GpsSensor {
     }
 }
 
-/// Quaternion [w, x, y, z] → DCM (body-to-earth transpose).
+/// Quaternion [w, x, y, z] → Earth-to-body DCM.
 /// Returns (d00, d01, d02, d10, d11, d12, d20, d21, d22).
+/// Transpose before using body->Earth (e.g. body velocity to NED).
 fn quat_to_dcm(q: [f64; 4]) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
     let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
     let d00 = 1.0 - 2.0 * (y * y + z * z);

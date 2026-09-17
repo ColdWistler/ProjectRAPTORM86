@@ -15,8 +15,8 @@ const GREEN := Color(0.10, 0.90, 0.20)
 
 ## Build the drone under `parent`. Returns a Dictionary:
 ##   "propeller": Node3D to spin about its local X
-##   "flaps":     [Node3D, Node3D] pivots to deflect about local X
-##   "ailerons":  [Node3D, Node3D] pivots to deflect about local X
+##   "flaps":     [Node3D, Node3D] pivots to deflect about local Z
+##   "ailerons":  [Node3D, Node3D] pivots to deflect about local Z
 static func build(parent: Node3D) -> Dictionary:
 	var result := {
 		"propeller": null,
@@ -46,16 +46,17 @@ static func build(parent: Node3D) -> Dictionary:
 	_add(parent, _sphere(0.04), GREEN, Vector3(0.25, 0.18, -5.32))
 
 	# --- Trailing-edge movable surfaces ---
-	# Left/right inboard flaps and outboard ailerons on pivots. The child mesh
-	# sits slightly aft of the pivot so rotating the pivot bends the surface.
+	# Left/right inboard flaps and outboard ailerons on pivots. Wing spans Z,
+	# so left/right mirror in Z. The child mesh sits slightly aft of the pivot
+	# so rotating the pivot about Z bends the surface down/up.
 	var flap_mesh := _box(Vector3(0.32, 0.06, 2.0))
-	var flap_left := _pivot(parent, Vector3(1.8, 0.14, 0), flap_mesh)
-	var flap_right := _pivot(parent, Vector3(-1.8, 0.14, 0), flap_mesh.duplicate())
+	var flap_left := _pivot(parent, Vector3(-0.10, 0.14, 1.8), flap_mesh)
+	var flap_right := _pivot(parent, Vector3(-0.10, 0.14, -1.8), flap_mesh.duplicate())
 	result["flaps"] = [flap_left, flap_right]
 
 	var aileron_mesh := _box(Vector3(0.32, 0.06, 2.4))
-	var ail_left := _pivot(parent, Vector3(4.0, 0.14, 0), aileron_mesh)
-	var ail_right := _pivot(parent, Vector3(-4.0, 0.14, 0), aileron_mesh.duplicate())
+	var ail_left := _pivot(parent, Vector3(-0.10, 0.14, 4.0), aileron_mesh)
+	var ail_right := _pivot(parent, Vector3(-0.10, 0.14, -4.0), aileron_mesh.duplicate())
 	result["ailerons"] = [ail_left, ail_right]
 
 	# --- V-tail empennage (canted ~38°) ---
@@ -93,7 +94,7 @@ static func _add(
 	return mi
 
 ## Surface pivot with a small mesh child positioned aft (-X) so deflecting the
-## pivot about X moves the trailing edge down/up like a real control surface.
+## pivot about Z moves the trailing edge down/up like a real control surface.
 static func _pivot(parent: Node3D, pos: Vector3, mesh: Mesh) -> Node3D:
 	var pivot := Node3D.new()
 	pivot.position = pos

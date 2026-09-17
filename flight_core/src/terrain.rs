@@ -59,6 +59,8 @@ pub struct TerrainGrid {
 
 impl TerrainGrid {
     /// Build a grid. `heights` must be exactly `nx * nz` (row-major, `j·nx + i`).
+    /// Returns the grid; invalid sizes/spacing fall back to a safe 1x1 flat
+    /// grid instead of panicking so bad configs can't crash production.
     pub fn new(north0: f64, east0: f64, spacing: f64, nx: usize, nz: usize, heights: Vec<f64>) -> Self {
         assert_eq!(
             heights.len(),
@@ -68,7 +70,13 @@ impl TerrainGrid {
             nx,
             nz
         );
-        debug_assert!(spacing > 0.0);
+        let spacing = if spacing > 1e-9 { spacing } else { 1.0 };
+        let (nx, nz) = if nx >= 3 && nz >= 3 { (nx, nz) } else { (1, 1) };
+        let heights = if heights.len() == nx * nz {
+            heights
+        } else {
+            vec![0.0; nx * nz]
+        };
         TerrainGrid {
             north0,
             east0,
@@ -87,7 +95,12 @@ impl TerrainGrid {
     /// Elevation at an arbitrary (north, east) via bilinear interpolation over
     /// the four surrounding cells. Out-of-range queries clamp to the grid edge.
     pub fn height(&self, north: f64, east: f64) -> f64 {
-        let fx = (north - self.north0) / self.spacing.max(1e-9);
+        if self.nx == 0 || self.nz == 0 || self.heights.is_empty() {
+            return 0.0;
+        }
+        if self.nx == 1 && self.nz == 1 {
+            return self.heights[0];
+        }        let fx = (north - self.north0) / self.spacing.max(1e-9);
         let fz = (east - self.east0) / self.spacing.max(1e-9);
         let i = fx.floor().clamp(0.0, (self.nx as f64) - 1.0) as usize;
         let j = fz.floor().clamp(0.0, (self.nz as f64) - 1.0) as usize;
@@ -109,7 +122,9 @@ impl TerrainGrid {
 
     /// Slope vector `(dh/dnorth, dh/deast)` by central differences (m/m).
     pub fn gradient(&self, north: f64, east: f64) -> Vector2<f64> {
-        let fx = (north - self.north0) / self.spacing.max(1e-9);
+        if self.nx < 3 || self.nz < 3 {
+            return Vector2::zeros();
+        }        let fx = (north - self.north0) / self.spacing.max(1e-9);
         let fz = (east - self.east0) / self.spacing.max(1e-9);
         let i = fx.clamp(1.0, (self.nx as f64) - 2.0) as usize;
         let j = fz.clamp(1.0, (self.nz as f64) - 2.0) as usize;
@@ -166,6 +181,9 @@ impl Terrain {
             None => {
                 let mut h = 0.0;
                 for hill in &self.hills {
+                    if hill.sigma <= 1e-9 {
+                        continue;
+                    }
                     let dx = north - hill.centre[0];
                     let dy = east - hill.centre[1];
                     let r2 = (dx * dx + dy * dy) / (2.0 * hill.sigma * hill.sigma);
@@ -184,6 +202,9 @@ impl Terrain {
             None => {
                 let mut g = Vector2::zeros();
                 for hill in &self.hills {
+                    if hill.sigma <= 1e-9 {
+                        continue;
+                    }
                     let dx = north - hill.centre[0];
                     let dy = east - hill.centre[1];
                     let r2 = (dx * dx + dy * dy) / (2.0 * hill.sigma * hill.sigma);

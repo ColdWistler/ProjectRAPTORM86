@@ -12,8 +12,8 @@
 //! already handle). In still air the wind is zero and these panels add
 //! nothing, so the level-flight trim behaviour is preserved unchanged.
 //!
-//! Convention matches the rest of the engine: body frame with nose +X, up +Y,
-//! right +Z; the wind is supplied in the Earth NED frame as everywhere else.
+//! Convention matches the rest of the engine: body frame with nose +X,
+//! right +Y, down +Z; the wind is supplied in the Earth NED frame as everywhere else.
 //!
 //! # Standards References
 //! - Flat-plate pressure model: Hoerner, *Fluid-Dynamic Drag*, 2nd ed., §3-11
@@ -88,7 +88,11 @@ pub fn compute_shape_wind(
     let wind_body = state.rotation_earth_to_body().transform_vector(wind_earth);
 
     for panel in panels {
-        let n = Vector3::new(panel.normal[0], panel.normal[1], panel.normal[2]).normalize();
+        let n_raw = Vector3::new(panel.normal[0], panel.normal[1], panel.normal[2]);
+        if n_raw.norm() < 1e-12 {
+            continue;
+        }
+        let n = n_raw.normalize();
         let cp = Vector3::new(panel.cp[0], panel.cp[1], panel.cp[2]);
 
         // Wind-speed component normal to the panel surface.
@@ -197,7 +201,8 @@ pub fn compute_imported_shape_wind(
     }
 
     // Cross-section diameter from the frontal area -> slenderness L/D.
-    let cross_diam = (4.0 * frontal_area / std::f64::consts::PI).max(CROSS_DIAM_MIN).sqrt();
+    // Floor is on diameter (CROSS_DIAM_MIN), not on area.
+    let cross_diam = (4.0 * frontal_area / std::f64::consts::PI).sqrt().max(CROSS_DIAM_MIN);
     let slenderness = reference_len / cross_diam; // L / D
 
     // --- Reynolds number & skin friction ------------------------------------

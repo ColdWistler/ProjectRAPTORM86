@@ -117,13 +117,19 @@ impl Atmosphere {
             let p = p51 * (t / t_base).powf(G0 / (0.0028 * R_SPECIFIC));
             (t, p)
         } else {
-            // Mesosphere 2: 71,000 - 86,000 m, lapse -0.0020 K/m
+            // Mesosphere 2: 71,000 - 86,000 m, lapse -0.0020 K/m.
+            // Clamp geopotential to the 86 km model top so temperature
+            // can't go negative/NaN at extreme altitudes.
+            let h_top = h.min(86_000.0);
             let t_base = 214.65;
             let p71 = 3.96; // ~3.96 Pa at 71 km
-            let t = t_base - 0.0020 * (h - 71_000.0);
+            let t = (t_base - 0.0020 * (h_top - 71_000.0)).max(10.0);
             let p = p71 * (t / t_base).powf(G0 / (0.0020 * R_SPECIFIC));
             (t, p.max(1e-6))
         };
+
+        let t = t.max(10.0);
+        let p = p.max(1e-6);
 
         let density = p / (R_SPECIFIC * t);
         let speed_of_sound = (GAMMA_AIR * R_SPECIFIC * t).sqrt();

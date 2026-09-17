@@ -113,7 +113,7 @@ impl AvionicsComponent for BaroSensor {
 
     fn reset(&mut self) {
         self.pipeline.reset();
-        self.last_sample_time = 0.0;
+        self.last_sample_time = -1.0 / self.config.update_hz;
     }
 }
 

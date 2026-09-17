@@ -538,11 +538,11 @@ cd0: 0.025,
 
     #[test]
     fn twin_engine_out_yaws_toward_dead_engine() {
-        // Shutting down the right engine (split = +1) must produce a yawing
-        // moment that pushes the nose toward the right (dead side), i.e. a
-        // negative body-Z moment given the body frame (nose +X, right +Y).
+        // Shutting down the left engine (split = +1: left at zero, right live)
+        // must produce a yawing moment toward the dead (left) side, i.e. a
+        // negative body-Z moment (nose +X, right +Y, down +Z: -Mz = yaw left).
         let mut config = twin_default();
-        config.throttle_split = 1.0; // right engine out
+        config.throttle_split = 1.0; // left engine out
 
         let mut state = AircraftState::default();
         let (elev_trim, _throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
@@ -550,22 +550,22 @@ cd0: 0.025,
         let (_, moments) = compute_forces_moments(
             &state, &config, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: 0.8, flap: 0.0 }, 0.0, &Vector3::zeros(),
         );
-        // The asymmetric thrust yaws the nose toward the dead (right) engine.
+        // The asymmetric thrust yaws the nose toward the dead (left) engine.
         assert!(
             moments.z < 0.0,
-            "right-engine-out should yaw the nose right (negative Mz), got {:.0}",
+            "left-engine-out should yaw the nose left (negative Mz), got {:.0}",
             moments.z
         );
 
         // Reversing the failed engine should reverse the yaw direction.
         let mut config_l = config.clone();
-        config_l.throttle_split = -1.0; // left engine out
+        config_l.throttle_split = -1.0; // right engine out
         let (_, m_l) = compute_forces_moments(
             &state, &config_l, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: 0.8, flap: 0.0 }, 0.0, &Vector3::zeros(),
         );
         assert!(
             m_l.z > 0.0,
-            "left-engine-out should yaw the nose left (positive Mz), got {:.0}",
+            "right-engine-out should yaw the nose right (positive Mz), got {:.0}",
             m_l.z
         );
     }

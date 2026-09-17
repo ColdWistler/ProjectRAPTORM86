@@ -188,21 +188,23 @@ impl AvionicsComponent for ImuSensor {
         bus.gyro.z = self.gyro_z.process(bus.true_angular_rates.z + vibration.z, dt);
 
         // --- Accelerometer ---
-        // Real accelerometer sees kinematic acceleration + gravity in body frame.
-        // gravity_earth = [0, 0, 9.80665] in NED (down is positive).
-        // The body-frame specific force = DCM * (accel_earth - gravity_earth).
-        // For simplicity, we use the true body velocity rates + gravity projection.
-        // A real MEMS accelerometer measures specific force (non-gravitational accel).
-        let gravity_body = Vector3::new(0.0, 0.0, 9.80665);
-        // Add centripetal correction: a_body = v_dot + omega × v (from physics)
-        // For the sensor model, we approximate with the true velocity derivatives
-        // plus gravity projection. The exact computation would require the full
-        // state derivative, so we use a simplified model here.
-        let accel_true = Vector3::new(
-            bus.true_velocity_body.x * 0.0, // placeholder for u_dot
-            bus.true_velocity_body.y * 0.0, // placeholder for v_dot
-            bus.true_velocity_body.z * 0.0, // placeholder for w_dot
-        ) + gravity_body;
+        // Real accelerometer sees specific force: kinematic accel minus
+        // gravity, expressed in the body frame. At rest this reads ~-g
+        // along body +Z (up is -Z in the nose+X/right+Y/down+Z convention),
+        // matching the bus default of [0,0,-9.80665].
+        // Gravity Earth NED [0,0,g] rotated into body via true attitude.
+        let q = nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+            bus.true_quat[0],
+            bus.true_quat[1],
+            bus.true_quat[2],
+            bus.true_quat[3],
+        ));
+        let gravity_body =
+            q.transform_vector(&Vector3::new(0.0, 0.0, 9.80665));
+        // Kinematic body accel (v_dot + omega x v) is unavailable without the
+        // full state derivative, so model specific force as -gravity plus the
+        // throttle-scaled vibration already applied to the gyro path.
+        let accel_true = -gravity_body;
 
         bus.accel.x = self.accel_x.process(accel_true.x, dt);
         bus.accel.y = self.accel_y.process(accel_true.y, dt);
@@ -221,7 +223,7 @@ impl AvionicsComponent for ImuSensor {
         self.accel_x.reset();
         self.accel_y.reset();
         self.accel_z.reset();
-        self.last_sample_time = 0.0;
+        self.last_sample_time = -1.0 / self.config.update_hz;
         self.vibration_phase = 0.0;
     }
 }

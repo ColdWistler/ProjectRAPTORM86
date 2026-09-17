@@ -124,7 +124,8 @@ struct WindTunnelNode {
     /// tunnel so asymmetric-thrust / engine-out moments can be visualized.
     throttle: f64,
     /// Runtime engine split (-1..=1) applied to the twin: 0 = both engines,
-    /// -1 = left out, +1 = right out. Mirrors `FlightSimNode.set_throttle_split`.
+    /// -1 = right out, +1 = left out. Mirrors `FlightSimNode::set_throttle_split`
+    /// and `flight_core` `throttle_split`.
     throttle_split: f64,
     /// Flat-plate panels of an *arbitrary* imported 3D model (voxelized hull).
     /// When non-empty, these replace the per-aircraft `collision_panels` and
@@ -306,7 +307,7 @@ impl WindTunnelNode {
 
     #[func]
     fn set_flaps_deg(&mut self, degrees: f32) {
-        self.flaps_deg = degrees;
+        self.flaps_deg = degrees.clamp(0.0, 40.0);
     }
 
     /// Set the master throttle (0..=1). Unlike the free-flying sim the tunnel
@@ -318,7 +319,8 @@ impl WindTunnelNode {
     }
 
     /// Set the engine split for the twin/turboprop layout:
-    /// 0 = both engines, -1 = left engine out, +1 = right engine out.
+    /// 0 = both engines, -1 = right engine out, +1 = left engine out
+    /// (matching `flight_core` `throttle_split`).
     #[func]
     fn set_throttle_split(&mut self, split: f64) {
         self.throttle_split = split.clamp(-1.0, 1.0);
@@ -342,6 +344,9 @@ impl WindTunnelNode {
             self.imported_panels = Vec::new();
             return 0;
         }
+        // Validate indices before casting: negative or out-of-range would
+        // panic across the FFI boundary and crash the game.
+        let nv = vertices.len() as i64;
         let mut verts: Vec<[f64; 3]> = Vec::with_capacity(vertices.len());
         for i in 0..vertices.len() {
             let v = vertices[i];
@@ -350,13 +355,17 @@ impl WindTunnelNode {
         let mut tris: Vec<[usize; 3]> = Vec::with_capacity(indices.len() / 3);
         let chunks = indices.len() / 3;
         for c in 0..chunks {
-            tris.push([
-                indices[c * 3] as usize,
-                indices[c * 3 + 1] as usize,
-                indices[c * 3 + 2] as usize,
-            ]);
+            let a = indices[c * 3] as i64;
+            let b = indices[c * 3 + 1] as i64;
+            let d = indices[c * 3 + 2] as i64;
+            if a < 0 || b < 0 || d < 0 || a >= nv || b >= nv || d >= nv {
+                godot_error!("set_imported_shape: triangle {c} has out-of-range index");
+                return 0;
+            }
+            tris.push([a as usize, b as usize, d as usize]);
         }
-        let panels = voxelize_panels(&verts, &tris, resolution as usize);
+        let res = resolution.clamp(1, 24) as usize;
+        let panels = voxelize_panels(&verts, &tris, res);
         let m = mesh_metrics(&verts, &tris);
         self.imported_frontal = m.frontal_area;
         self.imported_wetted = m.wetted_area;
@@ -438,10 +447,10 @@ impl WindTunnelNode {
     }
 
     /// Aero telemetry: `[lift N, drag N, side N, roll-moment N·m, pitch-moment
-    /// N·m, yaw-moment N·m, lift coefficient cl]`. Body frame, as computed by
-    /// `flight_core` for the current attitude / control deflections.
-    /// * lift is positive upward (+Y), drag is positive rearward (‑X),
-    ///   side is positive right (+Y in body cross‑wind).
+    /// N·m, yaw-moment N·m, lift coefficient cl]`. Body frame (`flight_core`:
+    /// nose +X / right +Y / down +Z), as computed by `flight_core`.
+    /// * lift is positive upward (−Z body), drag is positive rearward (−X),
+    ///   side is positive right (+Y body).
     #[func]
     fn get_aero(&self) -> PackedFloat64Array {
         if self.force.x == 0.0 && self.force.y == 0.0 && self.force.z == 0.0 {
