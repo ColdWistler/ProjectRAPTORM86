@@ -251,16 +251,12 @@ impl FlightController {
     }
 
     /// Current estimated attitude (roll/pitch) in radians.
-    /// Derived from gyro integration, or (future) the EKF estimate.
-    ///
-    /// The **roll** extraction matches the physics engine's
-    /// [`AircraftState::euler_angles`](crate::state::AircraftState::euler_angles)
-    /// convention (NED body axes in earth frame, positive roll = right wing
-    /// down) so the aileron loop sees the same sign the aero model applies to
-    /// the deflection. The **pitch** term keeps the controller's historical
-    /// sign convention (positive pitch rate = nose-up, matching the elevator
-    /// transport term in the integrator), which the trim/elevator chain is
-    /// calibrated against.
+    /// Roll matches the physics engine's
+    /// [`AircraftState::euler_angles`](crate::state::AircraftState::euler_angles).
+    /// Pitch keeps the controller's historical sign convention (positive =
+    /// nose-up in the elevator/gyro chain) which the trim/elevator gains are
+    /// calibrated against. TODO: unify pitch to `euler_angles` and re-tune
+    /// the outer/inner loop signs together.
     fn estimate_attitude(&self, bus: &AvionicsBus) -> (f64, f64) {
         // In the initial implementation we use the true quaternion from
         // the bus converted to Euler. A real FC would run an estimator.
@@ -293,14 +289,21 @@ impl AvionicsComponent for FlightController {
     }
 
     fn step(&mut self, bus: &mut AvionicsBus, dt: f64) {
+        // Keep the bus copy of the mode in sync (single source of truth
+        // is self.mode; AvionicsSystem::fc_mode reads the bus).
+        bus.fc_mode = self.mode;
         // Battery depleted: cut motor power immediately; surfaces keep control
         // authority so the FC can still manage the glide.
+        if bus.fc_fault_flags.battery_depleted {
+            self.throttle_filter = 0.0;
+            bus.fc_esc_throttle = 0.0;
+            // Still run attitude loops below with thr=0 for surface commands.
+        }
         let thr = if bus.fc_fault_flags.battery_depleted {
             0.0
         } else {
             bus.cmd_throttle.clamp(0.0, 1.0)
         };
-
         match self.mode {
             FcMode::Manual => {
                 // Passthrough: agent commands drive surfaces directly
@@ -379,8 +382,12 @@ impl Controller for FlightController {
     }
 
     fn set_mode(&mut self, mode: FcMode) {
-        // Mode transitions reset the PID state to avoid transients
+        // Mode transitions reset the PID state to avoid transients,
+        // but preserve the throttle filter so switching modes
+        // doesn't dip the motor output.
+        let thr = self.throttle_filter;
         self.init(0.0);
+        self.throttle_filter = thr;
         self.mode = mode;
     }
 }

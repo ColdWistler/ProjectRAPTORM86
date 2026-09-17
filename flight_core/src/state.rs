@@ -25,6 +25,18 @@ const QUAT_NORM_MIN: f64 = 1e-12;
 /// aero module's relative-wind side-slip computation.
 pub const SIDESLIP_AXIAL_MIN: f64 = 1e-6;
 
+/// Sideslip angle preserving full 360° direction: `atan2(v, u)` with a
+/// zero-velocity guard. Unlike `atan2(v, max(u, eps))`, this returns ~±180°
+/// for backward flight (u < 0) instead of snapping to ±90°.
+#[inline]
+pub fn sideslip_angle_rad(v: f64, u: f64) -> f64 {
+    if u.abs() < SIDESLIP_AXIAL_MIN && v.abs() < SIDESLIP_AXIAL_MIN {
+        0.0
+    } else {
+        v.atan2(u)
+    }
+}
+
 /// The full 6-DOF state of the aircraft.
 ///
 /// Position is expressed in the Earth-fixed **NED** frame
@@ -118,7 +130,12 @@ impl AircraftState {
         //    thrust-line pitching moment (engine offset from CG).
         let cm_thrust = (thrust_req * config.thrust_arm)
             / (q_dyn * config.wing_area * config.chord).max(1e-6);
-        let elev_trim = -(config.cm0 + config.cma * alpha_trim + cm_thrust) / config.cme;
+        let elev_trim = -(config.cm0 + config.cma * alpha_trim + cm_thrust)
+            / if config.cme.abs() < 1e-9 {
+                1e-6
+            } else {
+                config.cme
+            };
 
         // 5. Throttle setting needed to produce the required thrust. This
         //    must mirror the aero model's thrust-vs-speed characteristic:
@@ -174,7 +191,7 @@ impl AircraftState {
     /// Sideslip angle (beta) in radians, the angle between the relative wind
     /// and the body X axis in the body X–Y plane.
     pub fn sideslip_angle(&self) -> f64 {
-        (self.v).atan2(self.u.max(SIDESLIP_AXIAL_MIN))
+        crate::state::sideslip_angle_rad(self.v, self.u)
     }
 
     /// Total airspeed magnitude, sqrt(u² + v² + w²) in m/s.
@@ -211,7 +228,7 @@ impl AircraftState {
     /// Earth NED frame.
     pub fn air_sideslip_angle(&self, wind_earth: &Vector3<f64>) -> f64 {
         let v = self.air_velocity(wind_earth);
-        v.y.atan2(v.x.max(SIDESLIP_AXIAL_MIN))
+        crate::state::sideslip_angle_rad(v.y, v.x)
     }
 
     /// Normalize the orientation quaternion back to unit length. Called

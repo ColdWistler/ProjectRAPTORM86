@@ -11,8 +11,9 @@
 //!
 //! # Conventions
 //! Godot world is **Y-up**; NED Earth frame maps to world
-//! `(north, -down, east)`. Aircraft models use the `flight_core` body frame
-//! (nose +X, up +Y, right +Z).
+//! `(north, -down, east)`. `flight_core` body frame is nose +X / right +Y /
+//! down +Z; the Godot visual models use nose +X / up +Y / right +Z, converted
+//! by `origin_and_basis`.
 //!
 //! # Standards & Traceability
 //! Physics semantics (units, frames, derivative conventions) are inherited

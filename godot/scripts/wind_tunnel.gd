@@ -107,7 +107,7 @@ func _import_model(path: String) -> void:
 		return
 	var verts: PackedVector3Array = mesh_data["vertices"]
 	var idxs: PackedInt32Array = mesh_data["indices"]
-	_normalize_mesh(verts)
+	verts = _normalize_mesh(verts)
 	var npanels: int = _tunnel.set_imported_shape(verts, idxs, _import_resolution)
 	if npanels <= 0:
 		push_error("WindTunnel: mesh valid but voxelizer produced no panels")
@@ -127,7 +127,7 @@ func _import_model(path: String) -> void:
 		(cs.shape as BoxShape3D).size = Vector3(7, 4, 7)
 	engine_out = 0
 	if _aircraft_menu and not _aircraft_menu.is_queued_for_deletion():
-		_aircraft_menu.select(-1)
+		_aircraft_menu.selected = -1
 	_tunnel.reset_trails()
 	print("[WIND TUNNEL] imported '%s' -> %d panels @ res %d" % [path.get_file(), npanels, _import_resolution])
 
@@ -136,9 +136,15 @@ func _import_model(path: String) -> void:
 ## Returns an empty Dictionary if nothing usable is found.
 func _extract_mesh_from_scene(path: String) -> Dictionary:
 	var root: Node = null
-	if ResourceLoader.exists(path):
-		var packed := load(path)
-		root = packed.instantiate() if packed is PackedScene else null
+	# Only res:// / user:// paths are loadable via ResourceLoader. The dialog
+	# now uses ACCESS_RESOURCES so this holds; OS paths would fail here.
+	if path.begins_with("res://") or path.begins_with("user://"):
+		if ResourceLoader.exists(path):
+			var packed := load(path)
+			root = packed.instantiate() if packed is PackedScene else null
+	else:
+		push_error("WindTunnel: import path '%s' is outside res:// (use the resource dialog)" % path)
+		return {}
 	if root == null:
 		return {}
 	var verts := PackedVector3Array()
@@ -176,9 +182,10 @@ func _collect_mesh_nodes(node: Node, xform: Transform3D, verts: PackedVector3Arr
 
 ## Center the mesh's bounding box on the origin and scale it to fit the tunnel
 ## (~7 m across) so the voxelizer sees a consistent coordinate space.
-func _normalize_mesh(verts: PackedVector3Array) -> void:
+## Returns the normalized array (Packed arrays are copy-on-write).
+func _normalize_mesh(verts: PackedVector3Array) -> PackedVector3Array:
 	if verts.is_empty():
-		return
+		return verts
 	var minv := verts[0]
 	var maxv := verts[0]
 	for i in verts.size():
@@ -192,6 +199,7 @@ func _normalize_mesh(verts: PackedVector3Array) -> void:
 	var scale := 7.0 / size
 	for i in verts.size():
 		verts[i] = (verts[i] - center) * scale
+	return verts
 
 ## Build the ambient environment: a dim world-environment, a key sun, and a
 ## large dark floor plane (used only for the wind-tunnel backdrop).
@@ -293,11 +301,12 @@ func _build_hud() -> OptionButton:
 
 ## Build a native file dialog for importing a 3D model (`.obj`/`.glb`),
 ## wrapped in a high-layer `CanvasLayer` so it renders above the 3D viewport.
+## Uses ACCESS_RESOURCES so the returned path is loadable via ResourceLoader.
 func _build_file_dialog() -> FileDialog:
 	var fd := FileDialog.new()
 	fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	fd.title = "Import 3D model"
-	fd.access = FileDialog.ACCESS_FILESYSTEM
+	fd.access = FileDialog.ACCESS_RESOURCES
 	fd.filters = MODEL_FILTERS
 	fd.file_selected.connect(_on_import_file_selected)
 	# Wrap in a CanvasLayer so it shows above the 3D viewport.
@@ -399,10 +408,10 @@ func _physics_process(delta: float) -> void:
 			prop.rotate_x(wind_speed * 0.5 * delta)
 	for ail in _ailerons:
 		if ail is Node3D:
-			ail.rotation.x = -aileron * 0.6
+			ail.rotation.z = -aileron * 0.6
 	for flap in _flaps:
 		if flap is Node3D:
-			flap.rotation.x = flaps_deg * PI / 180.0
+			flap.rotation.z = flaps_deg * PI / 180.0
 	_rebuild_smoke(true)
 	_camera_orbit()
 	_update_hud()
@@ -481,13 +490,13 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_DOWN):
 		roll_deg -= rate
 	if Input.is_key_pressed(KEY_Q):
-		aileron = maxf(aileron - 45.0 * delta, -0.35)
+		aileron = maxf(aileron - 1.0 * delta, -0.35)
 	if Input.is_key_pressed(KEY_E):
-		aileron = minf(aileron + 45.0 * delta, 0.35)
+		aileron = minf(aileron + 1.0 * delta, 0.35)
 	if Input.is_key_pressed(KEY_Z):
-		rudder = maxf(rudder - 45.0 * delta, -0.35)
+		rudder = maxf(rudder - 1.0 * delta, -0.35)
 	if Input.is_key_pressed(KEY_C):
-		rudder = minf(rudder + 45.0 * delta, 0.35)
+		rudder = minf(rudder + 1.0 * delta, 0.35)
 	if Input.is_key_pressed(KEY_SHIFT):
 		wind_speed = minf(wind_speed + 25.0 * delta, 120.0)
 	if Input.is_key_pressed(KEY_CTRL):
@@ -521,7 +530,7 @@ func _process(delta: float) -> void:
 var _held := {}
 
 func _just_pressed(key: Key) -> bool:
-	return Input.is_key_pressed(key) and not _held.get(key, false)
+	return Input.is_physical_key_pressed(key) and not _held.get(key, false)
 
 ## The tunnel holds the aircraft fixed in the flow, so the engines run at a
 ## fixed full throttle to make the thrust-line and asymmetric-engine moments
@@ -530,10 +539,11 @@ func engine_throttle() -> float:
 	return 1.0
 
 ## Map the engine-out state to a throttle-split for the twin physics:
-## -1 = left engine out, 0 = both running, +1 = right engine out.
+## +1 = left engine out, 0 = both running, -1 = right engine out
+## (matching `flight_core` `throttle_split`).
 ## Has no effect on the single-engine aircraft (MQI).
 func engine_out_side() -> int:
-	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
+	return 1 if engine_out == 1 else (-1 if engine_out == 2 else 0)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:

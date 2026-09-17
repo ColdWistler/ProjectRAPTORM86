@@ -79,10 +79,13 @@ func _ready() -> void:
 	# In the editor we only want the static visuals; the physics (Rust) node
 	# and input/HUD handling are runtime-only.
 	if not is_editor:
-		if not _physics.start("TwinEngine.toml"):
-			if not _physics.start("aircraft.toml"):
-				push_error("FlightSimNode failed to load any aircraft config")
-			# Trim still works on the built-in defaults, so continue anyway.
+		var started := _physics.start("TwinEngine.toml")
+		if not started:
+			started = _physics.start("aircraft.toml")
+		if not started:
+			push_error("FlightSimNode failed to load any aircraft config; drone will stay frozen at origin")
+			set_physics_process(false)
+			return
 		var tr: Vector2 = _physics.trim(50.0, 60.0)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -409,13 +412,15 @@ func _center_control(value: float, rate: float, mult: float, delta: float) -> fl
 	return value - signf(value) * rate * mult * delta
 
 ## Map the engine-out state to a throttle-split for the twin physics:
-## -1 = left engine out, 0 = both running, +1 = right engine out.
+## +1 = left engine out, 0 = both running, -1 = right engine out
+## (matching `flight_core` `throttle_split`).
 func engine_out_side() -> int:
-	return -1 if engine_out == 1 else (1 if engine_out == 2 else 0)
+	return 1 if engine_out == 1 else (-1 if engine_out == 2 else 0)
 
-## True only on the rising edge of `key` (key held tracking via `_held`).
+## True only on the rising edge of `key` (physical keycode space, matching
+## `_input` which records `physical_keycode`).
 func _just_pressed(key: Key) -> bool:
-	return Input.is_key_pressed(key) and not _held.get(key, false)
+	return Input.is_physical_key_pressed(key) and not _held.get(key, false)
 
 var _held := {}
 
@@ -438,14 +443,14 @@ func _input(event: InputEvent) -> void:
 		cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.4, 1.4)
 
 ## Rotate the visual flap and aileron meshes to match the physics control
-## deflections.
+## deflections (hinge along span Z, deflection about local Z).
 func _update_control_surfaces() -> void:
 	for flap in _flaps:
 		if flap is Node3D:
-			flap.rotation.x = flaps_deg * PI / 180.0
+			flap.rotation.z = flaps_deg * PI / 180.0
 	for ail in _ailerons:
 		if ail is Node3D:
-			ail.rotation.x = -aileron * 0.6
+			ail.rotation.z = -aileron * 0.6
 
 ## Position the camera: either a fixed chase offset behind the drone, or a
 ## free orbit around `cam_center` driven by the yaw/pitch/dist parameters.

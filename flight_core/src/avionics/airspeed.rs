@@ -112,9 +112,10 @@ impl AvionicsComponent for AirspeedSensor {
             return;
         }
 
-        // Indicated airspeed ≈ TAS × (1 + position_error) + noise + bias
-        let ias = bus.true_airspeed * (1.0 + self.config.position_error);
-        bus.airspeed_indicated = self.pipeline.process(ias, dt);
+        // Indicated airspeed ≈ TAS × (1 + position_error), floored at zero
+        // so Gaussian noise at low speed can't drive negative IAS.
+        let ias = (bus.true_airspeed * (1.0 + self.config.position_error)).max(0.0);
+        bus.airspeed_indicated = self.pipeline.process(ias, dt).max(0.0);
 
         self.last_sample_time = bus.sim_time;
         bus.airspeed_sample_time = bus.sim_time;
@@ -122,7 +123,7 @@ impl AvionicsComponent for AirspeedSensor {
 
     fn reset(&mut self) {
         self.pipeline.reset();
-        self.last_sample_time = 0.0;
+        self.last_sample_time = -1.0 / self.config.update_hz;
     }
 }
 

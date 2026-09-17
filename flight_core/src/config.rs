@@ -196,8 +196,8 @@ pub struct AircraftConfig {
     #[serde(default = "default_gyro_coeff")]
     pub gyro_coeff: f64,
     /// Asymmetric engine throttle split, `-1..=1`, applied on top of the master
-    /// throttle. `0` = both engines at the master setting; `-1` = left engine
-    /// shut down / right at full; `+1` = right engine shut down / left at full.
+    /// throttle. `0` = both engines at the master setting; `+1` = left engine
+    /// shut down / right at full; `-1` = right engine shut down / left at full.
     /// Adjustable at runtime (e.g. to inject an engine-out for the Vmc check).
     #[serde(default = "default_throttle_split")]
     pub throttle_split: f64,
@@ -266,8 +266,8 @@ pub struct AircraftConfig {
 }
 
 /// One flat-plate surface of the aircraft's collision shape, defined in the
-/// **body** frame (nose +X, up +Y, right +Z) — the same convention as the
-/// aerodynamics and the visual model.
+/// **body** frame (nose +X, right +Y, down +Z) — the same convention as the
+/// dynamics (`state.rs`) and aerodynamics.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CollisionPanel {
@@ -295,7 +295,8 @@ impl AircraftConfig {
         if self.k_drag > 0.0 {
             self.k_drag
         } else {
-            1.0 / (std::f64::consts::PI * self.aspect_ratio() * self.oswald_e)
+            let e = self.oswald_e.max(1e-3);
+            1.0 / (std::f64::consts::PI * self.aspect_ratio() * e)
         }
     }
 

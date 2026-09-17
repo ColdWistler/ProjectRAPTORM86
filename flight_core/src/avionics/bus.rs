@@ -285,7 +285,7 @@ impl AvionicsBus {
         let air = state.air_velocity(wind_earth);
         self.true_airspeed = air.norm();
         self.true_alpha = air.z.atan2(air.x);
-        self.true_beta = air.y.atan2(air.x.max(crate::state::SIDESLIP_AXIAL_MIN));
+        self.true_beta = crate::state::sideslip_angle_rad(air.y, air.x);
         self.true_altitude = state.altitude();
         self.true_wind = *wind_earth;
         self.true_q_dynamic = q_dynamic;
