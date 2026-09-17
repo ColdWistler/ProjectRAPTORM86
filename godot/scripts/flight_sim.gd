@@ -79,7 +79,7 @@ func _ready() -> void:
 	# In the editor we only want the static visuals; the physics (Rust) node
 	# and input/HUD handling are runtime-only.
 	if not is_editor:
-		var started := _physics.start("TwinEngine.toml")
+		var started: bool = _physics.start("TwinEngine.toml")
 		if not started:
 			started = _physics.start("aircraft.toml")
 		if not started:
