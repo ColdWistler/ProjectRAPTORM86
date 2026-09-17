@@ -152,7 +152,7 @@ impl AvionicsComponent for MagnetometerSensor {
         self.mag_x.reset();
         self.mag_y.reset();
         self.mag_z.reset();
-        self.last_sample_time = 0.0;
+        self.last_sample_time = -1.0 / self.config.update_hz;
     }
 }
 

@@ -29,7 +29,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::atmosphere::Atmosphere;
 use crate::config::{AircraftConfig, Propulsion};
-use crate::state::{AircraftState, SIDESLIP_AXIAL_MIN};
+use crate::state::{sideslip_angle_rad, AircraftState};
 use crate::terrain::Terrain;
 
 /// Gravitational acceleration (m/s²). [NASA SP-747 / WGS84]
@@ -421,7 +421,7 @@ fn compute_forces_impl(
     let v_air = state.air_velocity(wind_earth);
     let v_tas = v_air.norm();
     let alpha = v_air.z.atan2(v_air.x);
-    let beta = v_air.y.atan2(v_air.x.max(SIDESLIP_AXIAL_MIN));
+    let beta = sideslip_angle_rad(v_air.y, v_air.x);
 
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -436,14 +436,18 @@ fn compute_forces_impl(
     // --- Flap (trailing-edge) increments: lift, induced-drag factor, drag ---
     let flap = controls.flap.clamp(0.0, FLAP_MAX_RAD); // ~40 deg max
     let dcl_flap = config.cl_flap * flap;
-    let dcd_flap = config.cd_flap * flap * flap.abs();
+    let dcd_flap = config.cd_flap * flap;
     // Flaps lower the positive stall angle.
     let alpha_stall_pos = config.alpha_stall_pos - config.flap_stall_shift * flap;
     let alpha_stall_neg = config.alpha_stall_neg;
 
     // --- Nonlinear Lift Coefficient CL(alpha) via Viterna blend ---
     let cl_linear = config.cl0 + cla_effective * alpha + dcl_flap;
-    let cl_clean = compute_viterna_lift(alpha, cl_linear, config, alpha_stall_pos, alpha_stall_neg);
+    // Stall-peak anchor: value of the linear branch at the stall angle so the
+    // blend starts continuous (includes PG slope + flap increment).
+    let cl_stall_peak_pos = config.cl0 + cla_effective * alpha_stall_pos + dcl_flap;
+    let cl_stall_peak_neg = config.cl0 + cla_effective * alpha_stall_neg + dcl_flap;
+    let cl_clean = compute_viterna_lift(alpha, cl_linear, config, alpha_stall_pos, alpha_stall_neg, cl_stall_peak_pos, cl_stall_peak_neg);
 
     // --- Ground effect (when flying close above the terrain) ---
     // Raises the lift-curve slope (more effective CL) and suppresses induced
@@ -574,7 +578,7 @@ fn compute_moments_impl(
     let v_air = state.air_velocity(wind_earth);
     let v_tas = v_air.norm();
     let alpha = v_air.z.atan2(v_air.x);
-    let beta = v_air.y.atan2(v_air.x.max(SIDESLIP_AXIAL_MIN));
+    let beta = sideslip_angle_rad(v_air.y, v_air.x);
 
     // --- Atmospheric conditions at current aircraft altitude ---
     let altitude = state.altitude();
@@ -583,7 +587,11 @@ fn compute_moments_impl(
     let mach = atm.mach_number(v_tas);
 
     // --- Compressibility correction (Prandtl-Glauert rule) ---
-    let _pg_factor = compressibility_factor(mach);
+    // Applied to lift slope and pitch derivatives so static margin
+    // keeps its Mach dependence.
+    let pg_factor = compressibility_factor(mach);
+    let cma_effective = config.cma / pg_factor;
+    let cmq_effective = config.cmq / pg_factor;
 
     // --- Engine thrust (used for the thrust-line pitching moment) ---
     let throttle = controls.throttle.clamp(0.0, 1.0);
@@ -634,8 +642,8 @@ fn compute_moments_impl(
     let spiral_sense = if body_down.z >= 0.0 { 1.0 } else { -1.0 };
 
     let cm_core = config.cm0
-        + config.cma * alpha
-        + config.cmq * q_hat
+        + cma_effective * alpha
+        + cmq_effective * q_hat
         + config.cm_adot * alpha_dot_hat
         + config.cme * controls.elevator
         + config.cm_flap * flap
@@ -760,12 +768,16 @@ fn compressibility_factor(mach: f64) -> f64 {
 }
 
 /// Viterna-Corrigan post-stall lift formulation with smooth hyperbolic blending.
+/// Blend starts at 0 at the stall angle (continuous with the linear branch)
+/// and asymptotes to 1 deep in separated flow.
 fn compute_viterna_lift(
     alpha: f64,
     cl_linear: f64,
     config: &AircraftConfig,
     alpha_pos: f64,
     alpha_neg: f64,
+    cl_peak_pos: f64,
+    cl_peak_neg: f64,
 ) -> f64 {
     if alpha >= alpha_neg && alpha <= alpha_pos {
         // Pre-stall linear/attached flow
@@ -773,22 +785,23 @@ fn compute_viterna_lift(
     } else if alpha > alpha_pos {
         // Positive post-stall: smooth sigmoid transition to flat-plate separated flow
         let d_alpha = alpha - alpha_pos;
-        let blend = (1.0 + (VITERNA_BLEND_POS * d_alpha).tanh()) * 0.5;
-        let cl_stall_peak = config.cl0 + config.cla * alpha_pos;
+        let blend = (VITERNA_BLEND_POS * d_alpha).tanh().clamp(0.0, 1.0);
+        let cl_stall_peak = cl_peak_pos;
         let cl_separated = (config.cd_max * SEPARATED_LIFT_KC) * (2.0 * alpha).sin()
             + SEPARATED_LIFT_RESIDUAL * (alpha.cos()).powi(2) / alpha.sin().max(SEPARATED_MIN_SIN);
         (1.0 - blend) * cl_stall_peak + blend * cl_separated
     } else {
         // Negative post-stall (inverted stall)
         let d_alpha = alpha_neg - alpha;
-        let blend = (1.0 + (VITERNA_BLEND_NEG * d_alpha).tanh()) * 0.5;
-        let cl_stall_neg_peak = config.cl0 + config.cla * alpha_neg;
+        let blend = (VITERNA_BLEND_NEG * d_alpha).tanh().clamp(0.0, 1.0);
+        let cl_stall_neg_peak = cl_peak_neg;
         let cl_separated = (config.cd_max * SEPARATED_LIFT_KC) * (2.0 * alpha).sin();
         (1.0 - blend) * cl_stall_neg_peak + blend * cl_separated
     }
 }
 
 /// Viterna-Corrigan post-stall drag formulation with smooth transition.
+/// Blend starts at 0 at the stall angle (continuous).
 fn compute_viterna_drag(
     alpha: f64,
     cd_attached: f64,
@@ -804,7 +817,7 @@ fn compute_viterna_drag(
         } else {
             alpha_neg - alpha
         };
-        let blend = (1.0 + (VITERNA_DRAG_BLEND * d_alpha).tanh()) * 0.5;
+        let blend = (VITERNA_DRAG_BLEND * d_alpha).tanh().clamp(0.0, 1.0);
         let cd_flat_plate = config.cd_max * (alpha.sin()).powi(2) + config.cd0 * alpha.cos().abs();
         (1.0 - blend) * cd_attached + blend * cd_flat_plate
     }

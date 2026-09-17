@@ -240,7 +240,7 @@ func _draw_status(w: float, h: float) -> void:
 	# Wind + AoA + TAS cluster (bottom-left).
 	var tas_text := "TAS %d" % roundi(_t[3])
 	var aoa_text := "AoA %.1f" % _t[9]
-	var wind_text := "WND %d°/%dkt" % [roundi(_t[22]), roundi(_t[21])]
+	var wind_text := "WND %d°/%dkt" % [roundi(_t[22]), roundi(_t[21] * 1.94384)]
 	var bx := 14.0
 	var by := h - 64.0
 	for lbl: String in [tas_text, aoa_text, wind_text]:
