@@ -21,13 +21,39 @@ var auto_level := false
 const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 const _HudScript := preload("res://scripts/hud.gd")
+const _TerrainGeneratorScript := preload("res://scripts/terrain/terrain_generator.gd")
+const _TerrainSettingsMeta := "raptor_terrain_settings"
+const _TerrainSettingKeys := [
+	"noise_seed",
+	"noise_scale",
+	"octaves",
+	"persistence",
+	"lacunarity",
+	"height_multiplier",
+	"height_exponent",
+	"view_chunks",
+	"resolution",
+	"chunk_size",
+	"collision_enabled",
+	"physics_grid_enabled",
+	"wind_speed",
+	"wind_direction",
+]
+
+## Fly over the generated FBM-Perlin world (Sebastian Lague style) instead of
+## the imported GLB landscape. Toggle in flight with [B], re-roll the world
+## with [N]. The generator feeds the Rust ground grid so collision, ground
+## effect and orographic wind follow the generated mountains.
+@export var procedural_terrain := true
 
 ## Trim (altitude m, airspeed m/s) each mode re-trims to on load/reset. ENGINE
 ## MODE is the fast long-range jet: it starts at high-altitude fast cruise so
 ## it behaves like a real turbine aircraft rather than a drone.
+## The drone modes cruise at 800 m — clear of the generated mountains (default
+## relief tops out near 500 m), so the aircraft always spawns above the terrain.
 const MODE_TRIM := {
-	"TwinEngine": Vector2(50.0, 60.0),
-	"MQI": Vector2(50.0, 60.0),
+	"TwinEngine": Vector2(800.0, 60.0),
+	"MQI": Vector2(800.0, 60.0),
 	"Engine": Vector2(8000.0, 200.0),
 }
 
@@ -38,6 +64,8 @@ var _aircraft_index := 0
 var _telemetry := PackedFloat64Array()
 var _hud_timer := 0.0
 var _aircraft_btn: Button = null
+var _terrain_generator = null
+var _terrain_settings := {}
 
 ## Control path: true = fly through the avionics stack (attitude commands to
 ## the PID flight controller); false = manual surface passthrough. [L] toggles.
@@ -86,13 +114,17 @@ func _ready() -> void:
 			push_error("FlightSimNode failed to load any aircraft config; drone will stay frozen at origin")
 			set_physics_process(false)
 			return
-		var tr: Vector2 = _physics.trim(50.0, 60.0)
+		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
+		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
 		throttle = clampf(tr.y, 0.0, 1.0)
-		# Sample the imported terrain mesh once the scene tree settles; the
-		# physics keeps its flat default until the grid arrives.
-		_sample_terrain_grid.call_deferred()
+		_apply_terrain_settings()
+		_apply_wind_settings()
+		if procedural_terrain:
+			_setup_procedural_terrain()
+		else:
+			_sample_terrain_grid.call_deferred()
 
 	# Use the imported GLB aircraft models rather than the procedural drone.
 	var view: Node3D = _AircraftViewScript.new()
@@ -120,7 +152,7 @@ func _load_aircraft(name: String) -> void:
 		_ailerons = view.ailerons
 		_flaps = view.flaps
 	if ok and not is_editor:
-		var trm: Vector2 = MODE_TRIM.get(name, Vector2(50.0, 60.0))
+		var trm: Vector2 = MODE_TRIM.get(name, Vector2(800.0, 60.0))
 		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -129,6 +161,109 @@ func _load_aircraft(name: String) -> void:
 		flaps_deg = 0.0
 		throttle = clampf(tr.y, 0.0, 1.0)
 		engine_out = 0
+
+## Read terrain choices saved by the main-menu Terrain tab from scene-root
+## metadata. Root metadata survives scene changes, so this avoids writing a
+## settings file while still carrying the selection into the flight scene.
+func _apply_terrain_settings() -> void:
+	var root := get_tree().root
+	if root == null or not root.has_meta(_TerrainSettingsMeta):
+		return
+	var saved = root.get_meta(_TerrainSettingsMeta)
+	if not (saved is Dictionary):
+		return
+	if saved.has("procedural_terrain"):
+		procedural_terrain = bool(saved["procedural_terrain"])
+	_terrain_settings.clear()
+	for key in _TerrainSettingKeys:
+		if saved.has(key):
+			_terrain_settings[key] = saved[key]
+
+## Push the steady wind chosen in the main-menu Terrain tab into Rust. The
+## speed slider is 0 by default (still air, i.e. the env-configured wind), so
+## this is a no-op until the user actually asks for wind.
+func _apply_wind_settings() -> void:
+	if _physics == null:
+		return
+	var wind_speed := float(_terrain_settings.get("wind_speed", 0.0))
+	if wind_speed <= 0.0:
+		return
+	var wind_dir := float(_terrain_settings.get("wind_direction", 0.0))
+	_physics.set_wind(wind_speed, wind_dir)
+	print("wind configured: %0.1f m/s toward %0.0f°" % [wind_speed, wind_dir])
+
+func _apply_terrain_settings_to_generator(gen) -> void:
+	for key in _terrain_settings:
+		if key in ["wind_speed", "wind_direction"]:
+			continue
+		gen.set(key, _terrain_settings[key])
+
+func _save_terrain_settings() -> void:
+	var root := get_tree().root
+	if root == null:
+		return
+	var settings := {"procedural_terrain": procedural_terrain}
+	for key in _TerrainSettingKeys:
+		if _terrain_settings.has(key):
+			settings[key] = _terrain_settings[key]
+	if _terrain_generator != null:
+		for key in _TerrainSettingKeys:
+			settings[key] = _terrain_generator.get(key)
+	root.set_meta(_TerrainSettingsMeta, settings)
+
+## Create the chunked procedural-terrain generator, point it at the aircraft
+## and hand it the Rust physics-grid sink. The imported GLB landscape is hid
+## because it overlaps the generated world.
+func _setup_procedural_terrain() -> void:
+	if _terrain_generator != null:
+		return
+	var glb := get_node_or_null("Sketchfab_Scene")
+	if glb:
+		glb.visible = false
+	var gen = _TerrainGeneratorScript.new()
+	gen.name = "TerrainGenerator"
+	add_child(gen)
+	_apply_terrain_settings_to_generator(gen)
+	gen.physics_grid_callback = Callable(self, "_push_physics_terrain")
+	gen.set_target_node(_drone)
+	_terrain_generator = gen
+	_save_terrain_settings()
+	_physics.set_terrain_enabled(false)
+	print("procedural terrain: chunk world following the aircraft")
+
+## Remove the generated world and go back to the imported GLB landscape, then
+## re-sample its ground grid into the Rust physics.
+func _teardown_procedural_terrain() -> void:
+	if _terrain_generator:
+		_terrain_generator.queue_free()
+		_terrain_generator = null
+	var glb := get_node_or_null("Sketchfab_Scene")
+	if glb:
+		glb.visible = true
+	_physics.set_terrain_enabled(false)
+	_sample_terrain_grid.call_deferred()
+
+## The generator re-rolls the world seed and rebuilds chunks around the plane.
+func _regenerate_procedural_terrain() -> void:
+	if _terrain_generator:
+		_terrain_generator.regenerate()
+		_save_terrain_settings()
+		print("procedural terrain: regenerated")
+
+## Sink for the generator's coarse height grid; also (re)enables the physics
+## terrain once a grid has actually arrived.
+func _push_physics_terrain(
+	north0: float,
+	east0: float,
+	spacing: float,
+	nx: int,
+	nz: int,
+	heights: PackedFloat64Array,
+) -> void:
+	if _physics == null:
+		return
+	_physics.configure_terrain(north0, east0, spacing, nx, nz, heights)
+	_physics.set_terrain_enabled(true)
 
 ## Sample the imported terrain mesh into a uniform height grid and hand it to
 ## the Rust physics so the mountains are the real ground (collision + ground
@@ -387,9 +522,22 @@ func _handle_input(delta: float) -> void:
 		_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
 		_update_aircraft_btn_text()
 
+	# Re-roll the procedural world: N
+	if _just_pressed(KEY_N):
+		_regenerate_procedural_terrain()
+
+	# Switch procedural terrain / imported landscape: B
+	if _just_pressed(KEY_B):
+		procedural_terrain = not procedural_terrain
+		if procedural_terrain:
+			_setup_procedural_terrain()
+		else:
+			_teardown_procedural_terrain()
+		_save_terrain_settings()
+
 	# Reset: R (re-trims to the active mode's cruise altitude / speed)
 	if _just_pressed(KEY_R):
-		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(50.0, 60.0))
+		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
 		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
