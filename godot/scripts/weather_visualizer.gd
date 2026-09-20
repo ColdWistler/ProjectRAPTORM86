@@ -22,6 +22,10 @@ extends Node3D
 @export_range(20.0, 250.0, 5.0) var precip_radius := 90.0
 @export_range(500, 6000, 100) var max_particles := 3500
 @export var hide_when_menu_off := true
+## Camera-local placement (right, up, in front of the camera) for the wind HUD.
+@export var wind_arrow_offset := Vector3(4.0, -0.6, -8.0)
+@export var updraft_arrow_offset := Vector3(-4.0, -0.6, -8.0)
+@export var wind_label_offset := Vector3(4.0, -2.0, -8.0)
 
 var weather = null
 var _env: Environment = null
@@ -85,6 +89,8 @@ func _process(delta: float) -> void:
 	if not weather.is_ready():
 		_restore_baseline()
 		return
+	if cam != null:
+		_place_hud_children(cam)
 	_update_precipitation()
 	_update_fog()
 	_update_arrows()
@@ -287,23 +293,32 @@ func _update_fog() -> void:
 
 func _build_arrows() -> void:
 	_wind_arrow = _make_arrow(Color(0.35, 0.9, 1.0))
-	_wind_arrow.position = Vector3(5.5, -1.6, -7.0)
 	add_child(_wind_arrow)
 
 	_updraft_arrow = _make_arrow(Color(0.25, 0.95, 0.4))
 	_updraft_mat = _updraft_arrow.get_meta("mat")
-	_updraft_arrow.position = Vector3(-5.5, -1.6, -7.0)
 	add_child(_updraft_arrow)
 
 	_wind_label = Label3D.new()
 	_wind_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_wind_label.fixed_size = true
 	_wind_label.no_depth_test = true
-	_wind_label.font_size = 44
-	_wind_label.outline_size = 12
+	_wind_label.font_size = 22
+	_wind_label.outline_size = 6
 	_wind_label.modulate = Color(0.85, 0.95, 1.0, 0.95)
-	_wind_label.position = Vector3(5.5, -3.4, -7.0)
 	add_child(_wind_label)
+
+## Pin the wind HUD inside the view: offsets are camera-local and transformed
+## by the camera basis each frame, so the arrows/readout always sit in-frame
+## no matter which way the chase camera points.
+func _place_hud_children(cam: Camera3D) -> void:
+	var tf: Transform3D = cam.global_transform
+	if _wind_arrow != null:
+		_wind_arrow.global_position = tf * wind_arrow_offset
+	if _updraft_arrow != null:
+		_updraft_arrow.global_position = tf * updraft_arrow_offset
+	if _wind_label != null:
+		_wind_label.global_position = tf * wind_label_offset
 
 func _make_arrow(color: Color) -> Node3D:
 	var mat := StandardMaterial3D.new()
@@ -341,7 +356,7 @@ func _update_arrows() -> void:
 	_wind_arrow.visible = show
 	if show:
 		_orient_arrow(_wind_arrow, wind.normalized())
-		_wind_arrow.scale = Vector3(1.0, 1.0, clampf(wind.length() / 6.0, 0.5, 2.5))
+		_wind_arrow.scale = Vector3(1.0, 1.0, clampf(wind.length() / 10.0, 0.4, 1.6))
 	else:
 		_wind_arrow.scale = Vector3.ONE
 	var up := float(weather.get_updraft_strength())
@@ -349,7 +364,7 @@ func _update_arrows() -> void:
 	_updraft_arrow.visible = show_up
 	if show_up:
 		_orient_arrow(_updraft_arrow, Vector3(0, signf(up), 0))
-		_updraft_arrow.scale = Vector3(1.0, 1.0, clampf(absf(up) / 3.0, 0.4, 2.5))
+		_updraft_arrow.scale = Vector3(1.0, 1.0, clampf(absf(up) / 4.0, 0.4, 1.8))
 		_updraft_mat.albedo_color = Color(0.25, 0.95, 0.4) if up > 0.0 else Color(0.95, 0.3, 0.3)
 	else:
 		_updraft_arrow.scale = Vector3.ONE
