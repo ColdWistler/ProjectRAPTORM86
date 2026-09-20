@@ -57,7 +57,7 @@ func _physics_process(delta: float) -> void:
 		push_error("weather observation must be 12 channels")
 
 	# 3. Shaped reward: survival bonus + weather penalties (already ≤ 0).
-	var step_reward := delta * 1.0 + weather.get_reward_penalty_total()
+	var step_reward: float = delta * 1.0 + float(weather.get_reward_penalty_total())
 	episode_reward += step_reward
 	episode_weather_penalty += weather.get_reward_penalty_total()
 	step_index += 1
@@ -106,7 +106,7 @@ func _input(event: InputEvent) -> void:
 		return
 	match k.keycode:
 		KEY_W: # weather severity up
-			var sev := clampi(weather.get_severity() + 1, 0, 3)
+			var sev: int = clampi(int(weather.get_severity()) + 1, 0, 3)
 			weather.set_severity(sev)
 		KEY_N: # next curriculum phase
 			var phase: int = weather.next_curriculum_phase()
