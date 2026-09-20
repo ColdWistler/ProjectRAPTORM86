@@ -80,6 +80,10 @@ physics run in Rust while Godot handles all assets and visualization.
   seed / deterministic vs stochastic re-roll cadence, trigger evasive
   maneuvers, and flip sim features — avionics path, auto-level, aircraft,
   flaps, engine-out, procedural terrain — with a live weather readout
+- **Visible weather**: a `WeatherVisualizer` node renders the weather you fly
+  through — rain/snow/hail GPU particles, visibility fog, a wind arrow +
+  readout, updraft/downdraft arrow, storm dimming + cloud darkening, and
+  turbulence camera shake (all active while "Weather enabled" is on)
 
 ## Requirements
 
