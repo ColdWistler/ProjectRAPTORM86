@@ -1,5 +1,5 @@
 extends Control
-## Main menu with tab-based navigation: Home, Aircraft, About.
+## Main menu with tab-based navigation: Home, Aircraft, Terrain, About.
 ## The entire UI is built procedurally so the scene file stays minimal.
 
 # ── Colour palette ───────────────────────────────────────────────────
@@ -69,6 +69,61 @@ const MODEL_ALIGN := {
 }
 
 const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
+const _TerrainGeneratorScript := preload("res://scripts/terrain/terrain_generator.gd")
+
+const TABS := ["Home", "Aircraft", "Terrain", "About"]
+const TERRAIN_SETTINGS_META := "raptor_terrain_settings"
+const TERRAIN_SETTING_KEYS := [
+	"procedural_terrain",
+	"noise_seed",
+	"noise_scale",
+	"octaves",
+	"persistence",
+	"lacunarity",
+	"height_multiplier",
+	"height_exponent",
+	"view_chunks",
+	"resolution",
+	"chunk_size",
+	"collision_enabled",
+	"physics_grid_enabled",
+	"wind_speed",
+	"wind_direction",
+]
+const TERRAIN_DEFAULTS := {
+	"procedural_terrain": true,
+	"noise_seed": 1337,
+	"noise_scale": 900.0,
+	"octaves": 5,
+	"persistence": 0.4,
+	"lacunarity": 2.0,
+	"height_multiplier": 700.0,
+	"height_exponent": 1.25,
+	"view_chunks": 24,
+	"resolution": 33,
+	"chunk_size": 500.0,
+	"collision_enabled": true,
+	"physics_grid_enabled": true,
+	"wind_speed": 0.0,
+	"wind_direction": 0.0,
+}
+const TERRAIN_RESOLUTIONS := [17, 25, 33, 49]
+
+## Live-preview recipe: the terrain tab renders a compact chunk ring (not the
+## full in-flight world) so the sliders update in real time. It mirrors the
+## noise + height + colour regions exactly; only the chop is coarser.
+const PREVIEW_CHUNK_SIZE := 400.0
+const PREVIEW_RESOLUTION := 17
+const PREVIEW_VIEW_CHUNKS := 3
+const PREVIEW_GEN_KEYS := [
+	"noise_seed",
+	"noise_scale",
+	"octaves",
+	"persistence",
+	"lacunarity",
+	"height_multiplier",
+	"height_exponent",
+]
 
 const AVIONICS := {
 	"IMU": "Inertial Measurement Unit — 6-axis accelerometer/gyroscope (MEMS ICM-42688-P class) providing body-frame angular rates and specific force.",
@@ -87,6 +142,17 @@ var _pages: Dictionary = {}
 var _current_page := "Home"
 var _tab_buttons: Dictionary = {}
 var _tab_styles: Dictionary = {}
+var _terrain_settings: Dictionary = {}
+var _terrain_summary: Label = null
+var _terrain_procedural_controls: Array = []
+
+# ── Terrain-tab live preview state ──────────────────────────────────
+var _terrain_viewport: SubViewport = null
+var _terrain_viewport_cam: Camera3D = null
+var _terrain_preview_gen = null
+var _terrain_preview_arrow: Node3D = null
+var _terrain_wind_label: Label = null
+var _terrain_preview_yaw := -0.9
 
 # ── 3D viewport state ────────────────────────────────────────────────
 var _ac_containers: Dictionary = {}   # name → SubViewportContainer
@@ -96,19 +162,22 @@ var _ac_spin_root: Dictionary = {}    # name → Node3D (model wrapper that rota
 
 # ── Build ────────────────────────────────────────────────────────────
 func _ready() -> void:
+	_terrain_settings = _load_terrain_settings()
 	_build_ui()
 	_switch_page("Home")
 
-## Spin the aircraft preview models about Y (turntable) only while the
-## Aircraft page is visible.
+## Drive the animated 3D previews: spin the aircraft turntables on the Aircraft
+## page and gently orbit + refresh the terrain preview on the Terrain page.
 func _process(delta: float) -> void:
-	if _current_page != "Aircraft":
+	if _current_page == "Aircraft":
+		var speed := 0.35 * delta
+		for name in _ac_spin_root:
+			var root: Node3D = _ac_spin_root[name]
+			if root != null:
+				root.rotation.y += speed
 		return
-	var speed := 0.35 * delta
-	for name in _ac_spin_root:
-		var root: Node3D = _ac_spin_root[name]
-		if root != null:
-			root.rotation.y += speed
+	if _current_page == "Terrain":
+		_update_terrain_preview_camera(delta)
 
 func _build_ui() -> void:
 	# Full-screen dark background
@@ -145,6 +214,7 @@ func _build_ui() -> void:
 
 	_pages["Home"] = _build_home_page()
 	_pages["Aircraft"] = _build_aircraft_page()
+	_pages["Terrain"] = _build_terrain_page()
 	_pages["About"] = _build_about_page()
 
 	for key in _pages:
@@ -184,7 +254,7 @@ func _build_nav_bar() -> PanelContainer:
 	hflow.add_child(spacer)
 
 	# Tab buttons
-	for tab_name in ["Home", "Aircraft", "About"]:
+	for tab_name in TABS:
 		var btn := Button.new()
 		btn.text = tab_name
 		btn.custom_minimum_size = Vector2(120, 36)
@@ -241,7 +311,7 @@ func _switch_page(name: String) -> void:
 	_current_page = name
 	for key in _pages:
 		_pages[key].visible = (key == name)
-	# Pause 3D preview rendering unless the Aircraft page is active.
+	# Pause 3D preview rendering unless its page is active.
 	var aircraft_active := (name == "Aircraft")
 	for key in _ac_viewports:
 		var vp: SubViewport = _ac_viewports[key]
@@ -249,6 +319,10 @@ func _switch_page(name: String) -> void:
 			vp.render_target_update_mode = (
 				SubViewport.UPDATE_ALWAYS if aircraft_active
 				else SubViewport.UPDATE_DISABLED)
+	if _terrain_viewport != null:
+		_terrain_viewport.render_target_update_mode = (
+			SubViewport.UPDATE_ALWAYS if name == "Terrain"
+			else SubViewport.UPDATE_DISABLED)
 	# Update tab button styles
 	for key in _tab_buttons:
 		var styles: Dictionary = _tab_styles[key]
@@ -299,7 +373,7 @@ func _build_home_page() -> Control:
 
 	card_row.add_child(_make_mode_card(
 		"Flight Simulator",
-		"Take off at 1 000 m / 60 m/s trimmed cruise. Chase camera, full\ncontrol surface authority, flaps, trim, autopilot hold, wind.",
+		"Take off at 800 m / 60 m/s trimmed cruise, clear of the generated\nmountains. Chase camera, full control surface authority, flaps, trim,\nautopilot hold, wind.",
 		"res://scenes/flight_sim.tscn"
 	))
 	card_row.add_child(_make_mode_card(
@@ -650,6 +724,628 @@ func _make_spacer_label() -> Label:
 	lbl.custom_minimum_size.y = 4
 	return lbl
 
+# ── TERRAIN PAGE ─────────────────────────────────────────────────────
+func _build_terrain_page() -> Control:
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 16)
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(vbox)
+
+	var heading := Label.new()
+	heading.text = "Terrain Generator"
+	heading.add_theme_font_size_override("font_size", 32)
+	heading.add_theme_color_override("font_color", TEXT_LIGHT)
+	vbox.add_child(heading)
+
+	var sub := Label.new()
+	sub.text = "Configure the procedural landmass used by the flight simulator, or keep the imported landscape. Launching applies these settings to the flight scene."
+	sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sub.add_theme_font_size_override("font_size", 15)
+	sub.add_theme_color_override("font_color", TEXT_MID)
+	vbox.add_child(sub)
+	vbox.add_child(HSeparator.new())
+
+	vbox.add_child(_build_terrain_preview())
+
+	var source_card := _make_settings_card()
+	vbox.add_child(source_card[0])
+	var source_inner: VBoxContainer = source_card[1]
+	source_inner.add_child(_make_settings_heading("Terrain source"))
+
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 12)
+	source_inner.add_child(mode_row)
+	mode_row.add_child(_make_settings_label("Source"))
+	var mode := OptionButton.new()
+	mode.add_item("Procedural landmass")
+	mode.add_item("Imported landscape")
+	mode.custom_minimum_size.x = 260
+	mode.selected = 0 if bool(_terrain_settings["procedural_terrain"]) else 1
+	mode_row.add_child(mode)
+	mode.item_selected.connect(func(index: int) -> void:
+		_set_terrain_setting("procedural_terrain", index == 0)
+		_set_procedural_controls_enabled(index == 0)
+	)
+
+	var shape_card := _make_settings_card()
+	vbox.add_child(shape_card[0])
+	var shape_inner: VBoxContainer = shape_card[1]
+	shape_inner.add_child(_make_settings_heading("Landmass shape"))
+	_add_slider_setting(shape_inner, "Seed", 0.0, 100000.0, 1.0, float(_terrain_settings["noise_seed"]), "%.0f", "noise_seed")
+	_add_slider_setting(shape_inner, "Noise scale", 40.0, 2000.0, 10.0, float(_terrain_settings["noise_scale"]), "%.0f", "noise_scale")
+	_add_slider_setting(shape_inner, "Mountain height", 100.0, 1800.0, 25.0, float(_terrain_settings["height_multiplier"]), "%.0f m", "height_multiplier")
+	_add_slider_setting(shape_inner, "Ruggedness", 0.6, 1.6, 0.05, float(_terrain_settings["height_exponent"]), "%.2f", "height_exponent")
+
+	var detail_card := _make_settings_card()
+	vbox.add_child(detail_card[0])
+	var detail_inner: VBoxContainer = detail_card[1]
+	detail_inner.add_child(_make_settings_heading("Detail and physics"))
+	_add_slider_setting(detail_inner, "Noise octaves", 1.0, 6.0, 1.0, float(_terrain_settings["octaves"]), "%.0f", "octaves")
+	_add_slider_setting(detail_inner, "Persistence", 0.1, 0.9, 0.05, float(_terrain_settings["persistence"]), "%.2f", "persistence")
+	_add_slider_setting(detail_inner, "Lacunarity", 1.5, 3.0, 0.1, float(_terrain_settings["lacunarity"]), "%.2f", "lacunarity")
+	_add_slider_setting(detail_inner, "Loaded chunks", 3.0, 12.0, 1.0, float(_terrain_settings["view_chunks"]), "%.0f", "view_chunks")
+	detail_inner.add_child(_make_resolution_row())
+	detail_inner.add_child(_make_check_setting("Terrain collision", "collision_enabled"))
+	detail_inner.add_child(_make_check_setting("Physics height grid", "physics_grid_enabled"))
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 12)
+	vbox.add_child(actions)
+	var randomize := _make_action_button("Randomize seed", 200, 44)
+	randomize.pressed.connect(_randomize_terrain_seed)
+	actions.add_child(randomize)
+	_terrain_procedural_controls.append(randomize)
+	var reset := _make_action_button("Reset defaults", 200, 44)
+	reset.pressed.connect(_reset_terrain_settings)
+	actions.add_child(reset)
+	var launch := _make_action_button("Generate & launch flight", 300, 44)
+	launch.pressed.connect(_launch_flight_with_terrain)
+	actions.add_child(launch)
+
+	_terrain_summary = Label.new()
+	_terrain_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_terrain_summary.add_theme_font_size_override("font_size", 14)
+	_terrain_summary.add_theme_color_override("font_color", TEXT_MID)
+	vbox.add_child(_terrain_summary)
+	_set_procedural_controls_enabled(bool(_terrain_settings["procedural_terrain"]))
+	_update_terrain_summary()
+	return scroll
+
+## The Terrain-tab centrepiece: a live 3D render of the procedural world plus
+## a wind-direction arrow, with the wind controls parked beside it. The chunk
+## ring stays coarse (see PREVIEW_*) so the shape sliders respond instantly.
+func _build_terrain_preview() -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = BG_CARD
+	style.border_width_left = 2
+	style.border_width_right = 1
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.border_color = ACCENT_DIM
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 8
+	style.corner_radius_bottom_left = 8
+	style.corner_radius_bottom_right = 8
+	style.content_margin_left = 24
+	style.content_margin_right = 24
+	style.content_margin_top = 20
+	style.content_margin_bottom = 20
+	panel.add_theme_stylebox_override("panel", style)
+
+	var outer := HBoxContainer.new()
+	outer.add_theme_constant_override("separation", 24)
+	panel.add_child(outer)
+
+	# ── Left: live 3D preview (slowly orbiting camera) ──
+	outer.add_child(_build_preview_viewport())
+
+	# ── Right: heading + wind controls ──
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.add_theme_constant_override("separation", 10)
+	outer.add_child(right)
+
+	right.add_child(_make_settings_heading("Preview"))
+	var pdesc := Label.new()
+	pdesc.text = "The generated world at the current landmass settings, rendered before you commit. The amber arrow points the direction the steady wind blows toward."
+	pdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	pdesc.add_theme_font_size_override("font_size", 13)
+	pdesc.add_theme_color_override("font_color", TEXT_DIM)
+	pdesc.custom_minimum_size.y = 58
+	right.add_child(pdesc)
+
+	right.add_child(HSeparator.new())
+
+	right.add_child(_make_settings_heading("Wind"))
+	right.add_child(_make_settings_label_note(
+		"Wind speed and bearing are applied to the flight sim on launch. A bearing of 0° blows toward north; 90° toward east."
+	))
+	_add_slider_setting(right, "Wind speed", 0.0, 30.0, 0.5, float(_terrain_settings["wind_speed"]), "%.1f m/s", "wind_speed", false)
+	_add_slider_setting(right, "Wind direction", 0.0, 360.0, 5.0, float(_terrain_settings["wind_direction"]), "%.0f°", "wind_direction", false)
+
+	var spacer := Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right.add_child(spacer)
+
+	return panel
+
+## Build the framed SubViewport that renders the preview terrain and the wind
+## arrow, plus a 2D overlay label reporting the current wind.
+func _build_preview_viewport() -> Control:
+	var frame := Control.new()
+	frame.custom_minimum_size = Vector2(720, 450)
+
+	var bg := PanelContainer.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var fstyle := StyleBoxFlat.new()
+	fstyle.bg_color = Color(0.045, 0.06, 0.10)
+	fstyle.border_width_left = 2
+	fstyle.border_width_right = 2
+	fstyle.border_width_top = 2
+	fstyle.border_width_bottom = 2
+	fstyle.border_color = BORDER_LIGHT
+	fstyle.corner_radius_top_left = 10
+	fstyle.corner_radius_top_right = 10
+	fstyle.corner_radius_bottom_left = 10
+	fstyle.corner_radius_bottom_right = 10
+	fstyle.content_margin_left = 6
+	fstyle.content_margin_right = 6
+	fstyle.content_margin_top = 6
+	fstyle.content_margin_bottom = 6
+	bg.add_theme_stylebox_override("panel", fstyle)
+	frame.add_child(bg)
+
+	# 3D layer
+	var container := SubViewportContainer.new()
+	container.stretch = true
+	container.set_anchors_preset(Control.PRESET_FULL_RECT)
+	container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(container)
+
+	var vp := SubViewport.new()
+	vp.size = Vector2i(708, 438)
+	vp.own_world_3d = true
+	vp.world_3d = World3D.new()
+	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	container.add_child(vp)
+	_terrain_viewport = vp
+
+	# Ambient environment (dim sky + sun so the region colours read).
+	var we := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.30, 0.38, 0.48)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.62, 0.72, 0.85)
+	env.ambient_light_energy = 0.85
+	we.environment = env
+	vp.add_child(we)
+
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-50, -35, 0)
+	sun.light_energy = 1.25
+	sun.shadow_enabled = true
+	vp.add_child(sun)
+
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(30, 25, 0)
+	fill.light_energy = 0.4
+	fill.light_color = Color(0.55, 0.65, 0.85)
+	vp.add_child(fill)
+
+	# Terrain generator — coarse, collisionless. The apron flatten stays on
+	# (matching the flight world) so the preview shows the airport valley the
+	# aircraft actually spawns into, not raw landmass over the runway.
+	var gen = _TerrainGeneratorScript.new()
+	gen.name = "PreviewTerrain"
+	vp.add_child(gen)
+	gen.collision_enabled = false
+	gen.physics_grid_enabled = false
+	gen.chunk_size = PREVIEW_CHUNK_SIZE
+	gen.resolution = PREVIEW_RESOLUTION
+	gen.view_chunks = PREVIEW_VIEW_CHUNKS
+	# A fixed origin probe lets the chunk ring build around the world origin
+	# (the generator's own _process will populate it once the tab is active).
+	var anchor := Node3D.new()
+	anchor.name = "PreviewAnchor"
+	vp.add_child(anchor)
+	gen.set_target_node(anchor)
+	_terrain_preview_gen = gen
+
+	# Camera — slow orbit around the origin, tilted down onto the relief.
+	var cam := Camera3D.new()
+	cam.fov = 60.0
+	cam.current = true
+	vp.add_child(cam)
+	_terrain_viewport_cam = cam
+
+	# Wind arrow (shaft + cone head, oriented toward the wind's destination).
+	var arrow := _make_wind_arrow()
+	vp.add_child(arrow)
+	_terrain_preview_arrow = arrow
+
+	# 2D overlay label (screen space above the viewport contents).
+	var wind_lbl := Label.new()
+	wind_lbl.position = Vector2(14, 10)
+	wind_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wind_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2, 0.95))
+	wind_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	wind_lbl.add_theme_constant_override("outline_size", 4)
+	wind_lbl.add_theme_font_size_override("font_size", 15)
+	frame.add_child(wind_lbl)
+	_terrain_wind_label = wind_lbl
+
+	_apply_terrain_preview_settings()
+	_update_terrain_wind_arrow()
+
+	return frame
+
+func _make_settings_label_note(text: String) -> Label:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_color_override("font_color", TEXT_DIM)
+	return lbl
+
+## Build an unlit amber arrow pointing along +X (world north), sized relative
+## to the preview footprint. Its parent node is rotated about Y to steer it
+## toward the configured wind bearing.
+func _make_wind_arrow() -> Node3D:
+	var root := Node3D.new()
+	root.name = "WindArrow"
+	var footprint := PREVIEW_CHUNK_SIZE * float(PREVIEW_VIEW_CHUNKS * 2 + 1)
+	var shaft_len := footprint * 0.42
+	var shaft_r := footprint * 0.015
+	var head_len := shaft_len * 0.28
+	var head_r := shaft_r * 2.8
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(1.0, 0.72, 0.18)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.72, 0.18)
+	mat.emission_energy_multiplier = 1.6
+
+	var shaft := MeshInstance3D.new()
+	shaft.name = "Shaft"
+	var sm := CylinderMesh.new()
+	sm.top_radius = shaft_r
+	sm.bottom_radius = shaft_r * 0.8
+	sm.height = shaft_len
+	sm.radial_segments = 10
+	shaft.mesh = sm
+	shaft.material_override = mat
+	shaft.rotation_degrees.z = 90.0
+	shaft.position.x = shaft_len * 0.5
+	root.add_child(shaft)
+
+	var head := MeshInstance3D.new()
+	head.name = "Head"
+	var hm := CylinderMesh.new()
+	hm.top_radius = 0.0
+	hm.bottom_radius = head_r
+	hm.height = head_len
+	hm.radial_segments = 10
+	head.mesh = hm
+	head.material_override = mat
+	head.rotation_degrees.z = 90.0
+	head.position.x = shaft_len + head_len * 0.5
+	root.add_child(head)
+
+	return root
+
+## Push the current setting values into the live preview: regen the noise/height
+## keys, steer the wind arrow and refresh the overlay readout.
+func _apply_terrain_preview_settings() -> void:
+	if _terrain_preview_gen == null:
+		return
+	for key: String in PREVIEW_GEN_KEYS:
+		_terrain_preview_gen.set(key, _terrain_settings[key])
+	_update_terrain_wind_arrow()
+
+func _update_terrain_wind_arrow() -> void:
+	if _terrain_preview_arrow != null:
+		var dir := float(_terrain_settings["wind_direction"])
+		_terrain_preview_arrow.rotation.y = -deg_to_rad(dir)
+		if _terrain_preview_gen != null:
+			var peak := _sample_preview_peak()
+			_terrain_preview_arrow.position.y = peak + PREVIEW_CHUNK_SIZE * 0.08
+	if _terrain_wind_label != null:
+		var dir := float(_terrain_settings["wind_direction"])
+		var speed := float(_terrain_settings["wind_speed"])
+		_terrain_wind_label.text = "WIND  %5.1f m/s  %3d°" % [speed, roundi(dir)]
+
+## Highest terrain in the preview footprint — the arrow hovers just above it so
+## it stays visible no matter how the relief is sculpted.
+func _sample_preview_peak() -> float:
+	var half := PREVIEW_CHUNK_SIZE * float(PREVIEW_VIEW_CHUNKS) * 0.5
+	var peak := 0.0
+	var steps := 10
+	for iz in steps + 1:
+		for ix in steps + 1:
+			var x := -half + 2.0 * half * ix / steps
+			var z := -half + 2.0 * half * iz / steps
+			peak = maxf(peak, _terrain_preview_gen.sample_height(x, z))
+	return peak
+
+## Slow turntable orbit for the preview camera while the Terrain tab is open.
+func _update_terrain_preview_camera(delta: float) -> void:
+	if _terrain_viewport_cam == null:
+		return
+	_terrain_preview_yaw += delta * 0.18
+	var footprint := PREVIEW_CHUNK_SIZE * float(PREVIEW_VIEW_CHUNKS * 2 + 1)
+	var dist := footprint * 1.15
+	var pitch := 0.52
+	var cp := cos(pitch)
+	var sp := sin(pitch)
+	var pos := Vector3(dist * cp * cos(_terrain_preview_yaw), dist * sp, dist * cp * sin(_terrain_preview_yaw))
+	var peak := _sample_preview_peak()
+	_terrain_viewport_cam.global_position = pos + Vector3(0.0, peak * 0.35, 0.0)
+	_terrain_viewport_cam.look_at(Vector3(0.0, peak * 0.35, 0.0), Vector3.UP)
+
+func _make_settings_card() -> Array:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := StyleBoxFlat.new()
+	style.bg_color = BG_CARD
+	style.border_width_left = 2
+	style.border_width_right = 1
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.border_color = BORDER
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 8
+	style.corner_radius_bottom_left = 8
+	style.corner_radius_bottom_right = 8
+	style.content_margin_left = 24
+	style.content_margin_right = 24
+	style.content_margin_top = 20
+	style.content_margin_bottom = 20
+	panel.add_theme_stylebox_override("panel", style)
+	var inner := VBoxContainer.new()
+	inner.add_theme_constant_override("separation", 10)
+	inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_child(inner)
+	return [panel, inner]
+
+func _make_settings_heading(text: String) -> Label:
+	var heading := Label.new()
+	heading.text = text
+	heading.add_theme_font_size_override("font_size", 20)
+	heading.add_theme_color_override("font_color", ACCENT)
+	return heading
+
+func _make_settings_label(text: String) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.custom_minimum_size.x = 180
+	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", TEXT_MID)
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	return label
+
+func _add_slider_setting(parent: VBoxContainer, label_text: String, minimum: float, maximum: float, step: float, value: float, format: String, key: String, is_procedural: bool = true) -> HSlider:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	parent.add_child(row)
+	row.add_child(_make_settings_label(label_text))
+	var slider := HSlider.new()
+	slider.min_value = minimum
+	slider.max_value = maximum
+	slider.step = step
+	slider.custom_minimum_size.x = 320
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.set_value_no_signal(clampf(value, minimum, maximum))
+	row.add_child(slider)
+	var readout := Label.new()
+	readout.custom_minimum_size.x = 110
+	readout.add_theme_font_size_override("font_size", 14)
+	readout.add_theme_color_override("font_color", TEXT_SPEC)
+	readout.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(readout)
+	readout.text = format % _terrain_settings[key]
+	slider.value_changed.connect(func(new_value: float) -> void:
+		_set_terrain_setting(key, new_value)
+		readout.text = format % _terrain_settings[key]
+	)
+	if is_procedural:
+		_terrain_procedural_controls.append(slider)
+	return slider
+
+func _make_resolution_row() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	row.add_child(_make_settings_label("Chunk resolution"))
+	var choices := OptionButton.new()
+	for size in TERRAIN_RESOLUTIONS:
+		choices.add_item("%d vertices" % size, size)
+	choices.selected = TERRAIN_RESOLUTIONS.find(int(_terrain_settings["resolution"]))
+	choices.custom_minimum_size.x = 260
+	row.add_child(choices)
+	choices.item_selected.connect(func(index: int) -> void:
+		_set_terrain_setting("resolution", TERRAIN_RESOLUTIONS[index])
+	)
+	_terrain_procedural_controls.append(choices)
+	return row
+
+func _make_check_setting(label_text: String, key: String) -> CheckButton:
+	var check := CheckButton.new()
+	check.text = label_text
+	check.add_theme_font_size_override("font_size", 14)
+	check.set_pressed_no_signal(bool(_terrain_settings[key]))
+	check.toggled.connect(func(pressed: bool) -> void:
+		_set_terrain_setting(key, pressed)
+	)
+	_terrain_procedural_controls.append(check)
+	return check
+
+func _set_procedural_controls_enabled(enabled: bool) -> void:
+	for control in _terrain_procedural_controls:
+		if control is Range:
+			(control as Range).editable = enabled
+		elif control is BaseButton:
+			(control as BaseButton).disabled = not enabled
+
+func _randomize_terrain_seed() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	_set_terrain_setting("noise_seed", rng.randi_range(0, 100000))
+	_refresh_terrain_page()
+
+func _reset_terrain_settings() -> void:
+	_terrain_settings = _load_terrain_defaults()
+	_save_terrain_settings()
+	_refresh_terrain_page()
+
+func _refresh_terrain_page() -> void:
+	var page: Control = _pages["Terrain"]
+	var parent := page.get_parent()
+	var position := parent.get_children().find(page)
+	_terrain_procedural_controls.clear()
+	_terrain_summary = null
+	_terrain_viewport = null
+	_terrain_viewport_cam = null
+	_terrain_preview_gen = null
+	_terrain_preview_arrow = null
+	_terrain_wind_label = null
+	parent.remove_child(page)
+	page.queue_free()
+	page = _build_terrain_page()
+	parent.add_child(page)
+	parent.move_child(page, position)
+	_pages["Terrain"] = page
+	page.visible = (_current_page == "Terrain")
+	if _terrain_viewport != null:
+		_terrain_viewport.render_target_update_mode = (
+			SubViewport.UPDATE_ALWAYS if _current_page == "Terrain"
+			else SubViewport.UPDATE_DISABLED)
+
+func _launch_flight_with_terrain() -> void:
+	_save_terrain_settings()
+	get_tree().change_scene_to_file("res://scenes/flight_sim.tscn")
+
+func _load_terrain_settings() -> Dictionary:
+	var settings := _load_terrain_defaults()
+	var root := get_tree().root
+	if root != null and root.has_meta(TERRAIN_SETTINGS_META):
+		var saved = root.get_meta(TERRAIN_SETTINGS_META)
+		if saved is Dictionary:
+			for key in TERRAIN_SETTING_KEYS:
+				if saved.has(key):
+					settings[key] = _sanitize_terrain_setting(key, saved[key])
+	return settings
+
+func _load_terrain_defaults() -> Dictionary:
+	var settings := {}
+	for key in TERRAIN_SETTING_KEYS:
+		settings[key] = _sanitize_terrain_setting(key, TERRAIN_DEFAULTS[key])
+	return settings
+
+func _save_terrain_settings() -> void:
+	var root := get_tree().root
+	if root == null:
+		return
+	root.set_meta(TERRAIN_SETTINGS_META, _terrain_settings.duplicate())
+
+func _set_terrain_setting(key: String, value: Variant) -> void:
+	_terrain_settings[key] = _sanitize_terrain_setting(key, value)
+	_save_terrain_settings()
+	_update_terrain_summary()
+	_apply_terrain_preview_settings()
+
+func _sanitize_terrain_setting(key: String, value: Variant) -> Variant:
+	match key:
+		"procedural_terrain", "collision_enabled", "physics_grid_enabled":
+			return _terrain_bool(value, bool(TERRAIN_DEFAULTS[key]))
+		"noise_seed":
+			return clampi(_terrain_int(value, int(TERRAIN_DEFAULTS[key])), 0, 100000)
+		"noise_scale":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 40.0, 2000.0)
+		"octaves":
+			return clampi(_terrain_int(value, int(TERRAIN_DEFAULTS[key])), 1, 6)
+		"persistence":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 0.1, 0.9)
+		"lacunarity":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 1.5, 3.0)
+		"height_multiplier":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 100.0, 1800.0)
+		"height_exponent":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 0.6, 1.6)
+		"view_chunks":
+			return clampi(_terrain_int(value, int(TERRAIN_DEFAULTS[key])), 3, 12)
+		"resolution":
+			return _nearest_terrain_resolution(_terrain_int(value, int(TERRAIN_DEFAULTS[key])))
+		"chunk_size":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 100.0, 2000.0)
+		"wind_speed":
+			return clampf(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 0.0, 30.0)
+		"wind_direction":
+			return fmod(_terrain_float(value, float(TERRAIN_DEFAULTS[key])), 360.0)
+	return value
+
+func _terrain_bool(value: Variant, fallback: bool) -> bool:
+	if value is bool:
+		return value
+	if value is int:
+		return value != 0
+	if value is float:
+		return value != 0.0
+	if value is String:
+		return value.to_lower() in ["1", "true", "yes", "on"]
+	return fallback
+
+func _terrain_int(value: Variant, fallback: int) -> int:
+	if value is bool:
+		return 1 if value else 0
+	if value is int:
+		return value
+	if value is float:
+		return int(round(value))
+	if value is String and value.is_valid_int():
+		return int(value)
+	return fallback
+
+func _terrain_float(value: Variant, fallback: float) -> float:
+	if value is bool:
+		return 1.0 if value else 0.0
+	if value is int:
+		return float(value)
+	if value is float:
+		return value
+	if value is String and value.is_valid_float():
+		return float(value)
+	return fallback
+
+func _nearest_terrain_resolution(candidate: int) -> int:
+	var best: int = TERRAIN_RESOLUTIONS[0]
+	for size in TERRAIN_RESOLUTIONS:
+		if abs(size - candidate) < abs(best - candidate):
+			best = size
+	return best
+
+func _update_terrain_summary() -> void:
+	if _terrain_summary == null:
+		return
+	if not bool(_terrain_settings["procedural_terrain"]):
+		_terrain_summary.text = "Imported landscape selected. Launching will use the packaged snowy-mountain terrain instead of generated land."
+		return
+	var seed: int = int(_terrain_settings["noise_seed"])
+	var height: int = int(round(float(_terrain_settings["height_multiplier"])))
+	var noise_scale: int = int(round(float(_terrain_settings["noise_scale"])))
+	var octaves: int = int(_terrain_settings["octaves"])
+	var resolution: int = int(_terrain_settings["resolution"])
+	var chunks: int = int(_terrain_settings["view_chunks"])
+	_terrain_summary.text = "Ready to generate: seed %d, %d m mountains, scale %d, %d octaves, %d-vertex chunks across %d chunks." % [seed, height, noise_scale, octaves, resolution, chunks]
+
 # ── ABOUT PAGE ───────────────────────────────────────────────────────
 func _build_about_page() -> Control:
 	var scroll := ScrollContainer.new()
@@ -737,6 +1433,7 @@ func _build_about_page() -> Control:
 		"Trim": "[ / ]  (nose down / up)",
 		"Throttle": "Shift / Ctrl",
 		"Autopilot": "H or T  (level hold)",
+		"Terrain": "N regenerate / B source",
 		"Reset": "R",
 		"Menu": "Esc",
 	}))

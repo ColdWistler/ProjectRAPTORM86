@@ -80,6 +80,11 @@ fn wind_config_from_env() -> WindConfig {
     }
 }
 
+/// Default cruise altitude (m above datum). Raised well above the generated
+/// terrain (default mountains top out near 500 m) so the drone always spawns
+/// above the ground, never buried inside a peak.
+const DEFAULT_CRUISE_ALTITUDE: f64 = 800.0;
+
 /// A 6-DOF flight dynamics node. Create it in a scene (or `add_child`), then
 /// call [`FlightSimNode::start`] with a path to `aircraft.toml`.
 #[derive(GodotClass)]
@@ -120,7 +125,8 @@ struct FlightSimNode {
 #[godot_api]
 impl FlightSimNode {
     /// Load the aircraft config and initialize a trimmed level-flight state at
-    /// 1000 m, 60 m/s. Returns `false` if the config file could not be loaded.
+    /// [`DEFAULT_CRUISE_ALTITUDE`] m, 60 m/s. Returns `false` if the config
+    /// file could not be loaded.
     #[func]
     fn start(&mut self, config_path: GString) -> bool {
         let file_name = if !config_path.is_empty() {
@@ -144,7 +150,8 @@ impl FlightSimNode {
             return false;
         };
         let mut state = AircraftState::default();
-        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
+        let (trim_elev, trim_throttle) =
+            state.trim_level_flight(&config, DEFAULT_CRUISE_ALTITUDE, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
         self.avionics = Some(Self::build_avionics());
         self.avionics_active = true;
@@ -158,7 +165,7 @@ impl FlightSimNode {
         self.flaps_deg = 0.0;
         self.throttle = trim_throttle;
         self.auto_level = false;
-        self.target_alt = 50.0;
+        self.target_alt = DEFAULT_CRUISE_ALTITUDE;
         self.last_wind = NVec3::zeros();
         true
     }
@@ -283,7 +290,7 @@ impl FlightSimNode {
             h.push(heights.get(i).unwrap_or(0.0));
         }
         self.terrain = Terrain::from_grid(north0, east0, spacing, nx, nz, h);
-        godot_warn!("FlightSimNode: terrain grid {nx}x{nz} @ {spacing:.1} m set");
+        godot_print!("FlightSimNode: terrain grid {nx}x{nz} @ {spacing:.1} m set");
     }
 
     /// Enable/disable the physical terrain (collision + ground effect +
@@ -488,7 +495,8 @@ impl FlightSimNode {
             return false;
         };
         let mut state = AircraftState::default();
-        let (trim_elev, trim_throttle) = state.trim_level_flight(&config, 50.0, 60.0);
+        let (trim_elev, trim_throttle) =
+            state.trim_level_flight(&config, DEFAULT_CRUISE_ALTITUDE, 60.0);
         self.sim = Some((Simulator { config, state }, self.wind_environment()));
         self.avionics = Some(Self::build_avionics());
         self.avionics_active = true;
@@ -503,7 +511,7 @@ impl FlightSimNode {
         self.throttle = trim_throttle;
         self.throttle_split = 0.0;
         self.auto_level = false;
-        self.target_alt = 50.0;
+        self.target_alt = DEFAULT_CRUISE_ALTITUDE;
         true
     }
 
@@ -554,7 +562,7 @@ impl FlightSimNode {
         let Some((sim, _)) = self.sim.as_mut() else {
             return Vector2::ZERO;
         };
-        let (e, t) = sim.trim_level_flight(50.0, 60.0);
+        let (e, t) = sim.trim_level_flight(DEFAULT_CRUISE_ALTITUDE, 60.0);
         self.avionics = Some(Self::build_avionics());
         self.avionics_active = true;
         if let Some(av) = self.avionics.as_mut() {
@@ -568,7 +576,7 @@ impl FlightSimNode {
         self.throttle = t;
         self.throttle_split = 0.0;
         self.auto_level = false;
-        self.target_alt = 50.0;
+        self.target_alt = DEFAULT_CRUISE_ALTITUDE;
         Vector2::new(e as f32, t as f32)
     }
 
