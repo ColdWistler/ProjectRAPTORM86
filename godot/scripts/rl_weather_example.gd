@@ -109,7 +109,7 @@ func _input(event: InputEvent) -> void:
 			var sev := clampi(weather.get_severity() + 1, 0, 3)
 			weather.set_severity(sev)
 		KEY_N: # next curriculum phase
-			var phase := weather.next_curriculum_phase()
+			var phase: int = weather.next_curriculum_phase()
 			print("curriculum phase → ", phase)
 		KEY_M: # evasive maneuver
 			weather.trigger_evasive_maneuver()
