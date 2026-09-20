@@ -25,12 +25,18 @@ pub mod integrator;
 pub mod shape;
 pub mod state;
 pub mod terrain;
+pub mod weather;
 pub mod wind;
 
 #[cfg(any(
-    feature = "imu", feature = "gps", feature = "baro",
-    feature = "magnetometer", feature = "airspeed",
-    feature = "servo", feature = "esc", feature = "battery",
+    feature = "imu",
+    feature = "gps",
+    feature = "baro",
+    feature = "magnetometer",
+    feature = "airspeed",
+    feature = "servo",
+    feature = "esc",
+    feature = "battery",
     feature = "flight_controller",
 ))]
 pub mod avionics;
@@ -38,14 +44,19 @@ pub mod avionics;
 pub use aero::ControlInputs;
 pub use atmosphere::Atmosphere;
 pub use config::{AircraftConfig, Propulsion};
-pub use env::{ControlAction, Environment, EnvConfig, EnvStep, Observation};
 #[cfg(feature = "full-avionics")]
 pub use env::{
     AvionicsAction, AvionicsEnvStep, AvionicsEnvironment, AvionicsObservation, AVIONICS_OBS_DIM,
 };
+pub use env::{ControlAction, EnvConfig, EnvStep, Environment, Observation};
 pub use nalgebra;
 pub use state::AircraftState;
 pub use terrain::{Terrain, TerrainGrid, TerrainHill};
+pub use weather::{
+    CurriculumPhase, ObservationNormalizer, PrecipitationType, TerminationReason, TurbulenceLevel,
+    WeatherConfig, WeatherCurriculum, WeatherObservation, WeatherPreset, WeatherSeverity,
+    WeatherSystem, WEATHER_OBS_DIM,
+};
 pub use wind::{TurbulenceIntensity, WindConfig, WindEnvironment};
 
 use crate::config::load_config;
@@ -134,9 +145,9 @@ impl Simulator {
 mod tests {
     use super::*;
     use crate::aero::{
-    compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments,
-    ground_effect_factor,
-};
+        compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments,
+        ground_effect_factor,
+    };
     use crate::integrator::step;
     use nalgebra::Vector3;
 
@@ -151,7 +162,20 @@ mod tests {
 
         let start = state.clone();
         for _ in 0..steps {
-            step(&mut state, &config, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: throttle_trim, flap: 0.0 }, None, dt, None);
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
         }
 
         let alt_start = -start.pos_z;
@@ -193,7 +217,13 @@ mod tests {
             step(
                 &mut state,
                 &config,
-                ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: throttle_high, flap: 0.0 },
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_high,
+                    flap: 0.0,
+                },
                 None,
                 dt,
                 None,
@@ -234,7 +264,13 @@ mod tests {
             step(
                 &mut state,
                 &config,
-                ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: throttle_high, flap: 0.0 },
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_high,
+                    flap: 0.0,
+                },
                 None,
                 dt,
                 None,
@@ -273,7 +309,13 @@ mod tests {
             step(
                 &mut state,
                 &config,
-                ControlInputs { elevator: elev_trim - 0.06, aileron: 0.0, rudder: 0.0, throttle: throttle_trim, flap: 0.0 },
+                ControlInputs {
+                    elevator: elev_trim - 0.06,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
                 None,
                 dt,
                 None,
@@ -295,7 +337,13 @@ mod tests {
             step(
                 &mut state,
                 &config,
-                ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: throttle_trim, flap: 0.0 },
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
                 None,
                 dt,
                 None,
@@ -333,7 +381,7 @@ mod tests {
             izz: 2700.0,
             cl0: 0.3,
             cla: 5.5,
-cd0: 0.025,
+            cd0: 0.025,
             k_drag: 0.04,
             cm0: 0.0,
             cma: -1.1,
@@ -388,7 +436,20 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         for _ in 0..120 {
             // 2 s of sustained right aileron (~11 deg deflection).
-            step(&mut state, &config, ControlInputs { elevator: elev_trim, aileron: 0.20, rudder: 0.0, throttle: throttle_trim, flap: 0.0 }, None, dt, None);
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.20,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
         }
 
         let (roll, _, _) = state.euler_angles();
@@ -416,7 +477,20 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         for _ in 0..90 {
             // 1.5 s of sustained right rudder.
-            step(&mut state, &config, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.30, throttle: throttle_trim, flap: 0.0 }, None, dt, None);
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.30,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
         }
 
         let heading_change = state.euler_angles().2 - yaw_start;
@@ -439,7 +513,20 @@ cd0: 0.025,
         for _ in 0..120 {
             // 2 s at 0.05 rad (~3 deg) stick pull beyond trim.
             let elevator = elev_trim - 0.05;
-            step(&mut state, &config, ControlInputs { elevator, aileron: 0.0, rudder: 0.0, throttle: throttle_trim, flap: 0.0 }, None, dt, None);
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
         }
 
         let (_, pitch, _) = state.euler_angles();
@@ -461,10 +548,32 @@ cd0: 0.025,
         state.trim_level_flight(&config, 1000.0, 40.0);
 
         let flap = 30.0_f64.to_radians();
-        let (f_clean, m_clean) =
-            compute_forces_moments(&state, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, 0.0, &Vector3::zeros());
-        let (f_flap, m_flap) =
-            compute_forces_moments(&state, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap }, 0.0, &Vector3::zeros());
+        let (f_clean, m_clean) = compute_forces_moments(
+            &state,
+            &config,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            0.0,
+            &Vector3::zeros(),
+        );
+        let (f_flap, m_flap) = compute_forces_moments(
+            &state,
+            &config,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap,
+            },
+            0.0,
+            &Vector3::zeros(),
+        );
 
         // Flap lift acts upward = more negative body-Z force.
         assert!(
@@ -514,7 +623,20 @@ cd0: 0.025,
         let dt = 1.0 / 60.0;
         // 10 s of hand-off, idle, no inputs.
         for _ in 0..600 {
-            step(&mut state, &config, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: throttle_trim, flap: 0.0 }, None, dt, None);
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: elev_trim,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: throttle_trim,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
         }
 
         let alt_change = state.altitude() - alt0;
@@ -548,7 +670,17 @@ cd0: 0.025,
         let (elev_trim, _throttle_trim) = state.trim_level_flight(&config, 1000.0, 60.0);
 
         let (_, moments) = compute_forces_moments(
-            &state, &config, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: 0.8, flap: 0.0 }, 0.0, &Vector3::zeros(),
+            &state,
+            &config,
+            ControlInputs {
+                elevator: elev_trim,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.8,
+                flap: 0.0,
+            },
+            0.0,
+            &Vector3::zeros(),
         );
         // The asymmetric thrust yaws the nose toward the dead (left) engine.
         assert!(
@@ -561,7 +693,17 @@ cd0: 0.025,
         let mut config_l = config.clone();
         config_l.throttle_split = -1.0; // right engine out
         let (_, m_l) = compute_forces_moments(
-            &state, &config_l, ControlInputs { elevator: elev_trim, aileron: 0.0, rudder: 0.0, throttle: 0.8, flap: 0.0 }, 0.0, &Vector3::zeros(),
+            &state,
+            &config_l,
+            ControlInputs {
+                elevator: elev_trim,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.8,
+                flap: 0.0,
+            },
+            0.0,
+            &Vector3::zeros(),
         );
         assert!(
             m_l.z > 0.0,
@@ -583,8 +725,30 @@ cd0: 0.025,
         s_twin.trim_level_flight(&twin, 1000.0, 60.0);
 
         let zero = Vector3::zeros();
-        let f_single = compute_forces(&s_single, &single, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, &zero);
-        let f_twin = compute_forces(&s_twin, &twin, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, &zero);
+        let f_single = compute_forces(
+            &s_single,
+            &single,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            &zero,
+        );
+        let f_twin = compute_forces(
+            &s_twin,
+            &twin,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            &zero,
+        );
 
         // Total axial thrust must be equal at the same throttle.
         assert!(
@@ -610,7 +774,19 @@ cd0: 0.025,
         let yaw_for = |c: &AircraftConfig, split: f64| {
             let mut cc = c.clone();
             cc.throttle_split = split;
-            let (_, m) = compute_forces_moments(&state, &cc, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 1.0, flap: 0.0 }, 0.0, &Vector3::zeros());
+            let (_, m) = compute_forces_moments(
+                &state,
+                &cc,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 1.0,
+                    flap: 0.0,
+                },
+                0.0,
+                &Vector3::zeros(),
+            );
             m.z
         };
         let wide_yaw = yaw_for(&wide, 1.0);
@@ -642,12 +818,38 @@ cd0: 0.025,
             let mut c_aero = c.clone();
             c_aero.thrust_max = 1.0;
             c_aero.power_max = 1.0;
-            let rud = compute_moments(&st, &c_aero, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: -0.35, throttle: 0.0, flap: 0.0 }, 0.0, &Vector3::zeros()).z;
+            let rud = compute_moments(
+                &st,
+                &c_aero,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: -0.35,
+                    throttle: 0.0,
+                    flap: 0.0,
+                },
+                0.0,
+                &Vector3::zeros(),
+            )
+            .z;
 
             // Asymmetric-thrust yaw at full throttle, one engine out.
             let mut c_out = c.clone();
             c_out.throttle_split = 1.0;
-            let asym = compute_moments(&st, &c_out, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 1.0, flap: 0.0 }, 0.0, &Vector3::zeros()).z;
+            let asym = compute_moments(
+                &st,
+                &c_out,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 1.0,
+                    flap: 0.0,
+                },
+                0.0,
+                &Vector3::zeros(),
+            )
+            .z;
 
             let ratio = rud.abs() / asym.abs().max(1e-9);
             assert!(
@@ -664,8 +866,7 @@ cd0: 0.025,
         // At high altitude it must trim at a strongly-improved L/D and sustain
         // cruise without the throttle saturating (range-optimal, not sprint).
         let cfg_path = format!("{}/../TwinEngine.toml", env!("CARGO_MANIFEST_DIR"));
-        let c = AircraftConfig::from_file(&cfg_path)
-            .expect("load TwinEngine.toml");
+        let c = AircraftConfig::from_file(&cfg_path).expect("load TwinEngine.toml");
         assert_eq!(c.engine_count, 2, "TwinEngine must remain a twin");
 
         let mut st = AircraftState::default();
@@ -703,7 +904,19 @@ cd0: 0.025,
                 u: v, // wings-level, no AoA: body-X force = thrust - drag
                 ..AircraftState::default()
             };
-            compute_forces(&st, c, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 1.0, flap: 0.0 }, &zero).x
+            compute_forces(
+                &st,
+                c,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 1.0,
+                    flap: 0.0,
+                },
+                &zero,
+            )
+            .x
         };
         // Both lose axial force to drag as the speed rises; the propeller
         // additionally loses engine thrust to the P/V power ceiling, so its
@@ -746,7 +959,20 @@ cd0: 0.025,
         let alt0 = st.altitude();
         let mut tas = st.airspeed();
         for _ in 0..1200 {
-            step(&mut st, &c, ControlInputs { elevator: elev, aileron: 0.0, rudder: 0.0, throttle: thr, flap: 0.0 }, None, dt, None);
+            step(
+                &mut st,
+                &c,
+                ControlInputs {
+                    elevator: elev,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: thr,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                None,
+            );
             tas = st.airspeed();
         }
         assert!(
@@ -812,7 +1038,20 @@ cd0: 0.025,
 
         let dt = 1.0 / 120.0;
         for _ in 0..120 {
-            step(&mut state, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.0, flap: 0.0 }, None, dt, Some(&auth));
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 0.0,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                Some(&auth),
+            );
         }
 
         // After 1 s of diving the aircraft must rest exactly on the peak's
@@ -851,7 +1090,20 @@ cd0: 0.025,
         let dt = 1.0 / 120.0;
         let auth = Terrain::flat();
         for _ in 0..20 {
-            step(&mut state, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.0, flap: 0.0 }, None, dt, Some(&auth));
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 0.0,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                Some(&auth),
+            );
         }
         assert!(
             state.pos_z <= 0.0,
@@ -882,7 +1134,20 @@ cd0: 0.025,
 
         let dt = 1.0 / 120.0;
         for _ in 0..120 {
-            step(&mut state, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.0, flap: 0.0 }, None, dt, Some(&auth));
+            step(
+                &mut state,
+                &config,
+                ControlInputs {
+                    elevator: 0.0,
+                    aileron: 0.0,
+                    rudder: 0.0,
+                    throttle: 0.0,
+                    flap: 0.0,
+                },
+                None,
+                dt,
+                Some(&auth),
+            );
         }
 
         let ground_ned = -auth.height(state.pos_x, state.pos_y);
@@ -930,13 +1195,51 @@ cd0: 0.025,
             config.wing_span,
         );
 
-        let f_low = compute_forces_with_terrain(&low, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, &zero, Some(&auth));
-        let f_high = compute_forces_with_terrain(&high, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, &zero, Some(&auth));
-        let f_ref = compute_forces(&high, &config, ControlInputs { elevator: 0.0, aileron: 0.0, rudder: 0.0, throttle: 0.5, flap: 0.0 }, &zero);
+        let f_low = compute_forces_with_terrain(
+            &low,
+            &config,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            &zero,
+            Some(&auth),
+        );
+        let f_high = compute_forces_with_terrain(
+            &high,
+            &config,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            &zero,
+            Some(&auth),
+        );
+        let f_ref = compute_forces(
+            &high,
+            &config,
+            ControlInputs {
+                elevator: 0.0,
+                aileron: 0.0,
+                rudder: 0.0,
+                throttle: 0.5,
+                flap: 0.0,
+            },
+            &zero,
+        );
 
         // Body -Z is up: ground effect must raise the upward lift near the
         // surface, so f_low.z < f_high.z (both ~ = +/- gravity balance).
-        assert!(ge_low > 0.3 && ge_high < 0.01, "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}");
+        assert!(
+            ge_low > 0.3 && ge_high < 0.01,
+            "ground-effect factors wrong: low {ge_low:.2}, high {ge_high:.3}"
+        );
         assert!(
             f_low.z < f_high.z,
             "ground effect should add lift: AGL~0 gave z {:.1}, 3·b gave z {:.1}",

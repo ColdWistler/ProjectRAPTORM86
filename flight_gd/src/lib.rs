@@ -8,6 +8,10 @@
 //!   autopilot hold, full HUD telemetry, NED→Godot transform).
 //! * `WindTunnelNode` — fixed-aircraft wind-tunnel flow field: physics-driven
 //!   smoke-streak advection plus the aero forces/moments for the HUD.
+//! * `WeatherSystem` — RL weather plugin: seeded turbulence/precipitation/
+//!   visibility/updraft scene, agent observation vector, reward penalties,
+//!   extreme-weather termination, curriculum learning and the `weather_changed`
+//!   signal. See the module docs in `weather.rs` for the GDScript surface.
 //!
 //! # Conventions
 //! Godot world is **Y-up**; NED Earth frame maps to world
@@ -23,6 +27,7 @@
 mod sim;
 mod tunnel;
 mod voxel;
+mod weather;
 
 use godot::prelude::*;
 

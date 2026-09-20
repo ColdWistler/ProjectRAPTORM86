@@ -13,6 +13,9 @@ physics run in Rust while Godot handles all assets and visualization.
 │   • 1976 US Standard Atmosphere                            │
 │   • nonlinear post-stall aerodynamics                      │
 │   • steady wind / wind shear / Dryden turbulence           │
+│   • RL weather layer: seeded scene re-rolls, precipitation,│
+│     visibility, updrafts, shear, turbulence envelope,      │
+│     curriculum learning, observation + reward shaping      │
 │   • level-flight trimming + autopilot assist               │
 └──────────────────────────┬─────────────────────────────────┘
                            │ GDExtension (flight_gd, godot-rust)
@@ -24,6 +27,9 @@ physics run in Rust while Godot handles all assets and visualization.
 │     (solid-body deflection, wing circulation driven by the │
 │     physics CL, tip vortices, turbulent wake, top rake,    │
 │     pusher-prop slipstream) + aero forces for the HUD      │
+│   • WeatherSystem — RL weather plugin node (observation,   │
+│     reward penalties, termination, curriculum, actions,    │
+│     weather_changed signal, external-wind pass-through)    │
 └──────────────────────────┬─────────────────────────────────┘
                            │ godot project (godot/)
 ┌──────────────────────────┴─────────────────────────────────┐
@@ -39,10 +45,11 @@ physics run in Rust while Godot handles all assets and visualization.
 
 | Path            | Description                                                                                                            |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `flight_core/`  | Pure-Rust physics engine: quaternion 6-DOF dynamics, 1976 US Standard Atmosphere, nonlinear post-stall aerodynamics, RK4 integrator, trim/autopilot logic. |
-| `flight_gd/`    | `godot-rust` GDExtension crate exposing the physics as native Godot nodes (`FlightSimNode`, `WindTunnelNode`).        |
+| `flight_core/`  | Pure-Rust physics engine: quaternion 6-DOF dynamics, 1976 US Standard Atmosphere, nonlinear post-stall aerodynamics, RK4 integrator, trim/autopilot logic. Also home of the RL weather layer (`weather.rs`: seeded turbulence/precipitation/visibility/updraft, curriculum, observation + reward helpers). |
+| `flight_gd/`    | `godot-rust` GDExtension crate exposing the physics as native Godot nodes (`FlightSimNode`, `WindTunnelNode`, `WeatherSystem`).        |
 | `godot/`        | Godot 4.7 project — scenes, the procedural drone model, camera, HUD, sky/terrain, and the smoke MultiMesh renderer.     |
 | `aircraft.toml` | Aircraft geometry / mass / aero coefficients consumed by `flight_core`.                                                |
+| `docs/`         | Manuals for RL weather integration, wind tunnel, and platform setup.                                                   |
 
 ## Features
 
@@ -60,6 +67,14 @@ physics run in Rust while Godot handles all assets and visualization.
   to actual AoA)
 - Interactive wind-tunnel: pitch/roll/yaw the fixed aircraft, tune wind,
   orbit camera, read the computed forces
+- **RL-ready weather system**: seed-reproducible Dryden turbulence (gust RMS
+  driven by an Ornstein–Uhlenbeck envelope at `gust_frequency`), rainfall &
+  precipitation types (rain/snow/hail), degraded visibility, updrafts/downdrafts
+  and power-law wind shear — observed as a flat 12-channel vector, shaped into
+  reward penalties, paced through a 4-phase curriculum
+  (clear → turbulence → rain → storm), with deterministic/stochastic recipes
+  and extreme-weather termination, all exposed to Godot as the `WeatherSystem`
+  node (see [docs/rl_weather_guide.md](docs/rl_weather_guide.md))
 
 ## Requirements
 
