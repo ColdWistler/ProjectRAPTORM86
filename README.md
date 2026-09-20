@@ -82,8 +82,8 @@ physics run in Rust while Godot handles all assets and visualization.
   flaps, engine-out, procedural terrain — with a live weather readout
 - **Visible weather**: a `WeatherVisualizer` node renders the weather you fly
   through — rain/snow/hail GPU particles, visibility fog, a wind arrow +
-  readout, updraft/downdraft arrow, storm dimming + cloud darkening, and
-  turbulence camera shake (all active while "Weather enabled" is on)
+  readout, updraft/downdraft arrow, and storm dimming + cloud darkening (all
+  active while "Weather enabled" is on)
 
 ## Requirements
 

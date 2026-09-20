@@ -224,9 +224,9 @@ Full runnable wiring also lives in `godot/scripts/rl_weather_example.gd`, and
 For the flight sim, the weather is also *visible*: a `WeatherVisualizer` node
 ships with the scene and renders rain / snow / hail GPU particles, depth fog
 from the visibility distance, a world-space wind arrow + numeric readout, an
-updraft/downdraft arrow, storm dimming of the sky, and cloud darkening —
-plus turbulence camera shake in `flight_sim.gd`. Everything activates the
-moment you enable **Weather enabled** from the in-flight [F1] menu.
+updraft/downdraft arrow, and storm dimming of the sky + cloud darkening.
+Everything activates the moment you enable **Weather enabled** from the
+in-flight [F1] menu.
 
 ---
 
