@@ -75,6 +75,11 @@ physics run in Rust while Godot handles all assets and visualization.
   (clear → turbulence → rain → storm), with deterministic/stochastic recipes
   and extreme-weather termination, all exposed to Godot as the `WeatherSystem`
   node (see [docs/rl_weather_guide.md](docs/rl_weather_guide.md))
+- **In-flight "Weather & Features" menu** (`F1`, or the button under the
+  aircraft-swap): toggle the weather layer on/off, pick preset / severity /
+  seed / deterministic vs stochastic re-roll cadence, trigger evasive
+  maneuvers, and flip sim features — avionics path, auto-level, aircraft,
+  flaps, engine-out, procedural terrain — with a live weather readout
 
 ## Requirements
 
