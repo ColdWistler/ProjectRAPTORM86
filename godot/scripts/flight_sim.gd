@@ -105,6 +105,7 @@ var cam_yaw := 0.0
 var cam_pitch := 0.3
 var cam_dist := 40.0
 var cam_center := Vector3.ZERO
+var _shake_time := 0.0
 
 @onready var _physics = $Physics
 @onready var _drone: Node3D = $DroneView
@@ -425,6 +426,8 @@ func _physics_process(delta: float) -> void:
 		return
 
 	_handle_input(delta)
+
+	_shake_time += delta
 
 	if avionics_mode:
 		_physics.set_avionics_command(aileron, elevator, rudder, throttle)
@@ -762,6 +765,24 @@ func _chase_camera() -> void:
 		var tf: Transform3D = _drone.global_transform
 		_camera.global_position = tf * Vector3(-32, 7.0, 0)
 		_camera.look_at(tf.origin, Vector3.UP)
+	_apply_weather_shake()
+
+## Turbulence camera shake: translation + roll jitter scaled by the weather
+## gust RMS so severe conditions read visually (menu "Weather enabled" on).
+func _apply_weather_shake() -> void:
+	if _weather_node == null or not weather_enabled:
+		return
+	var gust := float(_weather_node.get_gust_rms())
+	var amp := clampf(gust * 0.12, 0.0, 0.55)
+	if amp < 0.01:
+		return
+	var t := _shake_time
+	_camera.global_position += Vector3(
+		sin(t * 23.7) * 0.55 + sin(t * 41.3) * 0.45,
+		sin(t * 29.1) * 0.55 + sin(t * 47.9) * 0.45,
+		sin(t * 19.3) * 0.6 + sin(t * 37.7) * 0.4
+	) * amp
+	_camera.rotate_object_local(Vector3.FORWARD, clampf(gust * 0.018, 0.0, 0.08) * sin(t * 31.1))
 
 ## Build the avionics component-visualization panel (right side of the HUD
 ## canvas): a live readout of every component on the bus plus a fault-injection

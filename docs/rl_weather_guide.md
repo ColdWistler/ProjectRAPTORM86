@@ -221,6 +221,13 @@ Full runnable wiring also lives in `godot/scripts/rl_weather_example.gd`, and
 `flight_sim.gd` automatically drives the drone through a node named
 `WeatherSystem` when one is present.
 
+For the flight sim, the weather is also *visible*: a `WeatherVisualizer` node
+ships with the scene and renders rain / snow / hail GPU particles, depth fog
+from the visibility distance, a world-space wind arrow + numeric readout, an
+updraft/downdraft arrow, storm dimming of the sky, and cloud darkening —
+plus turbulence camera shake in `flight_sim.gd`. Everything activates the
+moment you enable **Weather enabled** from the in-flight [F1] menu.
+
 ---
 
 ## 8. Presets & configuration cheat-sheet
