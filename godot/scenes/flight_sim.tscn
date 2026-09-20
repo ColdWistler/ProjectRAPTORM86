@@ -81,6 +81,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5022564, 0.36547887, 0)
 
 [node name="Physics" type="FlightSimNode" parent="." unique_id=172234283]
 
+[node name="WeatherSystem" type="WeatherSystem" parent="."]
+
 [node name="Camera" type="Camera3D" parent="." unique_id=1836501567]
 transform = Transform3D(-0.016718686, 0.14548172, -0.98921967, 0.0024584185, 0.9893609, 0.14546095, 0.99985725, 0, -0.016898468, -0.2898935, 0.7443297, 0.013963461)
 current = true

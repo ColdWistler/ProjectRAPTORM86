@@ -18,9 +18,19 @@ var throttle := 0.0
 var engine_out := 0  # 0 = both, 1 = left out, 2 = right out
 var auto_level := false
 
+## Weather plugin state, driven by the [F1] "Weather & Features" menu. The
+## WeatherSystem node stays alive in the scene; `weather_enabled` decides
+## whether flight_sim advances it and flies the aircraft through its wind.
+var _weather_node = null
+var weather_enabled := false
+var _weather_menu = null
+var _weather_toggle_btn = null
+var _weather_menu_visible := false
+
 const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 const _HudScript := preload("res://scripts/hud.gd")
+const _WeatherMenuScript := preload("res://scripts/weather_menu.gd")
 const _TerrainGeneratorScript := preload("res://scripts/terrain/terrain_generator.gd")
 const _TerrainSettingsMeta := "raptor_terrain_settings"
 const _TerrainSettingKeys := [
@@ -121,6 +131,14 @@ func _ready() -> void:
 		throttle = clampf(tr.y, 0.0, 1.0)
 		_apply_terrain_settings()
 		_apply_wind_settings()
+
+		# Weather plugin: find the scene's WeatherSystem node, start it, and
+		# build the [F1] weather & features menu from it.
+		_weather_node = _find_weather_system()
+		if _weather_node != null and not _weather_node.is_ready():
+			_weather_node.start()
+		_setup_weather_menu()
+
 		if procedural_terrain:
 			_setup_procedural_terrain()
 		else:
@@ -415,21 +433,20 @@ func _physics_process(delta: float) -> void:
 	_physics.set_elevator_trim(elevator_trim)
 	_physics.set_throttle_split(float(engine_out_side()))
 
-	# Optional WeatherSystem plugin: if a node named "WeatherSystem" is present
-	# (autoload, or a child of this scene), advance it and fly the aircraft
-	# through its NED wind field instead of the internal wind model. The wind
-	# vector is world-Y-up `(north, -down, east)` → NED `(x, z, -y)`.
-	var _weather := _find_weather_system()
-	if _weather != null and _physics.is_ready():
+	# Weather plugin: when enabled (via the [F1] menu) advance the scene's
+	# WeatherSystem node and fly the aircraft through its NED wind field
+	# instead of the internal wind model. Wind is world-Y-up
+	# `(north, -down, east)` → NED `(x, z, -y)`.
+	if _weather_node != null and weather_enabled and _physics.is_ready():
 		var speed := 60.0
 		var alt := 800.0
 		if _telemetry.size() >= 25:
 			alt = _telemetry[0]
 			speed = _telemetry[2]
-		_weather.set_reference_altitude(alt)
-		_weather.set_airspeed(speed)
-		_weather.step(delta)
-		var w: Vector3 = _weather.get_wind_vector()
+		_weather_node.set_reference_altitude(alt)
+		_weather_node.set_airspeed(speed)
+		_weather_node.step(delta)
+		var w: Vector3 = _weather_node.get_wind_vector()
 		_physics.set_external_wind(true, w.x, w.z, -w.y)
 	else:
 		_physics.set_external_wind(false, 0.0, 0.0, 0.0)
@@ -447,6 +464,10 @@ func _physics_process(delta: float) -> void:
 	_telemetry = _physics.telemetry()
 	_hud.update_telemetry(_telemetry, _avionics_snap, avionics_mode, auto_level, engine_out)
 
+	# Live-sync the [F1] weather & features menu when it is open.
+	if _weather_menu != null and _weather_menu.visible:
+		_weather_menu.refresh()
+
 	# The avionics panel only needs a lower refresh rate.
 	_hud_timer += delta
 	if _hud_timer >= 0.2:
@@ -461,6 +482,98 @@ func _find_weather_system() -> Node:
 	if child != null:
 		return child
 	return get_node_or_null("/root/WeatherSystem")
+
+## Build the [F1] "Weather & Features" menu into the HUD canvas: the control
+## panel itself plus the small toggle button stacked under the aircraft-swap
+## button. The panel drives the WeatherSystem node and this script.
+func _setup_weather_menu() -> void:
+	var hud_layer := get_node_or_null("HUDCanvas")
+	if hud_layer == null:
+		return
+	_weather_menu = _WeatherMenuScript.new()
+	_weather_menu.name = "FeatureMenu"
+	hud_layer.add_child(_weather_menu)
+	_weather_menu.setup(_weather_node, self)
+
+	_weather_toggle_btn = Button.new()
+	_weather_toggle_btn.name = "WeatherFeatureBtn"
+	_weather_toggle_btn.text = "Weather & Features  [F1]"
+	_weather_toggle_btn.position = Vector2(12, 656)
+	_weather_toggle_btn.custom_minimum_size = Vector2(180, 28)
+	_weather_toggle_btn.add_theme_font_size_override("font_size", 12)
+	var btn_style := StyleBoxFlat.new()
+	btn_style.bg_color = Color(0.04, 0.07, 0.11, 0.85)
+	btn_style.set_corner_radius_all(6)
+	btn_style.set_content_margin_all(6)
+	_weather_toggle_btn.add_theme_stylebox_override("normal", btn_style)
+	var btn_hover := btn_style.duplicate()
+	btn_hover.bg_color = Color(0.10, 0.18, 0.28, 0.9)
+	_weather_toggle_btn.add_theme_stylebox_override("hover", btn_hover)
+	_weather_toggle_btn.pressed.connect(_toggle_weather_menu)
+	hud_layer.add_child(_weather_toggle_btn)
+
+## Open/close the [F1] weather & features menu.
+func _toggle_weather_menu() -> void:
+	_weather_menu_visible = not _weather_menu_visible
+	if _weather_menu != null:
+		_weather_menu.visible = _weather_menu_visible
+
+## The WeatherSystem menu calls this to switch the external-wind feed on/off.
+## When off the sim flies through its self-contained internal wind model.
+func set_weather_enabled(on: bool) -> void:
+	weather_enabled = on
+	if not on:
+		_physics.set_external_wind(false, 0.0, 0.0, 0.0)
+
+## Menu / keyboard shared toggle for the auto-level autopilot (keeps the Rust
+## flight controller in sync with the HUD state).
+func set_auto_level(on: bool) -> void:
+	auto_level = on
+	_physics.set_auto_level(on)
+
+## Swap aircraft by name (menu aircraft dropdown). Re-trims like the [M] key.
+func swap_aircraft(name: String) -> void:
+	var idx := AIRCRAFT_NAMES.find(name)
+	if idx < 0:
+		idx = 0
+	if idx == _aircraft_index:
+		return
+	_aircraft_index = idx
+	_load_aircraft(AIRCRAFT_NAMES[_aircraft_index])
+	_update_aircraft_btn_text()
+
+## Current aircraft name (menu sync).
+func current_aircraft() -> String:
+	return AIRCRAFT_NAMES[_aircraft_index]
+
+## Menu / keyboard shared toggle for the generated world vs the imported GLB.
+func set_procedural_terrain(on: bool) -> void:
+	if procedural_terrain == on:
+		return
+	procedural_terrain = on
+	if procedural_terrain:
+		_setup_procedural_terrain()
+	else:
+		_teardown_procedural_terrain()
+	_save_terrain_settings()
+
+## Re-roll the generated world (menu button, same as the [N] key).
+func regenerate_terrain() -> void:
+	_regenerate_procedural_terrain()
+
+## Re-trim to the active mode's cruise state (menu button, same as the [R] key).
+func reset_flight() -> void:
+	var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
+	var tr: Vector2 = _physics.trim(trm.x, trm.y)
+	elevator = 0.0
+	elevator_trim = tr.x
+	aileron = 0.0
+	rudder = 0.0
+	flaps_deg = 0.0
+	throttle = clampf(tr.y, 0.0, 1.0)
+	engine_out = 0
+	auto_level = false
+	_physics.set_auto_level(false)
 
 ## Poll keyboard/mouse inputs into the elevator/aileron/rudder/flap/trim/
 ## throttle state, plus camera and aircraft-swap handling. Control stick
@@ -532,6 +645,10 @@ func _handle_input(delta: float) -> void:
 	# Avionics component panel: P
 	if _just_pressed(KEY_P) and _panel:
 		_panel.visible = not _panel.visible
+
+	# Weather & features menu: F1
+	if _just_pressed(KEY_F1):
+		_toggle_weather_menu()
 
 	# Camera view toggle: V
 	if _just_pressed(KEY_V):
