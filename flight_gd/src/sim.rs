@@ -26,7 +26,14 @@ use godot::prelude::*;
 /// contain aircraft config TOML files. When launched via `godot --path godot`
 /// the CWD is `godot/`, so the workspace root is two levels up. When run from
 /// the editor the CWD is the project root, so `..` and `../..` cover that too.
-const CONFIG_PATHS: [&str; 6] = ["", "..", "../..", "../../..", "../../../..", "../../../../.."];
+const CONFIG_PATHS: [&str; 6] = [
+    "",
+    "..",
+    "../..",
+    "../../..",
+    "../../../..",
+    "../../../../..",
+];
 /// Max elevator/aileron/rudder deflection (radians).
 const MAX_ELEVATOR: f64 = 0.35;
 const MAX_AILERON: f64 = 0.35;
@@ -76,6 +83,8 @@ fn wind_config_from_env() -> WindConfig {
         wind_shear: shear,
         turbulence,
         turbulence_scale: 533.0,
+        turbulence_scale_lat: 0.0,
+        turbulence_scale_vert: 0.0,
         seed: 0x9E37_79B9_7F4A_7C15,
     }
 }
@@ -119,6 +128,10 @@ struct FlightSimNode {
     terrain: Terrain,
     /// Master switch; the airport runway stays flat while the rest bumps.
     terrain_enabled: bool,
+    /// External wind override (NED m/s) set by the WeatherSystem plugin via
+    /// `set_external_wind`. When present it replaces the self-contained
+    /// `WindEnvironment` so the aircraft visibly flies through the weather.
+    external_wind: Option<NVec3<f64>>,
     base: Base<Node3D>,
 }
 
@@ -134,7 +147,10 @@ impl FlightSimNode {
         } else {
             "aircraft.toml".to_string()
         };
-        godot_warn!("FlightSimNode: searching for '{file_name}' in {:?}", CONFIG_PATHS);
+        godot_warn!(
+            "FlightSimNode: searching for '{file_name}' in {:?}",
+            CONFIG_PATHS
+        );
         let path = match resolve_config_in(&file_name) {
             Some(p) => {
                 godot_warn!("FlightSimNode: found '{file_name}' at '{p}'");
@@ -201,16 +217,29 @@ impl FlightSimNode {
             let alt_error = self.target_alt - state.altitude();
             let target_climb_pitch = (alt_error * 0.003).clamp(-0.12, 0.12);
             let pitch_error = target_climb_pitch - pitch;
-            let pitch_cmd = (0.6 * pitch_error - 0.45 * state.q).clamp(-MAX_ELEVATOR * 0.6, MAX_ELEVATOR * 0.6);
+            let pitch_cmd =
+                (0.6 * pitch_error - 0.45 * state.q).clamp(-MAX_ELEVATOR * 0.6, MAX_ELEVATOR * 0.6);
             self.elevator = pitch_cmd;
         }
 
         // Total elevator = stick + trim, clamped like the legacy visualizer.
-        let total_elevator = (self.elevator + self.elevator_trim).clamp(-MAX_ELEVATOR, MAX_ELEVATOR);
+        let total_elevator =
+            (self.elevator + self.elevator_trim).clamp(-MAX_ELEVATOR, MAX_ELEVATOR);
 
         let vt_air = sim.state.airspeed();
-        let wind_earth = wind.total_wind(&sim.state, vt_air, dt);
-        self.last_wind = wind_earth;
+        // External wind (set by the WeatherSystem node) supersedes the
+        // self-contained wind field so the aircraft flies through the weather.
+        let wind_earth = match self.external_wind {
+            Some(w) => {
+                self.last_wind = w;
+                w
+            }
+            None => {
+                let w = wind.total_wind(&sim.state, vt_air, dt);
+                self.last_wind = w;
+                w
+            }
+        };
         // Apply the asymmetric engine split (engine-out) to the active config.
         sim.config.throttle_split = self.throttle_split;
 
@@ -227,7 +256,8 @@ impl FlightSimNode {
             if let Some(av) = self.avionics.as_mut() {
                 let tas = sim.state.true_airspeed(&wind_earth);
                 let q_dynamic = Atmosphere::at_altitude(sim.state.altitude()).dynamic_pressure(tas);
-                av.bus_mut().write_true_state(&sim.state, &wind_earth, q_dynamic);
+                av.bus_mut()
+                    .write_true_state(&sim.state, &wind_earth, q_dynamic);
                 av.step();
                 let (elev, ail, rud, thr) = av.bus().read_actuator_outputs();
                 sim.step_6dof(
@@ -314,7 +344,14 @@ impl FlightSimNode {
     /// Replace all control inputs in one call (angles in radians, flaps in °).
     /// This bypasses the avionics stack and drives the surfaces directly.
     #[func]
-    fn set_controls(&mut self, elevator: f64, aileron: f64, rudder: f64, throttle: f64, flaps_deg: f64) {
+    fn set_controls(
+        &mut self,
+        elevator: f64,
+        aileron: f64,
+        rudder: f64,
+        throttle: f64,
+        flaps_deg: f64,
+    ) {
         self.elevator = elevator.clamp(-MAX_ELEVATOR, MAX_ELEVATOR);
         self.aileron = aileron.clamp(-MAX_AILERON, MAX_AILERON);
         self.rudder = rudder.clamp(-MAX_RUDDER, MAX_RUDDER);
@@ -593,6 +630,26 @@ impl FlightSimNode {
         *wind = WindEnvironment::new(cfg);
     }
 
+    /// Route the aircraft through an externally managed wind field (NED m/s)
+    /// instead of the self-contained `WindEnvironment`. The WeatherSystem node
+    /// calls this each physics frame: `north`/`east`/`down` are the NED
+    /// components of `get_wind_vector()` — feed `(v.x, v.z, -v.y)` for a world
+    /// Y-up vector. `enabled = false` restores the internal wind model.
+    #[func]
+    fn set_external_wind(&mut self, enabled: bool, north: f64, east: f64, down: f64) {
+        self.external_wind = if enabled {
+            Some(NVec3::new(north, east, down))
+        } else {
+            None
+        };
+    }
+
+    /// True while the sim is flying through an externally set wind field.
+    #[func]
+    fn is_external_wind_enabled(&self) -> bool {
+        self.external_wind.is_some()
+    }
+
     /// Aircraft transform in Godot world space (Y-up). The model must be built
     /// with its nose toward local **+X**, top toward +Y, right wing toward +Z.
     #[func]
@@ -634,7 +691,10 @@ impl FlightSimNode {
         let tas_ms = state.true_airspeed(&self.last_wind);
         // Horizontal ground speed (NED north/east), not total inertial speed.
         let body_vel = NVec3::new(state.u, state.v, state.w);
-        let earth_vel = state.rotation_earth_to_body().inverse().transform_vector(&body_vel);
+        let earth_vel = state
+            .rotation_earth_to_body()
+            .inverse()
+            .transform_vector(&body_vel);
         let gs_ms = (earth_vel.x * earth_vel.x + earth_vel.y * earth_vel.y).sqrt();
         let atm = Atmosphere::at_altitude(alt_m);
         let ias_kts = atm.calibrated_airspeed(tas_ms) * 1.94384;

@@ -120,6 +120,14 @@ pub struct WindConfig {
     /// Turbulence integral scale (wavelength) in metres. Governs how quickly
     /// gust velocity decorrelates with distance travelled through the air.
     pub turbulence_scale: f64,
+    /// Lateral (v-axis) turbulence integral scale (m). `0.0` (default) shares
+    /// the longitudinal scale, per the standard exhausted Dryden shape.
+    /// Set explicitly by the weather layer to satisfy the RL observation
+    /// `length_scales` (longitudinal, lateral, vertical) tuple.
+    pub turbulence_scale_lat: f64,
+    /// Vertical (w-axis) turbulence integral scale (m). `0.0` (default) uses
+    /// half the longitudinal scale (the standard Dryden breakpoint ratio).
+    pub turbulence_scale_vert: f64,
     /// Seed for the reproducible turbulence PRNG.
     pub seed: u64,
 }
@@ -133,6 +141,8 @@ impl Default for WindConfig {
             wind_shear: false,
             turbulence: TurbulenceIntensity::Light,
             turbulence_scale: DRYDEN_LOW_ALTITUDE_SCALE,
+            turbulence_scale_lat: 0.0,
+            turbulence_scale_vert: 0.0,
             seed: SEED_MIX_A,
         }
     }
@@ -202,6 +212,7 @@ impl GustState {
 }
 
 /// The atmospheric wind field evaluated at a point in space and time.
+#[derive(Debug)]
 pub struct WindEnvironment {
     pub config: WindConfig,
     gust_u: GustState,
@@ -261,16 +272,36 @@ impl WindEnvironment {
     pub fn turbulence(&mut self, vt_air: f64, dt: f64) -> Vector3<f64> {
         let sigma_u = self.config.turbulence.sigma_u();
         let l = self.config.turbulence_scale.max(DRYDEN_SCALE_MIN);
+        // Per-axis integral scales: fall back to the standard Dryden ratios
+        // when the caller left them at 0 (lateral == longitudinal, vertical
+        // == half longitudinal).
+        let l_lat = if self.config.turbulence_scale_lat > 0.0 {
+            self.config.turbulence_scale_lat
+        } else {
+            l
+        };
+        let l_vert = if self.config.turbulence_scale_vert > 0.0 {
+            self.config.turbulence_scale_vert
+        } else {
+            l * DRYDEN_L_W_RATIO
+        };
         // Dryden scaling of the lateral/vertical RMS from the longitudinal one.
         let sigma_v = sigma_u;
         let sigma_w = sigma_u.mul_add(DRYDEN_W_RATIO, 0.0);
         let u_g = self.gust_u.step(vt_air, sigma_u, l, dt);
-        let v_g = self.gust_v.step(vt_air, sigma_v, l, dt);
-        let w_g = self.gust_w.step(vt_air, sigma_w, l * DRYDEN_L_W_RATIO, dt);
+        let v_g = self.gust_v.step(vt_air, sigma_v, l_lat, dt);
+        let w_g = self.gust_w.step(vt_air, sigma_w, l_vert, dt);
         // Wind is expressed in Earth NED; the gust axes were generated in the
         // NED basis (an approximation of the true body-aligned Dryden frame,
         // which for a near-level cruise is a small-angle difference).
         Vector3::new(u_g, v_g, w_g)
+    }
+
+    /// Replace the turbulence RMS (`sigma_u`, m/s) live, keeping the PRNG and
+    /// gust filter state. The weather layer uses this to ramp gust intensity
+    /// smoothly between severity levels without losing seed reproducibility.
+    pub fn set_sigma(&mut self, sigma_u: f64) {
+        self.config.turbulence = TurbulenceIntensity::Custom(sigma_u.max(0.0));
     }
 
     /// Total wind (steady + turbulence) in the Earth NED frame.

@@ -10,7 +10,10 @@
 //!   (Farama Foundation, gymnasium v1.0+ specification).
 
 use crate::integrator::step;
-use crate::{ControlInputs, Simulator, WindConfig, WindEnvironment};
+use crate::{
+    ControlInputs, Simulator, WeatherConfig, WeatherObservation, WeatherSystem, WindConfig,
+    WindEnvironment, WEATHER_OBS_DIM,
+};
 use nalgebra::Vector3;
 
 #[cfg(feature = "full-avionics")]
@@ -82,8 +85,16 @@ pub struct EnvConfig {
     pub dt: f64,
 
     /// Optional atmospheric wind configuration. `None` (default) disables
-    /// wind entirely (still air), preserving prior behaviour.
+    /// wind entirely (still air), preserving prior behaviour. Superseded by
+    /// `weather_config` when both are set (the weather system owns its own
+    /// embedded wind field).
     pub wind_config: Option<WindConfig>,
+
+    /// Optional RL weather system configuration (turbulence scene management,
+    /// precipitation/visibility/updraft, seeded reproducibility, curriculum).
+    /// When set, [`Environment::step`] drives the aircraft through the
+    /// weather-system wind and adds its penalty terms to the reward.
+    pub weather_config: Option<WeatherConfig>,
 
     /// Per-step survival bonus.
     pub w_time: f64,
@@ -115,6 +126,7 @@ impl Default for EnvConfig {
             max_steps: 2000,
             dt: 1.0 / 30.0,
             wind_config: None,
+            weather_config: None,
             w_time: 1.0,
             w_alt: 2.0,
             scale_alt: 50.0,
@@ -133,6 +145,9 @@ pub struct Environment {
     pub config: EnvConfig,
     step_count: usize,
     wind: Option<WindEnvironment>,
+    /// RL weather system; when present it supplies the wind the physics flies
+    /// through and its penalties are folded into the reward.
+    pub weather: Option<WeatherSystem>,
 }
 
 impl Environment {
@@ -143,14 +158,19 @@ impl Environment {
     }
 
     /// Create an environment with a custom [`EnvConfig`].
-    pub fn with_config(config_path: &str, config: EnvConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_config(
+        config_path: &str,
+        config: EnvConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let sim = Simulator::new(config_path)?;
         let wind = config.wind_config.clone().map(WindEnvironment::new);
+        let weather = config.weather_config.clone().map(WeatherSystem::new);
         Ok(Self {
             sim,
             config,
             step_count: 0,
             wind,
+            weather,
         })
     }
 
@@ -160,6 +180,9 @@ impl Environment {
         let prev_steps = self.step_count;
         self.sim.reset();
         self.step_count = 0;
+        if let Some(w) = &mut self.weather {
+            w.reset();
+        }
         (self.sim.state.to_observation_array(), prev_steps)
     }
 
@@ -181,8 +204,15 @@ impl Environment {
         let flaps = action.flaps.clamp(0.0, 0.7);
 
         // Compute the total wind (steady + turbulence) in the Earth NED frame.
+        // The weather system supersedes the plain wind config when present.
         let mut wind_vec: Option<Vector3<f64>> = None;
-        if let Some(wind_env) = &mut self.wind {
+        let mut weather_penalty = 0.0;
+        if let Some(wx) = &mut self.weather {
+            let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
+            let wv = wx.step(self.sim.state.altitude(), vt_air, self.config.dt);
+            wind_vec = Some(wv);
+            weather_penalty = wx.reward_penalty_total();
+        } else if let Some(wind_env) = &mut self.wind {
             let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
             wind_vec = Some(wind_env.total_wind(&self.sim.state, vt_air, self.config.dt));
         }
@@ -206,10 +236,18 @@ impl Environment {
         self.step_count += 1;
         let observation = self.sim.state.to_observation_array();
 
-        let reward = self.compute_reward(alt_before);
+        // The shaped flight reward plus the weather penalties (≤ 0). Crash /
+        // extreme-weather termination penalties are applied by the caller via
+        // `crash_penalty()` / `weather_crash_penalty()`, as before.
+        let reward = self.compute_reward(alt_before) + weather_penalty;
 
-        // Termination: ground impact.
-        let terminated = self.sim.state.altitude() <= self.config.ground_altitude;
+        // Termination: ground impact, plus extreme-weather termination.
+        let terminated = self.sim.state.altitude() <= self.config.ground_altitude
+            || self
+                .weather
+                .as_ref()
+                .map(|wx| wx.is_terminated())
+                .unwrap_or(false);
         // Truncation: step budget exhausted.
         let truncated = self.step_count >= self.config.max_steps;
 
@@ -235,6 +273,48 @@ impl Environment {
     /// Current step index within the episode (0-based).
     pub fn step_count(&self) -> usize {
         self.step_count
+    }
+
+    // -----------------------------------------------------------------
+    // RL weather integration
+    // -----------------------------------------------------------------
+
+    /// The structured weather observation of the *current* step, or `None`
+    /// when no weather system is configured.
+    pub fn weather_observation(&self) -> Option<WeatherObservation> {
+        self.weather.as_ref().map(|wx| wx.observation())
+    }
+
+    /// The flat `[WEATHER_OBS_DIM]` weather observation channel vector.
+    pub fn weather_observation_array(&self) -> Option<[f64; WEATHER_OBS_DIM]> {
+        self.weather.as_ref().map(|wx| wx.observation_array())
+    }
+
+    /// Sum of weather penalty terms for the most recent step (≤ 0).
+    pub fn weather_penalty(&self) -> f64 {
+        self.weather
+            .as_ref()
+            .map(|wx| wx.reward_penalty_total())
+            .unwrap_or(0.0)
+    }
+
+    /// Weather-termination bonus a caller adds when `EnvStep::terminated`
+    /// fired from extreme weather.
+    pub fn weather_crash_penalty(&self) -> f64 {
+        self.weather
+            .as_ref()
+            .map(|wx| wx.weather_crash_penalty())
+            .unwrap_or(0.0)
+    }
+
+    /// Concatenated `[flight (12) ‖ weather (DIM)]` observation — convenient
+    /// when the policy consumes one flat vector.
+    pub fn full_observation(&self) -> Vec<f64> {
+        let mut out = self.sim.state.to_observation_array().to_vec();
+        if let Some(arr) = self.weather_observation_array() {
+            out.extend_from_slice(&arr);
+        }
+        out
     }
 }
 
@@ -332,6 +412,9 @@ pub struct AvionicsEnvironment {
     pub config: EnvConfig,
     step_count: usize,
     wind: Option<WindEnvironment>,
+    /// RL weather system; when present it supplies the wind the physics flies
+    /// through and its penalties are folded into the reward.
+    pub weather: Option<WeatherSystem>,
 }
 
 #[cfg(feature = "full-avionics")]
@@ -350,6 +433,7 @@ impl AvionicsEnvironment {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let sim = Simulator::new(config_path)?;
         let wind = config.wind_config.clone().map(WindEnvironment::new);
+        let weather = config.weather_config.clone().map(WeatherSystem::new);
         let mut avionics = Self::make_avionics(config.dt);
         avionics.init();
         Ok(Self {
@@ -358,6 +442,7 @@ impl AvionicsEnvironment {
             config,
             step_count: 0,
             wind,
+            weather,
         })
     }
 
@@ -374,6 +459,9 @@ impl AvionicsEnvironment {
         self.avionics.reset();
         self.step_count = 0;
         self.avionics.bus_mut().fc_fault_flags = FaultFlags::default();
+        if let Some(wx) = &mut self.weather {
+            wx.reset();
+        }
         (self.observation(), prev_steps)
     }
 
@@ -388,11 +476,15 @@ impl AvionicsEnvironment {
         bus.cmd_throttle = action.throttle.clamp(0.0, 1.0);
 
         // 2. Compute wind + dynamic pressure for the true-state write.
-        let mut wind_vec = Vector3::zeros();
-        if let Some(wind_env) = &mut self.wind {
+        let wind_vec = if let Some(wx) = &mut self.weather {
             let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
-            wind_vec = wind_env.total_wind(&self.sim.state, vt_air, self.config.dt);
-        }
+            wx.step(self.sim.state.altitude(), vt_air, self.config.dt)
+        } else if let Some(wind_env) = &mut self.wind {
+            let vt_air = self.sim.state.true_airspeed(&Vector3::zeros());
+            wind_env.total_wind(&self.sim.state, vt_air, self.config.dt)
+        } else {
+            Vector3::zeros()
+        };
         let tas = self.sim.state.true_airspeed(&wind_vec);
         let q_dynamic = Atmosphere::at_altitude(self.sim.state.altitude()).dynamic_pressure(tas);
 
@@ -415,7 +507,7 @@ impl AvionicsEnvironment {
             &mut self.sim.state,
             &self.sim.config,
             controls,
-            self.wind.as_ref().map(|_| &wind_vec),
+            Some(&wind_vec),
             self.config.dt,
             None,
         );
@@ -423,8 +515,18 @@ impl AvionicsEnvironment {
         // 5. Bookkeeping, observation, reward, termination.
         self.step_count += 1;
         let observation = self.observation();
-        let reward = shaped_reward(&self.sim.state, &self.config);
-        let terminated = self.sim.state.altitude() <= self.config.ground_altitude;
+        let weather_penalty = self
+            .weather
+            .as_ref()
+            .map(|wx| wx.reward_penalty_total())
+            .unwrap_or(0.0);
+        let reward = shaped_reward(&self.sim.state, &self.config) + weather_penalty;
+        let terminated = self.sim.state.altitude() <= self.config.ground_altitude
+            || self
+                .weather
+                .as_ref()
+                .map(|wx| wx.is_terminated())
+                .unwrap_or(false);
         let truncated = self.step_count >= self.config.max_steps;
 
         AvionicsEnvStep {
@@ -433,6 +535,19 @@ impl AvionicsEnvironment {
             terminated,
             truncated,
         }
+    }
+
+    /// The flat `[WEATHER_OBS_DIM]` weather observation channel vector.
+    pub fn weather_observation_array(&self) -> Option<[f64; WEATHER_OBS_DIM]> {
+        self.weather.as_ref().map(|wx| wx.observation_array())
+    }
+
+    /// Sum of weather penalty terms for the most recent step (≤ 0).
+    pub fn weather_penalty(&self) -> f64 {
+        self.weather
+            .as_ref()
+            .map(|wx| wx.reward_penalty_total())
+            .unwrap_or(0.0)
     }
 
     /// Build the current observation array from the noisy bus sensor outputs.
@@ -522,6 +637,130 @@ mod tests {
     }
 
     #[test]
+    fn weather_observation_and_penalties_fold_into_env() {
+        use crate::weather::{TurbulenceLevel, WeatherPreset};
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        let mut env = Environment::with_config(
+            path,
+            EnvConfig {
+                dt: 0.05,
+                max_steps: 2_000,
+                weather_config: Some(
+                    WeatherConfig::from_preset(WeatherPreset::Rain, 77).with_deterministic(true),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect("aircraft.toml should load");
+        env.reset();
+
+        let mut total = 0.0;
+        for _ in 0..200 {
+            let r = env.step(ControlAction::neutral());
+            total += r.reward;
+            let obs = env
+                .weather_observation_array()
+                .expect("weather obs should be available");
+            assert_eq!(obs.len(), WEATHER_OBS_DIM);
+            // Rain scene: rain channel up, precipitation one-hot on.
+            assert!(obs[4] > 0.3, "rain intensity expected, got {}", obs[4]);
+            assert!(obs[8] > 0.99, "rain one-hot expected");
+            // A storm scene must apply a strictly negative weather penalty.
+            assert!(env.weather_penalty() < 0.0, "weather penalty must be < 0");
+        }
+        // The weather penalties drag cumulative reward below what clear-air
+        // no-op flight earns (total > 0 in clear weather).
+        assert!(
+            total < 0.0,
+            "rain must degrade the episode reward, got {total}"
+        );
+        // Structured observation keeps the raw convenience fields.
+        let wo = env.weather_observation().expect("struct observation");
+        assert_eq!(
+            wo.turbulence_level,
+            TurbulenceLevel::Moderate.index(),
+            "rain preset flies moderate turbulence"
+        );
+        assert!(wo.visibility < 20_000.0);
+    }
+
+    #[test]
+    fn weather_reset_restores_same_seeded_episode() {
+        use crate::weather::WeatherPreset;
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        let make = || {
+            Environment::with_config(
+                path,
+                EnvConfig {
+                    dt: 0.05,
+                    max_steps: 2_000,
+                    weather_config: Some(
+                        WeatherConfig::from_preset(WeatherPreset::Storm, 42)
+                            .with_deterministic(true),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("aircraft.toml should load")
+        };
+        let mut a = make();
+        let mut b = make();
+        a.reset();
+        b.reset();
+        let mut a_trace = Vec::new();
+        let mut b_trace = Vec::new();
+        for _ in 0..100 {
+            a.step(ControlAction::neutral());
+            b.step(ControlAction::neutral());
+            a_trace.push(a.weather_observation_array().unwrap());
+            b_trace.push(b.weather_observation_array().unwrap());
+        }
+        for (wa, wb) in a_trace.iter().zip(b_trace.iter()) {
+            assert_eq!(wa, wb, "same seed must reproduce the weather trace");
+        }
+    }
+
+    #[test]
+    fn deterministic_weather_never_auto_changes_scene() {
+        let path = if std::path::Path::new("../aircraft.toml").exists() {
+            "../aircraft.toml"
+        } else {
+            "aircraft.toml"
+        };
+        let mut env = Environment::with_config(
+            path,
+            EnvConfig {
+                dt: 0.05,
+                max_steps: 2_000,
+                weather_config: Some(
+                    WeatherConfig::from_preset(crate::weather::WeatherPreset::Storm, 3)
+                        .with_deterministic(true)
+                        .with_auto_change(1.0),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect("aircraft.toml should load");
+        env.reset();
+        for _ in 0..200 {
+            env.step(ControlAction::neutral());
+        }
+        assert_eq!(
+            env.weather.as_ref().unwrap().scene_index(),
+            0,
+            "deterministic mode must keep one fixed scene"
+        );
+    }
+
+    #[test]
     fn crashing_gives_very_negative_reward() {
         let mut env = test_env();
         env.reset();
@@ -546,7 +785,10 @@ mod tests {
             }
         }
         assert!(crashed, "expected the aircraft to have crashed");
-        assert!(total < 0.0, "expected negative cumulative reward, got {total}");
+        assert!(
+            total < 0.0,
+            "expected negative cumulative reward, got {total}"
+        );
     }
 
     #[test]
@@ -588,8 +830,14 @@ mod tests {
         // Sensors start idle (first sample fires on the first step) so the bus
         // still carries its nominal defaults.
         assert_eq!(obs[9], 3.0, "GPS starts with a 3D fix");
-        assert!((obs[12] - 16.8).abs() < 0.1, "battery starts near full voltage");
-        assert!((obs[13] - 100.0).abs() < 0.1, "battery starts fully charged");
+        assert!(
+            (obs[12] - 16.8).abs() < 0.1,
+            "battery starts near full voltage"
+        );
+        assert!(
+            (obs[13] - 100.0).abs() < 0.1,
+            "battery starts fully charged"
+        );
     }
 
     #[cfg(feature = "full-avionics")]
@@ -695,9 +943,18 @@ mod tests {
         env.inject_fault(FaultFlag::Imu);
 
         let r = env.step(AvionicsAction::level_cruise(0.6));
-        assert_eq!(r.observation[0], 0.0, "gyro p must read zero on IMU failure");
-        assert_eq!(r.observation[1], 0.0, "gyro q must read zero on IMU failure");
-        assert_eq!(r.observation[2], 0.0, "gyro r must read zero on IMU failure");
+        assert_eq!(
+            r.observation[0], 0.0,
+            "gyro p must read zero on IMU failure"
+        );
+        assert_eq!(
+            r.observation[1], 0.0,
+            "gyro q must read zero on IMU failure"
+        );
+        assert_eq!(
+            r.observation[2], 0.0,
+            "gyro r must read zero on IMU failure"
+        );
     }
 
     #[cfg(feature = "full-avionics")]
@@ -728,9 +985,9 @@ mod tests {
     #[cfg(feature = "full-avionics")]
     #[test]
     fn fc_estimate_matches_physics_euler_angles() {
-        use crate::avionics::{AvionicsSystem, standard_stack};
-        use crate::state::AircraftState;
+        use crate::avionics::{standard_stack, AvionicsSystem};
         use crate::config::load_config;
+        use crate::state::AircraftState;
         use nalgebra::Vector3;
         use std::f64::consts::FRAC_PI_6;
 
@@ -761,7 +1018,11 @@ mod tests {
         state.w = 0.0;
 
         let (physics_roll, physics_pitch, _) = state.euler_angles();
-        assert!(physics_roll < 0.0, "setup must produce a bank, got {:.1}°", physics_roll.to_degrees());
+        assert!(
+            physics_roll < 0.0,
+            "setup must produce a bank, got {:.1}°",
+            physics_roll.to_degrees()
+        );
 
         let wind = Vector3::zeros();
         let q_dyn = 2000.0;
@@ -774,8 +1035,8 @@ mod tests {
 
         // Reconstruct the FC roll estimate from the quaternion stored on the bus
         let q = &av.bus().true_quat;
-        let fc_roll = (2.0 * (q[2] * q[3] - q[1] * q[0]))
-            .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+        let fc_roll =
+            (2.0 * (q[2] * q[3] - q[1] * q[0])).atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
         assert!(
             (fc_roll - physics_roll).abs() < 1e-9,
             "FC roll estimate must match physics euler: fc {:.1}° vs phys {:.1}°",
@@ -784,5 +1045,3 @@ mod tests {
         );
     }
 }
-
-

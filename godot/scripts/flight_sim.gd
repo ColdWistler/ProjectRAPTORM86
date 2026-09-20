@@ -414,6 +414,25 @@ func _physics_process(delta: float) -> void:
 		_physics.set_controls(elevator, aileron, rudder, throttle, flaps_deg)
 	_physics.set_elevator_trim(elevator_trim)
 	_physics.set_throttle_split(float(engine_out_side()))
+
+	# Optional WeatherSystem plugin: if a node named "WeatherSystem" is present
+	# (autoload, or a child of this scene), advance it and fly the aircraft
+	# through its NED wind field instead of the internal wind model. The wind
+	# vector is world-Y-up `(north, -down, east)` → NED `(x, z, -y)`.
+	var _weather := _find_weather_system()
+	if _weather != null and _physics.is_ready():
+		var speed := 60.0
+		var alt := 800.0
+		if _telemetry.size() >= 25:
+			alt = _telemetry[0]
+			speed = _telemetry[2]
+		_weather.set_reference_altitude(alt)
+		_weather.set_airspeed(speed)
+		_weather.step(delta)
+		var w := _weather.get_wind_vector()
+		_physics.set_external_wind(true, w.x, w.z, -w.y)
+	else:
+		_physics.set_external_wind(false, 0.0, 0.0, 0.0)
 	_physics.step(delta)
 
 	_drone.transform = _physics.get_drone_transform()
@@ -434,6 +453,14 @@ func _physics_process(delta: float) -> void:
 		_hud_timer = 0.0
 		_avionics_snap = _physics.avionics_snapshot()
 		_update_avionics_panel()
+
+## Locate the optional WeatherSystem plugin node: a child of this scene named
+## "WeatherSystem" takes precedence over a global autoload of the same name.
+func _find_weather_system() -> Node:
+	var child := get_node_or_null("WeatherSystem")
+	if child != null:
+		return child
+	return get_node_or_null("/root/WeatherSystem")
 
 ## Poll keyboard/mouse inputs into the elevator/aileron/rudder/flap/trim/
 ## throttle state, plus camera and aircraft-swap handling. Control stick
