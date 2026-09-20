@@ -1,9 +1,12 @@
 [gd_resource type="Environment" format=3 uid="uid://c1f6b7fw4cu4"]
 
-[ext_resource type="Material" path="res://materials/sky_mat.tres" id="1_sky"]
+[ext_resource type="Shader" path="res://shaders/cartoon_sky.gdshader" id="1_sky"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_cartoon_sky"]
+shader = ExtResource("1_sky")
 
 [sub_resource type="Sky" id="Sky_flight"]
-sky_material = ExtResource("1_sky")
+sky_material = SubResource("ShaderMaterial_cartoon_sky")
 
 [resource]
 background_mode = 2
