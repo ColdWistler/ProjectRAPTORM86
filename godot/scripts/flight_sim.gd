@@ -429,7 +429,7 @@ func _physics_process(delta: float) -> void:
 		_weather.set_reference_altitude(alt)
 		_weather.set_airspeed(speed)
 		_weather.step(delta)
-		var w := _weather.get_wind_vector()
+		var w: Vector3 = _weather.get_wind_vector()
 		_physics.set_external_wind(true, w.x, w.z, -w.y)
 	else:
 		_physics.set_external_wind(false, 0.0, 0.0, 0.0)
