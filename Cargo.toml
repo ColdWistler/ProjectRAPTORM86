@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "flight_core",
     "flight_gd",
+    "rl_agent",
 ]
 
 [workspace.package]
