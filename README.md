@@ -47,9 +47,10 @@ physics run in Rust while Godot handles all assets and visualization.
 | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `flight_core/`  | Pure-Rust physics engine: quaternion 6-DOF dynamics, 1976 US Standard Atmosphere, nonlinear post-stall aerodynamics, RK4 integrator, trim/autopilot logic. Also home of the RL weather layer (`weather.rs`: seeded turbulence/precipitation/visibility/updraft, curriculum, observation + reward helpers). |
 | `flight_gd/`    | `godot-rust` GDExtension crate exposing the physics as native Godot nodes (`FlightSimNode`, `WindTunnelNode`, `WeatherSystem`).        |
+| `rl_agent/`     | Pure-Rust burn/PPO RL agent (CPU ndarray + GPU wgpu backends, runtime-selected) that trains the `AvionicsEnvironment` attitude-control task. |
 | `godot/`        | Godot 4.7 project — scenes, the procedural drone model, camera, HUD, sky/terrain, and the smoke MultiMesh renderer.     |
 | `aircraft.toml` | Aircraft geometry / mass / aero coefficients consumed by `flight_core`.                                                |
-| `docs/`         | Manuals for RL weather integration, wind tunnel, and platform setup.                                                   |
+| `docs/`         | Manuals for RL weather integration, the `rl_agent` trainer, wind tunnel, and platform setup.                           |
 
 ## Features
 
@@ -84,6 +85,13 @@ physics run in Rust while Godot handles all assets and visualization.
   through — rain/snow/hail GPU particles, visibility fog, a wind arrow +
   readout, updraft/downdraft arrow, and storm dimming + cloud darkening (all
   active while "Weather enabled" is on)
+- **GPU-accelerated RL agent** (`rl_agent/`, burn v0.21): pure-Rust PPO
+  (clipped surrogate, GAE-λ, Welford observation normalization, AdamW with
+  gradient-norm clipping) training the `AvionicsEnvironment` attitude-control
+  task from the noisy 19-channel sensor bus. CPU (ndarray) and GPU
+  (wgpu/Vulkan) backends are compiled into one binary and selected at runtime
+  with `--backend cpu|gpu|auto` — `auto` probes the GPU and falls back to the
+  CPU (see [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements
 
