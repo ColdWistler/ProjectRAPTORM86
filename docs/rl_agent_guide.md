@@ -29,13 +29,17 @@ cargo run -p rl_agent -- --mode train --backend cpu --iterations 3 --rollout 128
 cargo run -p rl_agent --release -- --mode eval --backend auto --checkpoint checkpoints
 ```
 
-`--help` prints the full CLI.
+`--help` prints the full CLI. There is also a **GUI launcher**: the
+"RL" tab of the Godot main menu (`godot/scripts/rl_trainer.gd`) lets you pick
+algorithm, backend and hyper-parameters and runs training with a live log
+(see §6).
 
 ## 2. CLI reference (`cargo run -p rl_agent -- --help`)
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--mode train\|eval` | `train` | Train, or evaluate a checkpointed policy |
+| `--algo NAME` | `ppo` | Training algorithm (see §5: `ppo`; add yours to `algo.rs`) |
 | `--backend cpu\|gpu\|auto` | `auto` | Tensor backend at runtime (see §3) |
 | `--iterations N` | `1000` | PPO iterations (one rollout + update each) |
 | `--rollout N` | `2048` | Env steps collected per iteration |
@@ -72,6 +76,13 @@ Both backends are compiled into one binary — switching is a flag, not a
 rebuild. The only place concrete backend types are named is
 `rl_agent/src/backend.rs`; every training routine is generic over
 `B: AutodiffBackend`.
+
+> **GPU worker-thread stack.** cubecl's data-stream-dispatch worker threads
+> use the Rust default 2 MiB stack, which the fusion kernel code-gen path can
+> overflow (an *abort*, so `catch_unwind` can't rescue it) — most visible in
+> debug builds. `main.rs` therefore raises `RUST_MIN_STACK` to 16 MiB before
+> any backend can spawn a thread. If you embed the crate as a library and hit
+> `stack overflow` in a `DSD-*` thread, set the same env var before first use.
 
 ## 4. Training target
 
@@ -110,7 +121,76 @@ The service attempts attitude control toward a **target altitude**
 Episodes end by **termination** (crash — the env's `crash_penalty()` is
 added to the reward) or **truncation** (step budget exhausted).
 
-## 5. Algorithm and components
+## 5. The pluggable algorithm layer
+
+The trainer is **algorithm-agnostic**. Everything a learning model needs from
+the shared loop lives behind one trait, and *which* model runs is chosen at
+runtime — on the CLI (`--algo`) or from the Godot menu dropdown.
+
+| Piece | File | Notes |
+|---|---|---|
+| `Algorithm<B>` trait | `src/algo.rs` | `id`, `net_config`, `spec`, `td_params`, `act`/`deterministic_action`, `value_single`/`value_all`, `update`, `save_weights`/`load_weights`. The shared loop consumes only these. |
+| `AlgoSpec` enum | `src/algo.rs` | Serializable `(id, config)` selection; persisted into every checkpoint as `algo.json`. Internally `serde`-tagged so files are versioned by algorithm id. |
+| Registry | `src/algo.rs::make_algorithm` | `Box<dyn Algorithm<B>>` factory — one match arm per algorithm. |
+| `UpdateBatch` / `UpdateStats` | `src/algo.rs` | Algo-agnostic transition batch and averaged loss stats exchanged with `update`. On-policy algos consume the GAE fields; off-policy algos can ignore them. |
+| Trainer | `src/trainer.rs` | Generic `run<B>(&TrainerConfig, &NetConfig, &AlgoSpec, &device, &config_path)` — builds via the registry, rolls out, GAE, update, eval, checkpoint. |
+
+The shared loop computes GAE with the discount/trace-decay from
+`Algorithm::td_params()` (PPO returns its γ/λ); a value-free algorithm
+returns `(0.99, 0.95)` and can override the bootstrap behavior in its own
+`update`.
+
+### Adding a new model
+
+1. Write a module, e.g. `rl_agent/src/dqn.rs`, owning the agent struct, its
+   config (`Serialize`+`Deserialize`), its `update` math and its weight
+   save/load bookkeeping.
+2. `impl Algorithm<B> for YourAgent<B>` (with `B: AutodiffBackend<FloatElem =
+   f32>`), implementing `save_weights`/`load_weights` via
+   `BinFileRecorder` like `PpoAgent` does.
+3. Add an `AlgoSpec::YourAlgo { config }` variant and one arm in
+   `make_algorithm`.
+4. Register the id in the CLI (`main.rs`: `AlgoSpec::from_id`) and in the menu
+   (`godot/scripts/rl_trainer.gd`: the `ALGORITHMS` + `ALGO_FIELDS` tables).
+
+That's the whole seam — no changes to the trainer loop are required on-policy
+models that produce `(action, log_prob)` pairs and a value.
+
+### Selecting an algorithm
+
+```bash
+cargo run -p rl_agent --release -- --algo ppo --backend auto
+```
+
+`--algo` accepts any id in `rl_agent::algo::ALGORITHM_IDS` (currently
+`ppo`). The algorithm's own flags (`--lr`, `--gamma`, ...) configure the
+selected model; `AlgoSpec::from_id` rejects unknown ids with the registered
+list.
+
+## 6. The Godot menu
+
+The main menu has an **RL** tab (`godot/scripts/rl_trainer.gd`, instantiated
+by `main_menu.gd`). It:
+
+- lists the registered algorithms (dropdown driven by `ALGORITHMS`) and the
+  per-algorithm hyper-parameters (`ALGO_FIELDS` — the fields change when you
+  switch algorithm);
+- picks `auto` / `cpu` / `gpu`;
+- launches the `rl_agent` binary as a subprocess (`sh -c 'exec …'` so the
+  Stop button kills the actual trainer), streaming its stdout into a live,
+  scrollable log;
+- locates the binary automatically (`target/release/rl_agent`, then
+  `target/debug/rl_agent` — build with `cargo build -r -p rl_agent` if the
+  panel reports it missing);
+- can run `--mode eval` against the latest checkpoint; Checkpoint/aircraft
+  paths are derived from the repo (`res://../checkpoints`,
+  `res://../aircraft.toml`).
+
+`godot/tests/validate_rl_menu_e2e.gd` is a headless regression check that
+instantiates the panel, dials the hyper-parameters down, presses Start, waits
+for the subprocess, and asserts a successful exit + log output.
+
+## 7. PPO algorithm and components
 
 Training implements PPO-Clip (Schulman et al., 2017) with per-minibatch
 advantage whitening:
@@ -142,7 +222,7 @@ r = exp(log π_θ(a|s) − log π_old(a|s))
 3. GAE advantages + returns; one `agent.update` over shuffled minibatches.
 4. Periodic deterministic eval and checkpoint save.
 
-## 6. Determinism
+## 8. Determinism
 
 - Same `--seed` ⇒ same backend init (`B::seed`) and same host sampler
   stream ⇒ byte-identical normalizer stats and identical trained policies
@@ -153,7 +233,7 @@ r = exp(log π_θ(a|s) − log π_old(a|s))
 - `cpu` and `gpu` won't give *bit-identical* numbers to each other (different
   floating-point kernels), but each is reproducible within its backend.
 
-## 7. Checkpoints
+## 9. Checkpoints
 
 Saved to `--checkpoint DIR` every `save_every` iterations (and at the end):
 
@@ -161,45 +241,58 @@ Saved to `--checkpoint DIR` every `save_every` iterations (and at the end):
 |---|---|
 | `net` (bin) | Policy + critic weights, `BinFileRecorder<FullPrecisionSettings>` (FP32, portable across backends). |
 | `net.json` | `NetConfig` (obs/hidden/action dims, log_std init). |
-| `ppo.json` | `PpoConfig`. |
+| `algo.json` | `AlgoSpec` — the algorithm id + its hyper-parameters (e.g. `{"id":"ppo","config":{…}}`). **This is what makes any registered algorithm loadable by its own config.** |
 | `trainer.json` | `TrainerConfig`. |
 | `normalizer.json` | Running Welford stats + clip bound. |
 
+Legacy v0.1 checkpoints (pre-algorithm-layer) stored `ppo.json` instead of
+`algo.json`; `load_checkpoint` still reads those and upgrades them to an
+`AlgoSpec::Ppo`. Covered by `loads_legacy_ppo_checkpoint_without_algo_json`.
+
 Optimizer state is **not** persisted in v1 — on eval / resumption from a
-checkpoint a fresh AdamW optimizer is built from `ppo.json`. Configure
-`save_every: 0` / `eval_every: 0` / `print_every: 0` to disable those
-`.json` write paths entirely in tests/harnesses.
+checkpoint a fresh AdamW optimizer is built from the algorithm config.
+Configure `save_every: 0` / `eval_every: 0` / `print_every: 0` to disable
+those `.json` write paths entirely in tests/harnesses.
 
 Eval mode loads the checkpoint and runs `--eval-episodes` deterministic
 episodes, reporting mean steps, altitude error, airspeed error, mean reward,
-and crash count.
+and crash count. Training itself always restarts from a fresh bootstrap.
 
-## 8. Using the crate programmatically
+## 10. Using the crate programmatically
 
 ```rust
+use rl_agent::algo::{Algorithm, AlgoSpec};
 use rl_agent::backend::{cpu_device, Cpu};
 use rl_agent::net::NetConfig;
 use rl_agent::ppo::{PpoAgent, PpoConfig};
 use rl_agent::trainer::{evaluate, load_checkpoint, run, TrainerConfig};
 
-// Train:
+// Train — the spec selects the algorithm + its hyper-parameters:
 let device = cpu_device();
+let spec = AlgoSpec::Ppo { config: PpoConfig::default() };
 let outcome = run::<Cpu>(
     &TrainerConfig::default(),
     &NetConfig::default(),
-    &PpoConfig::default(),
+    &spec,
     &device,
     "aircraft.toml",
 )?;
-// outcome.agent, outcome.normalizer, outcome.last_eval
+// outcome.algorithm     -> Box<dyn Algorithm<Cpu>> (trained)
+// outcome.normalizer    -> RunningNormalizer (final stats)
+// outcome.last_eval     -> Option<EvalMetrics>
 
-// Evaluate a checkpoint:
-let cp = load_checkpoint::<Cpu>("checkpoints", &device)?;
-let agent = PpoAgent::<Cpu>::from_parts(cp.net, cp.net_cfg, cp.ppo_cfg, seed, &device);
-// feed normalized obs to agent.deterministic_action(&obs) ...
+// Algorithm-agnostic evaluation of a checkpoint:
+let cp = load_checkpoint::<Cpu>("checkpoints", &device, 42)?;
+let action = cp.algorithm.deterministic_action(&obs); // obs must be normalized
+
+// Or skip the trainer and build a PPO agent directly:
+let ncfg = NetConfig::default();
+let agent = PpoAgent::<Cpu>::new(&device, &ncfg, &PpoConfig::default(), 42);
+let (action, log_prob) = agent.act(&obs_norm);
+let value = agent.value_single(&obs_norm);
 ```
 
-## 9. Tests
+## 11. Tests
 
 ```bash
 # From the repo root (tests locate ../aircraft.toml):
@@ -208,9 +301,10 @@ cargo test -p rl_agent
 
 The suite covers the network (host/tensor log-prob parity to 1e-5), GAE
 math (terminated bootstrapping), the normalizer, the rollout buffer, PPO
-updates, and end-to-end trainer smoke tests — including a real-environment
-two-iteration run, same-seed reproducibility, FC-limit action mapping, and a
-checkpoint round-trip to a temp directory.
+updates, the algorithm layer (spec serde round-trip, registry factory +
+`act`), and end-to-end trainer smoke tests — including a real-environment
+two-iteration run, same-seed reproducibility, FC-limit action mapping, new
+and legacy checkpoint round-trips to a temp directory.
 
 ---
 

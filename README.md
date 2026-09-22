@@ -91,7 +91,10 @@ physics run in Rust while Godot handles all assets and visualization.
   task from the noisy 19-channel sensor bus. CPU (ndarray) and GPU
   (wgpu/Vulkan) backends are compiled into one binary and selected at runtime
   with `--backend cpu|gpu|auto` — `auto` probes the GPU and falls back to the
-  CPU (see [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
+  CPU. The algorithm is **pluggable**: `--algo` selects a registered model
+  (`rl_agent::algo::AlgoSpec`), and the main menu's **RL** tab launches
+  training from Godot with a live log (see
+  [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements
 
