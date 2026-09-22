@@ -70,8 +70,9 @@ const MODEL_ALIGN := {
 
 const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
 const _TerrainGeneratorScript := preload("res://scripts/terrain/terrain_generator.gd")
+const _RlTrainerScript := preload("res://scripts/rl_trainer.gd")
 
-const TABS := ["Home", "Aircraft", "Terrain", "About"]
+const TABS := ["Home", "Aircraft", "Terrain", "RL", "About"]
 const TERRAIN_SETTINGS_META := "raptor_terrain_settings"
 const TERRAIN_SETTING_KEYS := [
 	"procedural_terrain",
@@ -215,6 +216,7 @@ func _build_ui() -> void:
 	_pages["Home"] = _build_home_page()
 	_pages["Aircraft"] = _build_aircraft_page()
 	_pages["Terrain"] = _build_terrain_page()
+	_pages["RL"] = _build_rl_page()
 	_pages["About"] = _build_about_page()
 
 	for key in _pages:
@@ -1346,6 +1348,16 @@ func _update_terrain_summary() -> void:
 	var chunks: int = int(_terrain_settings["view_chunks"])
 	_terrain_summary.text = "Ready to generate: seed %d, %d m mountains, scale %d, %d octaves, %d-vertex chunks across %d chunks." % [seed, height, noise_scale, octaves, resolution, chunks]
 
+# ── RL PAGE ──────────────────────────────────────────────────────────
+## The RL trainer is a self-contained control panel (`rl_trainer.gd`) that
+## launches the `rl_agent` binary as a subprocess with the selected
+## algorithm / backend / hyper-parameters and streams its log live.
+func _build_rl_page() -> Control:
+	var panel := _RlTrainerScript.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	return panel
+
 # ── ABOUT PAGE ───────────────────────────────────────────────────────
 func _build_about_page() -> Control:
 	var scroll := ScrollContainer.new()
@@ -1374,7 +1386,9 @@ func _build_about_page() -> Control:
 		"[color=#5b8cbf]flight_gd[/color]  — godot-rust GDExtension exposing FlightSimNode and WindTunnelNode\n" +
 		"as native Godot nodes. Rust computes all physics; Godot renders.\n\n" +
 		"[color=#5b8cbf]godot/[/color]  — Godot 4.7 project with scenes, procedural models, chase/orbit camera,\n" +
-		"HUD, sky, terrain, runway, and the MultiMesh smoke renderer."
+		"HUD, sky, terrain, runway, and the MultiMesh smoke renderer.\n\n" +
+		"[color=#5b8cbf]rl_agent[/color]  — Pure-Rust burn/PPO reinforcement-learning trainer with a pluggable\n" +
+		"algorithm layer; launch training from the RL tab (or the CLI)."
 	)
 	arch_desc.add_theme_font_size_override("normal_font_size", 14)
 	arch_desc.add_theme_color_override("default_color", TEXT_MID)

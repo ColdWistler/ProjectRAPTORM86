@@ -48,6 +48,7 @@
 //! Evaluation metrics compare the noisy `baro_altitude` / `airspeed_indicated`
 //! channels against the environment's `target_altitude` / `target_airspeed`.
 
+pub mod algo;
 pub mod backend;
 pub mod buffer;
 pub mod gae;
@@ -55,6 +56,8 @@ pub mod net;
 pub mod normalize;
 pub mod ppo;
 pub mod trainer;
+
+pub use algo::{Algorithm, AlgoSpec};
 
 /// Number of continuous action dimensions
 /// (`roll_cmd`, `pitch_cmd`, `yaw_rate_cmd`, `throttle`).

@@ -11,9 +11,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use burn::tensor::backend::AutodiffBackend;
 
+use rl_agent::algo::{AlgoSpec, ALGO_PPO};
 use rl_agent::backend::{cpu_device, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
-use rl_agent::ppo::{PpoAgent, PpoConfig};
 use rl_agent::trainer::{
     evaluate, load_checkpoint, run, AvionicsEnv, TrainerConfig,
 };
@@ -23,7 +23,13 @@ const USAGE: &str = "\
 rl_agent — burn/PPO trainer for the flight_core AvionicsEnvironment
 
 USAGE:
-  rl_agent [--mode train|eval] [--backend cpu|gpu|auto] [options]
+  rl_agent [--mode train|eval] [--algo ppo] [--backend cpu|gpu|auto] [options]
+
+ALGORITHM (--algo, default ppo):
+  The training algorithm is pluggable: `--algo` selects one of the
+  registered algorithms in `rl_agent::algo::ALGORITHM_IDS` and the flags
+  below configure it. Add a new model by implementing `Algorithm<B>` and
+  registering it in `algo::make_algorithm` (see docs/rl_agent_guide.md).
 
 TRAIN MODE (default):
   --iterations N        PPO update iterations                    (default 1000)
@@ -64,6 +70,14 @@ BACKENDS:
 ";
 
 fn main() {
+    // cubecl's data-stream-dispatch worker threads are spawned with the Rust
+    // default stack size (2 MiB). Under the fusion-enabled CUDA/Vulkan runtimes
+    // the kernel code-gen path recurses deeply enough to overflow that stack in
+    // debug builds (an abort, so it cannot be caught by the `auto` GPU probe).
+    // Raise the default worker-thread stack before any backend can spawn a
+    // thread; 16 MiB is virtual memory and only committed as used.
+    std::env::set_var("RUST_MIN_STACK", (16 << 20).to_string());
+
     let args = parse_args();
     match run_main(&args) {
         Ok(()) => {}
@@ -135,7 +149,7 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcfg = build_trainer_config(args)?;
     let ncfg = build_net_config(args)?;
-    let pcfg = build_ppo_config(args)?;
+    let spec = build_algo_config(args)?;
     let config_path = args
         .get("config")
         .cloned()
@@ -144,33 +158,34 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
 
     match mode {
         "eval" => {
-            let cp = load_checkpoint::<B>(&tcfg.checkpoint_dir, &device)?;
-            let agent = PpoAgent::<B>::from_parts(
-                cp.net,
-                cp.net_cfg,
-                cp.ppo_cfg,
-                tcfg.seed,
-                &device,
-            );
+            let cp = load_checkpoint::<B>(&tcfg.checkpoint_dir, &device, tcfg.seed)?;
             let mut env = AvionicsEnv::new(&config_path, tcfg.env_dt, tcfg.env_max_steps)?;
             let m = evaluate(
-                &agent,
+                cp.algorithm.as_ref(),
                 &mut env,
                 &cp.normalizer,
                 tcfg.eval_episodes,
                 tcfg.env_max_steps,
             );
             println!(
-                "[rl_agent] eval: {} episodes, mean steps {:.0}, alt_err {:.1} m, \
+                "[rl_agent] eval: {} episodes (algo {}), mean steps {:.0}, alt_err {:.1} m, \
                  spd_err {:.1} m/s, reward {:.1}, crashes {}/{}",
-                m.episodes, m.mean_steps, m.alt_err, m.spd_err, m.total_reward, m.crashes, m.episodes,
+                m.episodes,
+                cp.algorithm.id(),
+                m.mean_steps,
+                m.alt_err,
+                m.spd_err,
+                m.total_reward,
+                m.crashes,
+                m.episodes,
             );
             Ok(())
         }
         "train" => {
-            let outcome = run::<B>(&tcfg, &ncfg, &pcfg, &device, &config_path)?;
+            let outcome = run::<B>(&tcfg, &ncfg, &spec, &device, &config_path)?;
             println!(
-                "[rl_agent] training complete on bootstrap from {}",
+                "[rl_agent] training complete (algo {}) on bootstrap from {}",
+                outcome.algorithm.id(),
                 std::any::type_name::<B>(),
             );
             let _ = outcome;
@@ -219,16 +234,21 @@ fn build_net_config(args: &HashMap<String, String>) -> Result<NetConfig, Box<dyn
     })
 }
 
-fn build_ppo_config(args: &HashMap<String, String>) -> Result<PpoConfig, Box<dyn std::error::Error>> {
-    let mut cfg = PpoConfig::default();
-    cfg.lr = get_num(args, "lr", cfg.lr)?;
-    cfg.gamma = get_num(args, "gamma", cfg.gamma)?;
-    cfg.lambda = get_num(args, "lambda", cfg.lambda)?;
-    cfg.clip_epsilon = get_num(args, "clip", cfg.clip_epsilon)?;
-    cfg.value_coef = get_num(args, "value-coef", cfg.value_coef)?;
-    cfg.entropy_coef = get_num(args, "entropy-coef", cfg.entropy_coef)?;
-    cfg.max_grad_norm = get_num(args, "max-grad-norm", cfg.max_grad_norm)?;
-    cfg.epochs = get_num(args, "epochs", cfg.epochs)?;
-    cfg.minibatch_size = get_num(args, "minibatch", cfg.minibatch_size)?;
-    Ok(cfg)
+fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn std::error::Error>> {
+    let id = args.get("algo").map(String::as_str).unwrap_or(ALGO_PPO);
+    let mut spec = AlgoSpec::from_id(id)?;
+    match &mut spec {
+        AlgoSpec::Ppo { config } => {
+            config.lr = get_num(args, "lr", config.lr)?;
+            config.gamma = get_num(args, "gamma", config.gamma)?;
+            config.lambda = get_num(args, "lambda", config.lambda)?;
+            config.clip_epsilon = get_num(args, "clip", config.clip_epsilon)?;
+            config.value_coef = get_num(args, "value-coef", config.value_coef)?;
+            config.entropy_coef = get_num(args, "entropy-coef", config.entropy_coef)?;
+            config.max_grad_norm = get_num(args, "max-grad-norm", config.max_grad_norm)?;
+            config.epochs = get_num(args, "epochs", config.epochs)?;
+            config.minibatch_size = get_num(args, "minibatch", config.minibatch_size)?;
+        }
+    }
+    Ok(spec)
 }

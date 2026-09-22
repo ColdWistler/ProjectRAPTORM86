@@ -17,17 +17,20 @@
 //! r = exp(log π_θ(a|s) − log π_old(a|s))
 //! ```
 
+use crate::algo::{Algorithm, AlgoSpec, UpdateBatch, UpdateStats, ALGO_PPO};
 use crate::net::{gaussian_log_prob_tanh, ActorCritic, NetConfig, ACTION_CLAMP};
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
+use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::backend::AutodiffBackend;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_distr::Distribution;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// PPO hyper-parameters (serialized into every checkpoint).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -66,36 +69,6 @@ impl Default for PpoConfig {
             minibatch_size: 64,
         }
     }
-}
-
-/// One iteration's worth of data, pre-normalized on the host.
-#[derive(Debug, Clone)]
-pub struct UpdateBatch {
-    /// Flattened `n·obs_dim` observations, already normalized.
-    pub obs: Vec<f32>,
-    /// Flattened `n·action_dim` actions (tanh-space).
-    pub actions: Vec<f32>,
-    /// Per-step `log π_old(a|s)` (from rollout sampling).
-    pub old_log_probs: Vec<f32>,
-    /// Per-step GAE advantages.
-    pub advantages: Vec<f32>,
-    /// Per-step `returns = advantage + value`.
-    pub returns: Vec<f32>,
-}
-
-/// Averaged loss terms from one `update` pass (helpful for monitoring).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UpdateStats {
-    /// Mean clipped policy-surrogate loss (negative for an improving policy).
-    pub policy_loss: f32,
-    /// Mean squared value error.
-    pub value_loss: f32,
-    /// Mean policy entropy.
-    pub entropy: f32,
-    /// Mean advantage over the whole batch (before whitening).
-    pub advantage_mean: f32,
-    /// Standard deviation of the advantages over the whole batch.
-    pub advantage_std: f32,
 }
 
 /// The PPO agent: network + AdamW + sampling RNG.
@@ -294,6 +267,62 @@ impl<B: AutodiffBackend<FloatElem = f32>> PpoAgent<B> {
         accum.advantage_mean = adv_mean;
         accum.advantage_std = adv_std;
         accum
+    }
+}
+
+impl<B: AutodiffBackend<FloatElem = f32>> Algorithm<B> for PpoAgent<B> {
+    fn id(&self) -> &'static str {
+        ALGO_PPO
+    }
+
+    fn net_config(&self) -> &NetConfig {
+        &self.net_cfg
+    }
+
+    fn spec(&self) -> AlgoSpec {
+        AlgoSpec::Ppo {
+            config: self.ppo_cfg,
+        }
+    }
+
+    fn td_params(&self) -> (f32, f32) {
+        (self.ppo_cfg.gamma, self.ppo_cfg.lambda)
+    }
+
+    fn act(&mut self, obs_norm: &[f32]) -> (Vec<f32>, f32) {
+        PpoAgent::act(self, obs_norm)
+    }
+
+    fn deterministic_action(&self, obs_norm: &[f32]) -> Vec<f32> {
+        PpoAgent::deterministic_action(self, obs_norm)
+    }
+
+    fn value_single(&self, obs_norm: &[f32]) -> f32 {
+        PpoAgent::value_single(self, obs_norm)
+    }
+
+    fn value_all(&self, obs_norm_flat: &[f32]) -> Vec<f32> {
+        PpoAgent::value_all(self, obs_norm_flat)
+    }
+
+    fn update(&mut self, batch: &UpdateBatch) -> UpdateStats {
+        PpoAgent::update(self, batch)
+    }
+
+    fn save_weights(&self, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        self.net.clone().save_file(dir.join("net"), &recorder)?;
+        Ok(())
+    }
+
+    fn load_weights(
+        &mut self,
+        dir: &Path,
+        device: &B::Device,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        self.net = self.net.clone().load_file(dir.join("net"), &recorder, device)?;
+        Ok(())
     }
 }
 

@@ -1,25 +1,24 @@
 //! Training loop and environment plumbing.
 //!
-//! [`run`] is the generic (backend-agnostic) PPO training loop over a
+//! [`run`] is the generic (backend-agnostic) training loop over an
 //! [`EnvSpec`] (by default the [`AvionicsEnv`] wrapper around
-//! [`AvionicsEnvironment`](flight_core::AvionicsEnvironment)):
+//! [`AvionicsEnvironment`]):
 //!
 //! 1. **Rollout**: collect `rollout_steps` transitions, observing the
 //!    normalizer during resets, sampling stochastic actions host-side.
 //! 2. **Values**: predict V(s) for the whole normalized batch and for the
 //!    trailing observation, then compute GAE advantages host-side.
-//! 3. **Update**: one [`PpoAgent::update`] pass over shuffled minibatches.
+//! 3. **Update**: one [`Algorithm::update`] pass over shuffled minibatches.
 //! 4. Periodically evaluate and save a checkpoint
-//!    (policy weights + JSON configs; optimizer state is not persisted in v1).
+//!    (weights + JSON configs; optimizer state is not persisted in v1).
 
+use crate::algo::{make_algorithm, Algorithm, AlgoSpec, UpdateBatch};
 use crate::buffer::{RolloutBuffer, Transition};
 use crate::gae::compute_gae;
 use crate::net::NetConfig;
 use crate::normalize::RunningNormalizer;
-use crate::ppo::{PpoAgent, PpoConfig, UpdateBatch};
+use crate::ppo::PpoConfig;
 use crate::{ACTION_DIM, AVIONICS_OBS_DIM};
-use burn::prelude::*;
-use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::backend::AutodiffBackend;
 use flight_core::{AvionicsAction, AvionicsEnvironment, EnvConfig};
 use serde::{Deserialize, Serialize};
@@ -185,27 +184,31 @@ pub struct EvalMetrics {
 
 /// What `run` hands back for tests / the CLI.
 pub struct TrainingOutcome<B: AutodiffBackend<FloatElem = f32>> {
-    /// Trained agent (final params after all iterations).
-    pub agent: PpoAgent<B>,
+    /// Trained algorithm (final params after all iterations).
+    pub algorithm: Box<dyn Algorithm<B>>,
     /// Normalizer with the final running stats.
     pub normalizer: RunningNormalizer,
     /// Last completed eval, if any eval episode ran.
     pub last_eval: Option<EvalMetrics>,
 }
 
-/// Run `tcfg.iterations` PPO iterations on the avionics environment.
+/// Run `tcfg.iterations` training iterations on the avionics environment.
+///
+/// The algorithm is built from `spec` through the [`make_algorithm`]
+/// registry, so the loop itself stays algorithm-agnostic.
 pub fn run<B: AutodiffBackend<FloatElem = f32>>(
     tcfg: &TrainerConfig,
     ncfg: &NetConfig,
-    pcfg: &PpoConfig,
+    spec: &AlgoSpec,
     device: &B::Device,
     config_path: &str,
 ) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
     assert!(tcfg.rollout_steps > 0, "rollout_steps must be > 0");
 
     let mut env = AvionicsEnv::new(config_path, tcfg.env_dt, tcfg.env_max_steps)?;
-    let mut agent = PpoAgent::<B>::new(device, ncfg, pcfg, tcfg.seed);
+    let mut agent: Box<dyn Algorithm<B>> = make_algorithm(spec, ncfg, tcfg.seed, device);
     let mut normalizer = RunningNormalizer::new(ncfg.obs_dim);
+    let (gamma, lambda) = agent.td_params();
 
     let mut obs = env.reset();
     normalizer.observe(&obs);
@@ -262,8 +265,8 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
             &values,
             &buffer.terminated(),
             last_value,
-            pcfg.gamma,
-            pcfg.lambda,
+            gamma,
+            lambda,
         );
 
         // ---- 3. Update ----
@@ -291,7 +294,7 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
 
         if tcfg.eval_every > 0 && it % tcfg.eval_every == 0 {
             last_eval = Some(evaluate(
-                &agent,
+                agent.as_ref(),
                 &mut env,
                 &normalizer,
                 tcfg.eval_episodes,
@@ -306,12 +309,12 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
         }
 
         if tcfg.save_every > 0 && (it % tcfg.save_every == 0 || it == tcfg.iterations - 1) {
-            save_checkpoint(&agent, &normalizer, tcfg, ncfg, pcfg, &tcfg.checkpoint_dir)?;
+            save_checkpoint(agent.as_ref(), &normalizer, tcfg, ncfg, &tcfg.checkpoint_dir)?;
         }
     }
 
     Ok(TrainingOutcome {
-        agent,
+        algorithm: agent,
         normalizer,
         last_eval,
     })
@@ -319,7 +322,7 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
 
 /// Run `episodes` deterministic episodes and aggregate metrics.
 pub fn evaluate<B: AutodiffBackend<FloatElem = f32>>(
-    agent: &PpoAgent<B>,
+    agent: &dyn Algorithm<B>,
     env: &mut dyn EnvSpec,
     normalizer: &RunningNormalizer,
     episodes: usize,
@@ -375,20 +378,22 @@ pub fn evaluate<B: AutodiffBackend<FloatElem = f32>>(
     m
 }
 
-/// Save the policy weights (bin) plus JSON configs and normalizer.
+/// Save the model weights (bin) plus JSON configs and normalizer.
+///
+/// The algorithm id + hyper-parameters are persisted as `algo.json`; the
+/// network architecture as `net.json`; weights as `net.bin` (via the
+/// algorithm's own recorder).
 pub fn save_checkpoint<B: AutodiffBackend<FloatElem = f32>>(
-    agent: &PpoAgent<B>,
+    agent: &dyn Algorithm<B>,
     normalizer: &RunningNormalizer,
     tcfg: &TrainerConfig,
     ncfg: &NetConfig,
-    pcfg: &PpoConfig,
     dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    agent.net.clone().save_file(Path::new(dir).join("net"), &recorder)?;
+    agent.save_weights(Path::new(dir))?;
     write_json(Path::new(dir).join("net.json"), &serde_json::to_string_pretty(ncfg)?)?;
-    write_json(Path::new(dir).join("ppo.json"), &serde_json::to_string_pretty(pcfg)?)?;
+    write_json(Path::new(dir).join("algo.json"), &agent.spec().to_json()?)?;
     write_json(
         Path::new(dir).join("trainer.json"),
         &serde_json::to_string_pretty(tcfg)?,
@@ -405,40 +410,46 @@ fn write_json(path: std::path::PathBuf, contents: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// Loaded checkpoint: policy weights plus the configs needed to run it.
+/// Loaded checkpoint: the trained algorithm plus the stats needed to run it.
 pub struct Checkpoint<B: AutodiffBackend<FloatElem = f32>> {
-    /// Actor-critic network (weights on `device`).
-    pub net: crate::net::ActorCritic<B>,
-    /// Architecture config.
-    pub net_cfg: NetConfig,
-    /// PPO config.
-    pub ppo_cfg: PpoConfig,
+    /// Trained algorithm (weights on `device`), algorithm-agnostic.
+    pub algorithm: Box<dyn Algorithm<B>>,
     /// Normalizer stats to apply before feeding observations to the net.
     pub normalizer: RunningNormalizer,
 }
 
 /// Load a checkpoint from `dir`. Optimizer state is not stored in v1 and is
-/// rebuilt fresh from the PPO config by the caller.
+/// rebuilt fresh from the algorithm config by the factory.
+///
+/// Checkpoints written by v0.1 trainers (before the algorithm layer) used
+/// `ppo.json` instead of `algo.json`; those are still loadable.
 pub fn load_checkpoint<B: AutodiffBackend<FloatElem = f32>>(
     dir: &str,
     device: &B::Device,
+    seed: u64,
 ) -> Result<Checkpoint<B>, Box<dyn std::error::Error>> {
     let net_cfg: NetConfig = serde_json::from_str(&std::fs::read_to_string(
         Path::new(dir).join("net.json"),
     )?)?;
-    let ppo_cfg: PpoConfig = serde_json::from_str(&std::fs::read_to_string(
-        Path::new(dir).join("ppo.json"),
-    )?)?;
+    let spec: AlgoSpec = {
+        let algo_path = Path::new(dir).join("algo.json");
+        if algo_path.exists() {
+            AlgoSpec::from_json(&std::fs::read_to_string(algo_path)?)?
+        } else {
+            // Legacy < 0.2 checkpoints: PPO only.
+            let ppo_cfg: PpoConfig = serde_json::from_str(&std::fs::read_to_string(
+                Path::new(dir).join("ppo.json"),
+            )?)?;
+            AlgoSpec::Ppo { config: ppo_cfg }
+        }
+    };
     let normalizer: RunningNormalizer = serde_json::from_str(
         &std::fs::read_to_string(Path::new(dir).join("normalizer.json"))?,
     )?;
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    let net = crate::net::ActorCritic::<B>::new(device, &net_cfg, 0)
-        .load_file(Path::new(dir).join("net"), &recorder, device)?;
+    let mut algorithm = make_algorithm(&spec, &net_cfg, seed, device);
+    algorithm.load_weights(Path::new(dir), device)?;
     Ok(Checkpoint {
-        net,
-        net_cfg,
-        ppo_cfg,
+        algorithm,
         normalizer,
     })
 }
@@ -476,18 +487,20 @@ mod tests {
             action_dim: ACTION_DIM,
             log_std_init: -0.5,
         };
-        let pcfg = PpoConfig {
-            lr: 1e-3,
-            gamma: 0.99,
-            lambda: 0.95,
-            clip_epsilon: 0.2,
-            value_coef: 0.5,
-            entropy_coef: 0.0,
-            max_grad_norm: 5.0,
-            epochs: 1,
-            minibatch_size: 32,
+        let spec = AlgoSpec::Ppo {
+            config: PpoConfig {
+                lr: 1e-3,
+                gamma: 0.99,
+                lambda: 0.95,
+                clip_epsilon: 0.2,
+                value_coef: 0.5,
+                entropy_coef: 0.0,
+                max_grad_norm: 5.0,
+                epochs: 1,
+                minibatch_size: 32,
+            },
         };
-        run::<Cpu>(&tcfg, &ncfg, &pcfg, &device, &config_path()).expect("run should succeed")
+        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run should succeed")
     }
 
     #[test]
@@ -510,8 +523,8 @@ mod tests {
         assert_eq!(a.normalizer.mean, b.normalizer.mean, "normalizer must match run-to-run");
         let obs = vec![0.0f32; AVIONICS_OBS_DIM];
         // Deterministic actions on a fixed input must match exactly.
-        let act_a = a.agent.deterministic_action(&obs);
-        let act_b = b.agent.deterministic_action(&obs);
+        let act_a = a.algorithm.deterministic_action(&obs);
+        let act_b = b.algorithm.deterministic_action(&obs);
         assert_eq!(act_a, act_b, "same seed must reproduce the trained policy");
     }
 
@@ -547,18 +560,76 @@ mod tests {
             action_dim: ACTION_DIM,
             log_std_init: -0.5,
         };
-        let pcfg = PpoConfig {
-            minibatch_size: 16,
-            epochs: 1,
-            ..Default::default()
+        let spec = AlgoSpec::Ppo {
+            config: PpoConfig {
+                minibatch_size: 16,
+                epochs: 1,
+                ..Default::default()
+            },
         };
-        run::<Cpu>(&tcfg, &ncfg, &pcfg, &device, &config_path()).expect("run");
+        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run");
 
-        let cp = load_checkpoint::<Cpu>(&tcfg.checkpoint_dir, &device).expect("load");
-        assert_eq!(cp.net_cfg.hidden, 16);
-        assert_eq!(cp.ppo_cfg.minibatch_size, 16);
+        let cp = load_checkpoint::<Cpu>(&tcfg.checkpoint_dir, &device, tcfg.seed).expect("load");
+        assert_eq!(cp.algorithm.net_config().hidden, 16);
+        assert_eq!(cp.algorithm.id(), crate::algo::ALGO_PPO);
+        match cp.algorithm.spec() {
+            AlgoSpec::Ppo { config } => assert_eq!(config.minibatch_size, 16),
+        }
         assert_eq!(cp.normalizer.dim, AVIONICS_OBS_DIM);
 
         let _ = std::fs::remove_dir_all(&tcfg.checkpoint_dir);
+    }
+
+    #[test]
+    fn loads_legacy_ppo_checkpoint_without_algo_json() {
+        // Checkpoints written before the algorithm layer stored PPO config as
+        // `ppo.json` and had no `algo.json`; they must still load.
+        use crate::net::NetConfig;
+        let device = crate::backend::cpu_device();
+        let dir = std::env::temp_dir()
+            .join("rl_agent_cp_legacy")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let tcfg = TrainerConfig {
+            iterations: 1,
+            rollout_steps: 16,
+            env_max_steps: 100,
+            env_dt: 0.05,
+            seed: 7,
+            save_every: 1,
+            print_every: 0,
+            eval_episodes: 0,
+            eval_every: 0,
+            checkpoint_dir: dir.clone(),
+        };
+        let ncfg = NetConfig {
+            obs_dim: AVIONICS_OBS_DIM,
+            hidden: 16,
+            action_dim: ACTION_DIM,
+            log_std_init: -0.5,
+        };
+        let spec = AlgoSpec::Ppo {
+            config: PpoConfig::default(),
+        };
+        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run");
+
+        // Rewrite the checkpoint as a legacy one: drop algo.json, add ppo.json.
+        std::fs::remove_file(std::path::Path::new(&dir).join("algo.json")).expect("remove algo.json");
+        let ppo_cfg = match spec {
+            AlgoSpec::Ppo { config } => config,
+        };
+        std::fs::write(
+            std::path::Path::new(&dir).join("ppo.json"),
+            serde_json::to_string_pretty(&ppo_cfg).expect("serialize ppo.json"),
+        )
+        .expect("write ppo.json");
+
+        let cp = load_checkpoint::<Cpu>(&dir, &device, tcfg.seed).expect("legacy load");
+        assert_eq!(cp.algorithm.id(), crate::algo::ALGO_PPO);
+        match cp.algorithm.spec() {
+            AlgoSpec::Ppo { config } => assert_eq!(config.minibatch_size, PpoConfig::default().minibatch_size),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
