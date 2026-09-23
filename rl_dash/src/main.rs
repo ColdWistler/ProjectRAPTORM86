@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{Legend, Line, Plot, PlotBounds, PlotPoints};
 use serde::Deserialize;
 
 /// Metric registry — keys mirror `metrics.jsonl` fields (and
@@ -96,6 +96,8 @@ struct EvalMetrics {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct MetricsRecord {
     iteration: i64,
+    #[serde(default)]
+    elapsed_s: Option<f64>,
     #[serde(default)]
     mean_reward_per_step: Option<f64>,
     #[serde(default)]
@@ -233,6 +235,22 @@ impl RunModel {
             .collect()
     }
 
+    /// Value series with a selectable x axis: iteration (default) or
+    /// `elapsed_s`. A record without a timestamp keeps its iteration index as
+    /// the x-coordinate, so a time-streaked file never drops a point.
+    fn series_x(&self, key: &str, time: bool) -> Vec<[f64; 2]> {
+        if !time {
+            return self.series(key);
+        }
+        self.records
+            .iter()
+            .filter_map(|r| {
+                r.metric(key)
+                    .map(|v| [r.elapsed_s.unwrap_or(r.iteration as f64), v])
+            })
+            .collect()
+    }
+
     fn status(&self) -> &str {
         self.manifest
             .as_ref()
@@ -306,6 +324,12 @@ struct DashApp {
     metric: usize,
     window: u32,
     follow_live: bool,
+    /// Strip (system-monitor) view vs. the single-metric comparison view.
+    strip_view: bool,
+    /// Trailing window width for the strip view, in x units.
+    strip_window: u32,
+    /// Strip view x axis: elapsed seconds (wall-clock-ish) vs. iteration.
+    time_axis: bool,
     banner: Option<String>,
 }
 
@@ -318,6 +342,9 @@ impl DashApp {
             metric,
             window: 0,
             follow_live: true,
+            strip_view: true,
+            strip_window: 120,
+            time_axis: false,
             banner: None,
         };
         app.rescan();
@@ -404,7 +431,13 @@ impl eframe::App for DashApp {
             .default_size(320.0)
             .show(ui, |ui| self.side_panel(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| self.plot_panel(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.strip_view {
+                self.strip_panel(ui);
+            } else {
+                self.plot_panel(ui);
+            }
+        });
     }
 }
 
@@ -419,14 +452,28 @@ impl DashApp {
         );
         ui.separator();
 
-        egui::ComboBox::from_label("Metric")
-            .selected_text(self.metric_label())
-            .width(260.0)
-            .show_ui(ui, |ui| {
-                for (i, (_, label)) in METRICS.iter().enumerate() {
-                    ui.selectable_value(&mut self.metric, i, *label);
-                }
-            });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.strip_view, true, "Strip");
+            ui.selectable_value(&mut self.strip_view, false, "Compare");
+        });
+        if self.strip_view {
+            let tail_label = if self.time_axis {
+                format!("Tail window: {} s", self.strip_window)
+            } else {
+                format!("Tail window: {} iter", self.strip_window)
+            };
+            ui.add(egui::Slider::new(&mut self.strip_window, 10..=5000).text(tail_label));
+            ui.checkbox(&mut self.time_axis, "Time axis (elapsed_s)");
+        } else {
+            egui::ComboBox::from_label("Metric")
+                .selected_text(self.metric_label())
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for (i, (_, label)) in METRICS.iter().enumerate() {
+                        ui.selectable_value(&mut self.metric, i, *label);
+                    }
+                });
+        }
 
         let smooth_label = if self.window == 0 {
             "Smoothing: off".to_string()
@@ -601,6 +648,184 @@ impl DashApp {
             }
         }
     }
+
+    /// Bounds for a sliding trailing window shared by every strip card: the
+    /// newest point across all visible series pins the right edge and the
+    /// window trails `tail` x-units behind. Y covers only the points inside
+    /// the window and gets a small pad. `None` when nothing has data yet.
+    fn window_bounds(
+        series: &[(usize, String, Vec<[f64; 2]>)],
+        tail: f64,
+    ) -> Option<([f64; 2], [f64; 2])> {
+        let newest = series
+            .iter()
+            .filter_map(|(_, _, pts)| pts.last().map(|p| p[0]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !newest.is_finite() {
+            return None;
+        }
+        let (x_min, x_max) = (newest - tail, newest);
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for (_, _, pts) in series {
+            for p in pts {
+                if p[0] >= x_min && p[0] <= x_max {
+                    y_min = y_min.min(p[1]);
+                    y_max = y_max.max(p[1]);
+                }
+            }
+        }
+        if !y_min.is_finite() {
+            return Some(([x_min, 0.0], [x_max, 1.0]));
+        }
+        let mut pad = (y_max - y_min) * 0.08;
+        if pad <= 0.0 {
+            pad = y_max.abs().max(1e-9) * 0.05 + 1e-9;
+        }
+        Some(([x_min, y_min - pad], [x_max, y_max + pad]))
+    }
+
+    /// System-monitor style grid: one scrolling strip-chart per metric. Runs
+    /// overlay in their palette color; the header carries the current value
+    /// and the window's min..max readout.
+    fn strip_panel(&mut self, ui: &mut egui::Ui) {
+        let smoothing = self.window;
+        let tail = self.strip_window.clamp(10, 10_000) as f64;
+        let time = self.time_axis;
+
+        ui.horizontal(|ui| {
+            ui.heading("Live monitoring");
+            ui.label(
+                egui::RichText::new(
+                    "trailing window — the newest point pins the right edge and the chart scrolls left as data lands",
+                )
+                .weak()
+                .small(),
+            );
+        });
+        ui.add_space(6.0);
+
+        let axis = if time { "elapsed_s" } else { "iteration" };
+        let units = if time { "s" } else { "iter" };
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("strip_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 10.0])
+                    .show(ui, |ui| {
+                        for (mi, (key, label)) in METRICS.iter().enumerate() {
+                            self.strip_card(ui, key, label, smoothing, tail, time);
+                            if mi % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "x = {axis} · trailing window {tail:.0} {units} · dot colors are runs (hover a dot for its id)"
+                    ))
+                    .weak()
+                    .small(),
+                );
+            });
+    }
+
+    fn strip_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        label: &str,
+        smoothing: u32,
+        tail: f64,
+        time: bool,
+    ) {
+        // Visible runs that actually have a point for this metric.
+        let mut series: Vec<(usize, String, Vec<[f64; 2]>)> = Vec::new();
+        for (i, (id, run)) in self.runs.iter().enumerate() {
+            if !self.visible.get(id).copied().unwrap_or(false) {
+                continue;
+            }
+            let pts = smooth(&run.series_x(key, time), smoothing);
+            if pts.is_empty() {
+                continue;
+            }
+            series.push((i, id.clone(), pts));
+        }
+        let bounds = Self::window_bounds(&series, tail);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+
+            // Header: metric name, per-run color dots, and the live readout
+            // (newest run's latest value + this window's min..max).
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(label).strong());
+                for (i, id, _) in &series {
+                    ui.label(egui::RichText::new("●").color(PALETTE[*i % PALETTE.len()]))
+                        .on_hover_text(id.clone());
+                }
+                if let Some((min, max)) = bounds {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some((i, id, pts)) = series.last() {
+                            ui.label(
+                                egui::RichText::new(fmt(pts.last().map(|p| p[1]).unwrap_or(0.0)))
+                                    .color(PALETTE[*i % PALETTE.len()])
+                                    .strong(),
+                            )
+                            .on_hover_text(id.clone());
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("[{}, {}]", fmt(min[1]), fmt(max[1])))
+                                .weak()
+                                .small(),
+                        );
+                    });
+                }
+            });
+
+            match bounds {
+                Some((min, max)) => {
+                    // auto_bounds is overridden every frame by
+                    // PlotUi::set_plot_bounds, so the strip stays pinned to the
+                    // sliding window instead of re-scaling to all history.
+                    let plot = Plot::new(("kde_strip", key))
+                        .allow_drag(false)
+                        .allow_zoom(false)
+                        .allow_scroll(false)
+                        .auto_bounds([false, false])
+                        .show_x(false)
+                        .show_y(false)
+                        .show_crosshair(false)
+                        .height(104.0);
+                    plot.show(ui, |plot_ui| {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(min, max));
+                        for (i, id, pts) in &series {
+                            let windowed: Vec<[f64; 2]> = pts
+                                .iter()
+                                .filter(|p| p[0] >= min[0] && p[0] <= max[0])
+                                .cloned()
+                                .collect();
+                            plot_ui.line(
+                                Line::new(id.as_str(), PlotPoints::from(windowed))
+                                    .color(PALETTE[*i % PALETTE.len()])
+                                    .width(1.6),
+                            );
+                        }
+                    });
+                }
+                None => {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("awaiting data — tick a run on the left")
+                            .weak()
+                            .small(),
+                    );
+                }
+            }
+        });
+    }
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
@@ -673,6 +898,7 @@ mod tests {
     fn parses_full_record_and_flattens_metrics() {
         let rec: MetricsRecord = serde_json::from_str(SAMPLE).expect("sample must parse");
         assert_eq!(rec.iteration, 2);
+        assert_eq!(rec.elapsed_s, Some(16.4));
         assert!((rec.metric("mean_reward_per_step").unwrap() - 0.059).abs() < 1e-9);
         assert!((rec.metric("alt_err").unwrap() - 99.4).abs() < 1e-9);
         assert!((rec.metric("eval_reward").unwrap() + 4.26).abs() < 1e-9);
@@ -747,6 +973,45 @@ mod tests {
         assert_eq!(s[0][1], 1.0, "first EMA seed equals the first value");
         assert!(s[1][1] > 1.0 && s[1][1] < 3.0, "EMA moves toward the point");
         assert_eq!(smooth(&pts, 0), pts.to_vec(), "window 0 = off");
+    }
+
+    #[test]
+    fn series_x_switches_between_iteration_and_elapsed_time() {
+        let dir = std::env::temp_dir().join(format!("rl_dash_x_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("metrics.jsonl"),
+            "{\"iteration\":1,\"elapsed_s\":10.0,\"mean_reward_per_step\":0.1}\n\
+             {\"iteration\":2,\"elapsed_s\":14.5,\"mean_reward_per_step\":0.2}\n",
+        )
+        .unwrap();
+        let mut run = RunModel::new(dir.clone());
+        run.poll();
+        assert_eq!(run.series_x("mean_reward_per_step", false), vec![[1.0, 0.1], [2.0, 0.2]]);
+        assert_eq!(run.series_x("mean_reward_per_step", true), vec![[10.0, 0.1], [14.5, 0.2]]);
+        // A record without elapsed_s keeps its iteration index as the x.
+        std::fs::write(dir.join("metrics.jsonl"), "{\"iteration\":3,\"mean_reward_per_step\":0.3}\n")
+            .unwrap();
+        run.poll();
+        assert_eq!(run.series_x("mean_reward_per_step", true).last().unwrap(), &[3.0, 0.3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn window_bounds_slides_and_pads_but_only_over_visible_series() {
+        let series: Vec<(usize, String, Vec<[f64; 2]>)> = vec![(
+            0,
+            "run".into(),
+            vec![[0.0, 1.0], [10.0, 5.0], [20.0, 3.0]],
+        )];
+        let (min, max) = DashApp::window_bounds(&series, 8.0).unwrap();
+        assert_eq!(min[0], 12.0, "window trails the newest x by the tail");
+        assert_eq!(max[0], 20.0, "newest x pins the right edge");
+        assert!(min[1] <= 3.0 && max[1] >= 3.0, "y covers only in-window points, padded");
+        assert!(
+            DashApp::window_bounds(&[], 8.0).is_none(),
+            "no series -> no window"
+        );
     }
 
     #[test]
