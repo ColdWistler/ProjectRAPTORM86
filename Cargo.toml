@@ -4,6 +4,7 @@ members = [
     "flight_core",
     "flight_gd",
     "rl_agent",
+    "rl_dash",
 ]
 
 [workspace.package]

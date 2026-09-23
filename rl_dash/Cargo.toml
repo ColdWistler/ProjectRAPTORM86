@@ -1,0 +1,25 @@
+[package]
+name = "rl_dash"
+version.workspace = true
+edition.workspace = true
+description = "Native desktop dashboard for rl_agent training telemetry (egui/eframe)"
+
+[dependencies]
+# eframe 0.35 pairs with egui 0.35, which egui_plot 0.36 also targets.
+# We use the `glow` (OpenGL) renderer instead of the default `wgpu`: it needs
+# nothing but an OpenGL context (matches this project's "works anywhere" ethos)
+# and skips the heavy wgpu dependency tree.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui_plot = "0.36"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "rl_dash"
+path = "src/main.rs"
