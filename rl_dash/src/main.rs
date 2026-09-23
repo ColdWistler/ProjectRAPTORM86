@@ -53,6 +53,10 @@ const MAX_RECORDS: usize = 300_000;
 /// How often the UI repaints and re-reads telemetry files.
 const POLL_MS: u64 = 200;
 
+/// Re-scan the runs dir every N polls (~1 s) so a trainer that spawns a run
+/// dir *after* the dashboard opens shows up without a manual "Rescan" click.
+const RESCAN_EVERY_POLLS: u8 = 5;
+
 // ── Telemetry schema (mirror of rl_agent::telemetry) ─────────────────
 
 // Fields mirror `rl_agent::telemetry`; unread ones are kept so the schema
@@ -178,9 +182,19 @@ impl RunModel {
     /// than remembered) restarts from 0.
     fn poll(&mut self) {
         let path = self.dir.join("metrics.jsonl");
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            self.error = Some("metrics.jsonl not found".into());
-            return;
+        let mut f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound && self.records.is_empty() =>
+            {
+                // Brand-new run whose metrics.jsonl hasn't been created yet —
+                // benign (discovery already treats run.json-only dirs as runs).
+                return;
+            }
+            Err(_) => {
+                self.error = Some("metrics.jsonl not found or unreadable".into());
+                return;
+            }
         };
         let Ok(len) = f.metadata().map(|m| m.len()) else {
             return;
@@ -272,7 +286,10 @@ fn discover_runs(root: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join("metrics.jsonl").exists())
+        .filter(|p| {
+            p.is_dir()
+                && (p.join("metrics.jsonl").exists() || p.join("run.json").exists())
+        })
         .collect();
     dirs.sort_by(|a, b| {
         let an = a.file_name().unwrap_or_default().to_string_lossy();
@@ -331,6 +348,8 @@ struct DashApp {
     /// Strip view x axis: elapsed seconds (wall-clock-ish) vs. iteration.
     time_axis: bool,
     banner: Option<String>,
+    /// Polls since the last runs-dir rescan (auto-discovery of new runs).
+    polls_since_rescan: u8,
 }
 
 impl DashApp {
@@ -346,6 +365,7 @@ impl DashApp {
             strip_window: 120,
             time_axis: false,
             banner: None,
+            polls_since_rescan: 0,
         };
         app.rescan();
         app
@@ -398,6 +418,13 @@ impl DashApp {
     fn poll_all(&mut self) {
         for run in self.runs.values_mut() {
             run.poll();
+        }
+        // Discover runs that landed after launch (the RL tab's trainer spawns
+        // its run dir within the first second or two) without a manual click.
+        self.polls_since_rescan += 1;
+        if self.polls_since_rescan >= RESCAN_EVERY_POLLS {
+            self.polls_since_rescan = 0;
+            self.rescan();
         }
         if self.follow_live {
             if let Some(newest) = self.runs.keys().next_back().cloned() {
@@ -657,10 +684,20 @@ impl DashApp {
         series: &[(usize, String, Vec<[f64; 2]>)],
         tail: f64,
     ) -> Option<([f64; 2], [f64; 2])> {
+        // The strip is anchored to the *newest* run with data, not the max x
+        // across all runs: its latest point pins the right edge. Otherwise a
+        // completed run with thousands of iterations would pin the window far
+        // to the right and a fresh live run's early points (small x) would sit
+        // outside the visible window — invisible until it catches up.
         let newest = series
-            .iter()
-            .filter_map(|(_, _, pts)| pts.last().map(|p| p[0]))
-            .fold(f64::NEG_INFINITY, f64::max);
+            .last()
+            .and_then(|(_, _, pts)| pts.last().map(|p| p[0]))
+            .unwrap_or_else(|| {
+                series
+                    .iter()
+                    .filter_map(|(_, _, pts)| pts.last().map(|p| p[0]))
+                    .fold(f64::NEG_INFINITY, f64::max)
+            });
         if !newest.is_finite() {
             return None;
         }
@@ -945,6 +982,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("20260101_000000_000_ppo_seed42")).unwrap();
         std::fs::create_dir_all(root.join("20260102_000000_000_ppo_seed42")).unwrap();
+        std::fs::create_dir_all(root.join("20260103_000000_000_ppo_seed42")).unwrap();
         std::fs::write(
             root.join("20260101_000000_000_ppo_seed42/metrics.jsonl"),
             "",
@@ -955,14 +993,43 @@ mod tests {
             "",
         )
         .unwrap();
-        // A dir without metrics.jsonl is not a run.
+        // A run that only has run.json so far (metrics.jsonl not written yet)
+        // is still a run.
+        std::fs::write(
+            root.join("20260103_000000_000_ppo_seed42/run.json"),
+            "{\"status\":\"running\"}",
+        )
+        .unwrap();
+        // A dir with neither file is not a run.
         std::fs::create_dir_all(root.join("not_a_run")).unwrap();
 
         let found = discover_runs(&root);
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 3);
         let last = found.last().unwrap().file_name().unwrap().to_string_lossy();
-        assert_eq!(last, "20260102_000000_000_ppo_seed42", "newest run sorts last");
+        assert_eq!(last, "20260103_000000_000_ppo_seed42", "newest run sorts last");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn poll_tolerates_a_run_whose_metrics_file_has_not_appeared_yet() {
+        let dir = std::env::temp_dir().join(format!("rl_dash_fresh_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // run.json exists (freshly-spawned trainer), metrics.jsonl not yet.
+        std::fs::write(dir.join("run.json"), "{\"status\":\"running\"}").unwrap();
+
+        let mut run = RunModel::new(dir.clone());
+        run.poll();
+        assert!(run.records.is_empty());
+        assert!(run.error.is_none(), "missing file on a fresh run is not an error");
+
+        // Once the file lands the same RunModel picks it up.
+        std::fs::write(dir.join("metrics.jsonl"), "{\"iteration\":1,\"elapsed_s\":1.0,\"mean_reward_per_step\":0.5}\n")
+            .unwrap();
+        run.poll();
+        assert_eq!(run.records.len(), 1);
+        assert!(run.error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1012,6 +1079,67 @@ mod tests {
             DashApp::window_bounds(&[], 8.0).is_none(),
             "no series -> no window"
         );
+    }
+
+    #[test]
+    fn window_bounds_anchors_the_newest_run_not_the_longest() {
+        // A long old run (500 iters) and a fresh live run (5 iters): the
+        // window must follow the live run, otherwise its early points would be
+        // outside the visible window (the "only the completed run shows" bug).
+        let series: Vec<(usize, String, Vec<[f64; 2]>)> = vec![
+            (0, "old_completed".into(), (0..500).map(|i| [i as f64, i as f64]).collect()),
+            (1, "new_live".into(), vec![[1.0, 0.1], [5.0, 0.2]]),
+        ];
+        let (min, max) = DashApp::window_bounds(&series, 120.0).unwrap();
+        assert_eq!(max[0], 5.0, "right edge = the live run's newest point");
+        assert_eq!(min[0], 5.0 - 120.0, "window trails the live run, not iter 500");
+        assert!(min[1] <= 0.1 && max[1] >= 0.2, "both runs' in-window points are covered");
+    }
+
+    #[test]
+    fn auto_rescan_picks_up_a_run_spawned_after_launch() {
+        // The RL tab spawns the trainer, which creates its run dir *after* the
+        // dashboard's first scan — that run must appear without a click.
+        let root = std::env::temp_dir().join(format!("rl_dash_auto_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("20260920_100000_000_ppo_seed42")).unwrap();
+        std::fs::write(
+            root.join("20260920_100000_000_ppo_seed42/metrics.jsonl"),
+            "{\"iteration\":1,\"elapsed_s\":1.0,\"mean_reward_per_step\":0.1}\n",
+        )
+        .unwrap();
+
+        let mut app = DashApp::new(root.clone(), 0);
+        assert_eq!(app.runs.len(), 1, "dashboard opens with only the completed run");
+
+        // Trainer spawns its live run after launch.
+        std::fs::create_dir_all(root.join("20260923_120000_000_ppo_seed42")).unwrap();
+        std::fs::write(
+            root.join("20260923_120000_000_ppo_seed42/metrics.jsonl"),
+            "{\"iteration\":1,\"elapsed_s\":2.0,\"mean_reward_per_step\":0.7}\n",
+        )
+        .unwrap();
+
+        for _ in 0..4 {
+            app.poll_all();
+        }
+        assert_eq!(app.runs.len(), 1, "rescan only triggers every 5 polls (~1 s)");
+        app.poll_all();
+        assert_eq!(
+            app.runs.len(),
+            2,
+            "post-launch run is discovered without a manual rescan"
+        );
+        let newest = app.runs.keys().next_back().unwrap().clone();
+        assert_eq!(newest, "20260923_120000_000_ppo_seed42");
+        assert!(app.visible.get(&newest).copied().unwrap_or(false));
+        app.poll_all();
+        assert_eq!(
+            app.runs[&newest].records.len(),
+            1,
+            "its telemetry is tailed on the following poll"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
