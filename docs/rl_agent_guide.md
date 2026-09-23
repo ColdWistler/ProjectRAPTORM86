@@ -412,7 +412,11 @@ cargo run -p rl_dash -- --metric policy_loss
 
 - Picks up runs automatically (new run dirs = new rows); **Follow live**
   keeps the newest run plotted and re-reads `metrics.jsonl` by byte offset,
-  so a running trainer updates ~5×/s with no re-parsing of old lines.
+  so a running trainer updates ~5×/s with no re-parsing of old lines. The
+  runs dir is also re-scanned every second, so a run the trainer spawns
+  *after* the dashboard opens (e.g. from the RL tab) appears on its own —
+  and the strip views stay anchored to the newest run, so a fresh live run
+  streams in at the right edge even next to a long completed run.
 - Two live views, switchable in the sidebar:
   - **Strip** (default) — a system-monitor grid: one scrolling strip-chart
     per metric, side by side like KDE System Monitor. Each card shows the
