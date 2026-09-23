@@ -45,6 +45,9 @@ const DEFAULT_CHECKPOINT := "res://../checkpoints"
 const DEFAULT_CONFIG := "res://../aircraft.toml"
 
 const ChartScript := preload("res://scripts/rl_chart.gd")
+# Runs directory (repo root's `runs/`) — always access via
+# ProjectSettings.globalize_path(RUNS_DIR): res:// paths clamp ".." to the
+# project root, so raw `res://../runs` access silently lists the project dir.
 const RUNS_DIR := "res://../runs"
 
 const BG_CARD := Color(0.09, 0.11, 0.17)
@@ -80,6 +83,7 @@ var _chart: Control
 var _metric_option: OptionButton
 var _points := {}          # metric key -> Array of { "x": iteration, "y": value }
 var _telemetry_path := ""  # absolute path of the active run's metrics.jsonl
+var _telemetry_run_id := ""  # run dir currently feeding the chart ("" = none)
 var _telemetry_offset := 0
 
 
@@ -91,7 +95,6 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if _training_pid != 0:
 		_poll_log()
-		_poll_telemetry()
 		if not OS.is_process_running(_training_pid):
 			var code := OS.get_process_exit_code(_training_pid)
 			_training_pid = 0
@@ -103,6 +106,10 @@ func _process(_delta: float) -> void:
 				("Training process failed (exit %d). Check the log below." % code),
 				OK_COLOR if ok else ERR_COLOR)
 			_poll_log(true)
+	# Always poll telemetry — even while idle — so the chart keeps showing the
+	# newest run that has data (and switches to a new live run the moment it
+	# writes its first record) instead of freezing on a dead/empty run.
+	_poll_telemetry()
 
 
 # ── UI construction ───────────────────────────────────────────────────
@@ -576,8 +583,8 @@ func _shell_quote(s: String) -> String:
 
 # ── Telemetry streaming ─────────────────────────────────────────────
 ## Poll the active run's metrics.jsonl and feed the live chart. Runs every
-## frame while the trainer subprocess is alive; the resolved path sticks
-## for the whole run so the chart keeps its data after the process exits.
+## frame (also while idle) so the chart always follows the newest run that
+## actually has records.
 func _poll_telemetry() -> void:
 	_resolve_telemetry_path()
 	if _telemetry_path.is_empty() or not FileAccess.file_exists(_telemetry_path):
@@ -588,42 +595,79 @@ func _poll_telemetry() -> void:
 	var size := f.get_length()
 	if size < _telemetry_offset:
 		_telemetry_offset = 0  # file was replaced
+	var new_bytes := size - _telemetry_offset
+	if new_bytes <= 0:
+		f.close()
+		return
 	f.seek(_telemetry_offset)
-	var chunk := f.get_as_text()
-	_telemetry_offset = f.get_position()
+	# get_as_text() ignores the cursor and returns the WHOLE file, so read
+	# exactly the new bytes instead (re-parsing everything each frame would
+	# append duplicate points).
+	var chunk := f.get_buffer(new_bytes).get_string_from_utf8()
 	f.close()
+	_telemetry_offset = size
 	if chunk.is_empty():
 		return
+	var parser := JSON.new()
 	for line in chunk.split("\n"):
-		var rec: Variant = JSON.parse_string(line)
-		if typeof(rec) == TYPE_DICTIONARY:
-			_ingest_record(rec)
+		if line.strip_edges().is_empty():
+			continue
+		# The writer appends with a flush, so the tail may catch a partially
+		# written last line — skip it silently, it shows up next poll.
+		var err := parser.parse(line)
+		if err == OK and typeof(parser.data) == TYPE_DICTIONARY:
+			_ingest_record(parser.data)
 
 
-## Run ids are UTC timestamps (`YYYYMMDD_HHMMSS_<millis>_<algo>_seed<n>`),
-## so the lexicographically newest directory is the current run. Resolve it
-## once, then stick with it — the chart keeps showing the last run after
-## training finishes.
+## The chart always reads the newest run dir that has records. A brand-new
+## run starts with an empty `metrics.jsonl` (the file is created eagerly, but
+## the first record only lands once iteration 0 finishes — a minute or two on
+## the GPU/auto backend), and a run can die early leaving the file empty. In
+## both cases we keep showing the newest run that has data instead of a blank
+## "waiting for telemetry" chart; the moment the new run writes its first
+## record we switch over and rebuild the series from it.
 func _resolve_telemetry_path() -> void:
-	if not _telemetry_path.is_empty():
-		return
-	var dir := DirAccess.open(RUNS_DIR)
+	# res:// paths clamp ".." to the project root, so every access to the
+	# runs dir must go through the globalized (absolute) path — otherwise
+	# the scan silently lists the project's own files and finds no runs.
+	var root := ProjectSettings.globalize_path(RUNS_DIR)
+	var dir := DirAccess.open(root)
 	if dir == null:
 		return
 	dir.list_dir_begin()
-	var newest := ""
+	var newest_any := ""
+	var newest_filled := ""
 	var entry := dir.get_next()
 	while not entry.is_empty():
 		if dir.current_is_dir() and entry != "." and entry != "..":
-			if FileAccess.file_exists("%s/%s/metrics.jsonl" % [RUNS_DIR, entry]):
-				if entry > newest:
-					newest = entry
+			var p := "%s/%s/metrics.jsonl" % [root, entry]
+			if FileAccess.file_exists(p):
+				if entry > newest_any:
+					newest_any = entry
+				if _jsonl_filled(p) and entry > newest_filled:
+					newest_filled = entry
 		entry = dir.get_next()
 	dir.list_dir_end()
-	if not newest.is_empty():
-		_telemetry_path = ProjectSettings.globalize_path("%s/%s/metrics.jsonl" % [RUNS_DIR, newest])
-		_points.clear()
-		_telemetry_offset = 0
+	var target := newest_filled if not newest_filled.is_empty() else newest_any
+	if target == _telemetry_run_id:
+		return
+	_telemetry_run_id = target
+	_telemetry_path = "" if target.is_empty() else "%s/%s/metrics.jsonl" % [root, target]
+	_telemetry_offset = 0
+	_points.clear()
+	_chart.clear()
+	_chart.run_id = target
+	_chart.set_metric(_chart.metric_key)
+	_chart.update_title()
+
+
+func _jsonl_filled(p: String) -> bool:
+	var f := FileAccess.open(p, FileAccess.READ)
+	if f == null:
+		return false
+	var filled := f.get_length() > 0
+	f.close()
+	return filled
 
 
 func _ingest_record(rec: Dictionary) -> void:
@@ -669,10 +713,16 @@ func _poll_log(tail := false) -> void:
 	if not tail and size - _log_offset > (1 << 17):
 		_log_offset = size - (1 << 17)  # cap the window on busy runs
 		_log_view.text = ""
+	var new_bytes := size - _log_offset
+	if new_bytes <= 0:
+		f.close()
+		return
 	f.seek(_log_offset)
-	var chunk := f.get_as_text()
-	_log_offset = f.get_position()
+	# get_as_text() ignores the cursor and returns the whole file; read only
+	# the new bytes so appended output isn't re-printed every frame.
+	var chunk := f.get_buffer(new_bytes).get_string_from_utf8()
 	f.close()
+	_log_offset = size
 	if chunk.is_empty():
 		return
 	if tail:
@@ -694,6 +744,7 @@ func _clear_log() -> void:
 	_log_offset = 0
 	# Reset run telemetry state so the next run streams a fresh chart.
 	_telemetry_path = ""
+	_telemetry_run_id = ""
 	_telemetry_offset = 0
 	_points.clear()
 	_chart.set_metric("mean_reward_per_step")

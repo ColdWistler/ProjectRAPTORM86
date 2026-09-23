@@ -38,6 +38,10 @@ const METRICS := {
 var points: Array = []
 var metric_key := "mean_reward_per_step"
 var title := ""
+## Run id (dir name) whose records `points` holds; shown in the title so it is
+## clear which run is plotted (the chart falls back to an older run while a
+## fresh one is still writing its first record).
+var run_id := ""
 
 var _hover_index := -1
 
@@ -74,6 +78,7 @@ func push(iteration: int, value: float) -> void:
 	points.append({ "x": iteration, "y": value })
 	if points.size() > MAX_POINTS:
 		points = points.slice(points.size() - MAX_POINTS)
+	update_title()
 	queue_redraw()
 
 
@@ -91,10 +96,11 @@ func metric_color() -> Color:
 
 func update_title() -> void:
 	var latest: Variant = latest_value()
+	var run := "" if run_id.is_empty() else "  ·  run " + run_id
 	if latest == null:
-		title = metric_label() + "  —  waiting for telemetry…"
+		title = metric_label() + "  —  waiting for telemetry…" + run
 	else:
-		title = "%s  ·  latest %s @ iter %d" % [metric_label(), _fmt(float(latest)), latest_iteration()]
+		title = "%s  ·  latest %s @ iter %d%s" % [metric_label(), _fmt(float(latest)), latest_iteration(), run]
 	queue_redraw()
 
 
