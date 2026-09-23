@@ -413,15 +413,22 @@ cargo run -p rl_dash -- --metric policy_loss
 - Picks up runs automatically (new run dirs = new rows); **Follow live**
   keeps the newest run plotted and re-reads `metrics.jsonl` by byte offset,
   so a running trainer updates ~5×/s with no re-parsing of old lines.
+- Two live views, switchable in the sidebar:
+  - **Strip** (default) — a system-monitor grid: one scrolling strip-chart
+    per metric, side by side like KDE System Monitor. Each card shows the
+    metric's current value (a color dot per overlaid run) and the window's
+    min..max; the graph pins the newest point to the right edge and the
+    trailing window (10–5000 units) scrolls left as data lands. Set the tail
+    window or flip the x axis to `elapsed_s` for a wall-clock scroller.
+  - **Compare** — the single-chart view: pick any metric, overlay any run
+    against the same axes, hover for cursor values, read latest values beneath.
+- Smoothing (EMA window) applies to both views.
 - Launch it from the Godot RL tab's **Open desktop dashboard** button (or
   `--runs DIR` on the CLI for the Godot-spawned trainer's run dir); with the
   RL tab's **Open on Start** checkbox it opens automatically whenever
   training starts — tracking exactly the run the in-engine chart shows.
-- Pick any metric, toggle any run's checkbox to overlay it against the same
-  axes, and adjust a smoothing window — built for run-to-run comparison.
-- Hover for cursor values; the strip under the chart shows latest values per
-  visible run; a collapsible panel shows each run's `run.json` manifest
-  (status, commit, algo, start/end times).
+- A collapsible panel shows each run's `run.json` manifest (status, commit,
+  algo, start/end times).
 - Uses `egui_plot`; the JSONL schema is mirrored in
   `rl_dash/src/main.rs` — keep it in sync with `rl_agent/src/telemetry.rs`
   when adding fields.
