@@ -48,6 +48,7 @@ physics run in Rust while Godot handles all assets and visualization.
 | `flight_core/`  | Pure-Rust physics engine: quaternion 6-DOF dynamics, 1976 US Standard Atmosphere, nonlinear post-stall aerodynamics, RK4 integrator, trim/autopilot logic. Also home of the RL weather layer (`weather.rs`: seeded turbulence/precipitation/visibility/updraft, curriculum, observation + reward helpers). |
 | `flight_gd/`    | `godot-rust` GDExtension crate exposing the physics as native Godot nodes (`FlightSimNode`, `WindTunnelNode`, `WeatherSystem`).        |
 | `rl_agent/`     | Pure-Rust burn/PPO RL agent (CPU ndarray + GPU wgpu backends, runtime-selected) that trains the `AvionicsEnvironment` attitude-control task. |
+| `rl_dash/`      | Pure-Rust native desktop dashboard (`egui`/`eframe`) for training telemetry — live-follows the newest run and overlays any runs for comparison (`cargo run -p rl_dash`). |
 | `godot/`        | Godot 4.7 project — scenes, the procedural drone model, camera, HUD, sky/terrain, and the smoke MultiMesh renderer.     |
 | `aircraft.toml` | Aircraft geometry / mass / aero coefficients consumed by `flight_core`.                                                |
 | `docs/`         | Manuals for RL weather integration, the `rl_agent` trainer, wind tunnel, and platform setup.                           |
@@ -95,8 +96,10 @@ physics run in Rust while Godot handles all assets and visualization.
   (`rl_agent::algo::AlgoSpec`), and the main menu's **RL** tab launches
   training from Godot with a **live metrics chart**. Every run streams
   **structured telemetry** into `runs/<run_id>/` (`metrics.jsonl` +
-  `run.json` manifest) which the Godot panel charts live and
-  `rl_agent/dashboard.html` turns into a full post-run report (see
+  `run.json` manifest) which the Godot panel charts live, the browser-report
+  `rl_agent/dashboard.html` renders any run as a full post-run report, and
+  the native `rl_dash` desktop app (egui) live-follows training and
+  overlays runs for comparison (see
   [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements

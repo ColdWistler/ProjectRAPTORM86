@@ -392,6 +392,35 @@ dependencies, works offline from `file://`) and load a
 > The dashboard is a static file with no build step; keep it in sync if you
 > add fields to `IterationRecord` in `rl_agent/src/telemetry.rs`.
 
+### Native desktop app (`rl_dash`)
+
+For a desktop monitor that keeps running while you work and can compare
+*runs*, there is a pure-Rust native app (`egui`/`eframe` — no browser, no
+system webview, no new native dependencies):
+
+```bash
+cargo run -p rl_dash --release          # watches ./runs
+cargo run -p rl_dash -- --runs DIR      # explicit telemetry root
+cargo run -p rl_dash -- --metric policy_loss
+```
+
+- Picks up runs automatically (new run dirs = new rows); **Follow live**
+  keeps the newest run plotted and re-reads `metrics.jsonl` by byte offset,
+  so a running trainer updates ~5×/s with no re-parsing of old lines.
+- Pick any metric, toggle any run's checkbox to overlay it against the same
+  axes, and adjust a smoothing window — built for run-to-run comparison.
+- Hover for cursor values; the strip under the chart shows latest values per
+  visible run; a collapsible panel shows each run's `run.json` manifest
+  (status, commit, algo, start/end times).
+- Uses `egui_plot`; the JSONL schema is mirrored in
+  `rl_dash/src/main.rs` — keep it in sync with `rl_agent/src/telemetry.rs`
+  when adding fields.
+
+Why a native app instead of another HTML page? The browser dashboard is
+great for one run at a time; `rl_dash` stays open across whole training
+sessions, tails files without a reload, and overlays many runs — including
+the run you start next.
+
 ---
 
 ### Reference
