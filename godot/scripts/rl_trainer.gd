@@ -68,8 +68,11 @@ var _binary_label: Label
 var _start_btn: BaseButton
 var _stop_btn: BaseButton
 var _eval_btn: BaseButton
+var _dash_btn: BaseButton
+var _dash_auto: CheckButton
 
 var _training_pid := 0
+var _dash_pid := 0
 var _log_offset := 0
 
 # ── Live telemetry chart state ──────────────────────────────────────
@@ -269,11 +272,24 @@ func _build_ui() -> void:
 	chart_panel.add_child(_chart)
 
 	var hint := Label.new()
-	hint.text = "Streams runs/<run_id>/metrics.jsonl while training. After the run, open rl_agent/dashboard.html in a browser for the full report."
+	hint.text = "Streams runs/<run_id>/metrics.jsonl while training. For a desktop dashboard that live-follows and compares runs, open the native rl_dash app below."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", TEXT_DIM)
 	chart_inner.add_child(hint)
+
+	var dash_row := HBoxContainer.new()
+	dash_row.add_theme_constant_override("separation", 12)
+	chart_inner.add_child(dash_row)
+	dash_row.add_child(_make_label("Dashboard"))
+	_dash_btn = _make_button("Open desktop dashboard (rl_dash)", 320)
+	_dash_btn.pressed.connect(_on_dash_pressed)
+	dash_row.add_child(_dash_btn)
+	_dash_auto = CheckButton.new()
+	_dash_auto.text = "Open on Start"
+	_dash_auto.tooltip_text = "Launch the native rl_dash desktop dashboard (pointed at the same runs dir) whenever training starts."
+	_dash_auto.add_theme_font_size_override("font_size", 13)
+	dash_row.add_child(_dash_auto)
 
 	# ── Log ─────────────────────────────────────────────────────────
 	var log_card := _make_card()
@@ -433,6 +449,8 @@ func _run_process(args: Array, started_msg: String) -> void:
 	_training_pid = pid
 	_log_offset = 0
 	_set_buttons_running(true)
+	if _dash_auto.button_pressed and not _launch_dash():
+		started_msg += " — couldn't open the desktop dashboard (rl_dash not built?)"
 	_update_status("%s (pid %d) — algo %s, backend %s" % [started_msg, pid, _selected_algo_id(), _selected_backend_id()], OK_COLOR)
 
 
@@ -443,6 +461,41 @@ func _on_stop_pressed() -> void:
 	_training_pid = 0
 	_set_buttons_running(false)
 	_update_status("Training stopped by user. Partial checkpoint (if any) remains on disk.", TEXT_MID)
+
+
+func _on_dash_pressed() -> void:
+	_launch_dash()
+
+
+## Launch the native rl_dash desktop app pointed at the same telemetry root
+## the training process writes to (`--runs` = the trainer's run dir, verbatim).
+## rl_dash runs independently of Godot, so closing Godot leaves the dashboard up.
+func _launch_dash() -> bool:
+	if _dash_pid != 0 and OS.is_process_running(_dash_pid):
+		_update_status("Desktop dashboard already running (pid %d)." % _dash_pid, TEXT_MID)
+		return true
+	var bin := _find_dash_binary()
+	if bin.is_empty():
+		_update_status(
+			"rl_dash binary not found. Build it from the repo root with:  cargo build -p rl_dash (or -r for release)",
+			ERR_COLOR)
+		return false
+	var args: PackedStringArray = ["--runs", ProjectSettings.globalize_path(RUNS_DIR)]
+	var pid := OS.create_process(bin, args)
+	if pid == 0:
+		_update_status("Failed to launch rl_dash.", ERR_COLOR)
+		return false
+	_dash_pid = pid
+	_update_status("Desktop dashboard launched (pid %d) — rl_dash is live-following this runs dir." % pid, OK_COLOR)
+	return true
+
+
+func _find_dash_binary() -> String:
+	for rel in ["res://../target/release/rl_dash", "res://../target/debug/rl_dash"]:
+		var p := ProjectSettings.globalize_path(rel)
+		if FileAccess.file_exists(p):
+			return p
+	return ""
 
 
 func _set_buttons_running(running: bool) -> void:
@@ -655,6 +708,16 @@ func _update_binary_label() -> void:
 	else:
 		_binary_label.text = bin
 		_binary_label.add_theme_color_override("font_color", TEXT_MID)
+	_update_dash_button()
+
+
+func _update_dash_button() -> void:
+	if _find_dash_binary().is_empty():
+		_dash_btn.disabled = true
+		_dash_btn.tooltip_text = "rl_dash not built — from the repo root run: cargo build -p rl_dash"
+	else:
+		_dash_btn.disabled = false
+		_dash_btn.tooltip_text = "Open the native rl_dash desktop dashboard (live-follow + run comparison)."
 
 
 func _update_status(text: String, color: Color) -> void:

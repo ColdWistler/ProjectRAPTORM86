@@ -99,8 +99,8 @@ physics run in Rust while Godot handles all assets and visualization.
   `run.json` manifest) which the Godot panel charts live, the browser-report
   `rl_agent/dashboard.html` renders any run as a full post-run report, and
   the native `rl_dash` desktop app (egui) live-follows training and
-  overlays runs for comparison (see
-  [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
+  overlays runs for comparison — the RL tab can pop it open automatically
+  (see [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements
 

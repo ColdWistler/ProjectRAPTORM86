@@ -379,6 +379,12 @@ raw console log stays below it (Clear log resets the chart for the next run).
 Only the resolved run dir is read — the chart survives after the process
 exits so you can inspect the finished run in-engine.
 
+The same card also hosts the **Open desktop dashboard (rl_dash)** button,
+which launches the native desktop app pointed at the *same* runs dir the
+trainer writes to. Tick **Open on Start** and it pops up automatically
+whenever training starts — so you get the in-engine chart *and* the
+multi-run desktop dashboard for the same run.
+
 ### HTML dashboard (`rl_agent/dashboard.html`)
 
 For post-run analysis open `rl_agent/dashboard.html` in any browser (no
@@ -407,6 +413,10 @@ cargo run -p rl_dash -- --metric policy_loss
 - Picks up runs automatically (new run dirs = new rows); **Follow live**
   keeps the newest run plotted and re-reads `metrics.jsonl` by byte offset,
   so a running trainer updates ~5×/s with no re-parsing of old lines.
+- Launch it from the Godot RL tab's **Open desktop dashboard** button (or
+  `--runs DIR` on the CLI for the Godot-spawned trainer's run dir); with the
+  RL tab's **Open on Start** checkbox it opens automatically whenever
+  training starts — tracking exactly the run the in-engine chart shows.
 - Pick any metric, toggle any run's checkbox to overlay it against the same
   axes, and adjust a smoothing window — built for run-to-run comparison.
 - Hover for cursor values; the strip under the chart shows latest values per
