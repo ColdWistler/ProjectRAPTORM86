@@ -190,6 +190,12 @@ by `main_menu.gd`). It:
 instantiates the panel, dials the hyper-parameters down, presses Start, waits
 for the subprocess, and asserts a successful exit + log output.
 
+`godot/tests/validate_rl_layout.gd` is a second headless regression check for
+the tab itself: it loads the real menu scene at the project window size,
+switches to the RL tab, and asserts the page's `ScrollContainer` fills the
+page rect (the panel root is a plain `Control`, so the scroll must use
+full-rect anchors or the tab renders blank).
+
 ## 7. PPO algorithm and components
 
 Training implements PPO-Clip (Schulman et al., 2017) with per-minibatch
