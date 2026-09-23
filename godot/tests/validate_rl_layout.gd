@@ -78,6 +78,17 @@ func _verify() -> bool:
 	if card == null or card.size.y <= 0.0:
 		failures.append("hyper-parameter card did not lay out")
 
+	# The RL tab also hosts the rl_dash desktop-dashboard launcher (button +
+	# "Open on Start" checkbox) inside the Live metrics card.
+	var dash_btn := vbox.find_children("", "Button", true, false).filter(
+		func(b): return "rl_dash" in (b as Button).text)
+	if dash_btn.is_empty():
+		failures.append("rl_dash launch button missing from the live metrics card")
+	var dash_auto := vbox.find_children("", "CheckButton", true, false).filter(
+		func(b): return (b as CheckButton).text == "Open on Start")
+	if dash_auto.is_empty():
+		failures.append("'Open on Start' dashboard checkbox missing")
+
 	if failures.is_empty():
 		print("LAYOUT: PASS — RL tab fills the page")
 		quit(0)

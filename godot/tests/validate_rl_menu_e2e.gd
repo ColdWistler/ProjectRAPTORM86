@@ -26,6 +26,8 @@ func _setup() -> void:
 	_trainer._backend_option.select(1)  # cpu
 	print("E2E: binary = ", _trainer._find_rl_binary())
 	print("E2E: args   = ", _trainer._build_args(false))
+	print("E2E: dash bin  = ", _trainer._find_dash_binary())
+	print("E2E: dash btn  = ", _trainer._dash_btn.text, " | auto-open = ", _trainer._dash_auto.text)
 	_trainer._on_start_pressed()
 
 
