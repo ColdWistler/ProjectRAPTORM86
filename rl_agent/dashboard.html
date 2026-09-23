@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rl_agent — Training dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #121826; --panel2: #0f1420;
+    --border: #232d40; --border-light: #33405c;
+    --text: #e0e6f2; --text-mid: #8a95ab; --text-dim: #5f6b82;
+    --accent: #4da6f2; --ok: #73d986; --warn: #f2cc4d; --err: #f27366;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    background: var(--panel);
+  }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .4px; }
+  h1 small { color: var(--text-mid); font-weight: normal; font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-left: auto; }
+  label { color: var(--text-mid); font-size: 12px; display: inline-flex; gap: 6px; align-items: center; }
+  input[type="range"] { accent-color: var(--accent); }
+  .btn {
+    background: var(--accent); color: #04121f; border: 0; border-radius: 6px;
+    padding: 7px 14px; font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  #drop {
+    margin: 18px 24px; padding: 26px; border: 1px dashed var(--border-light);
+    border-radius: 10px; color: var(--text-mid); text-align: center; background: var(--panel2);
+  }
+  #drop.drag { border-color: var(--accent); color: var(--text); background: #101b2c; }
+  #drop b { color: var(--accent); }
+  main { padding: 0 24px 32px; display: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  }
+  .card .name { color: var(--text-mid); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  .card .value { font-size: 17px; font-weight: 700; margin-top: 2px; }
+  .card .meta { color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+  .card .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+  .panel { margin-top: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 8px; }
+  .legend label { cursor: pointer; color: var(--text); font-size: 12px; gap: 5px; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  #chart-wrap { position: relative; }
+  canvas { width: 100%; height: 420px; display: block; background: #0a0e16; border: 1px solid var(--border); border-radius: 6px; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: #080b12; border: 1px solid var(--border-light); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; white-space: nowrap; z-index: 5;
+  }
+  #tooltip .row { display: flex; gap: 10px; justify-content: space-between; }
+  #tooltip .row b { padding-left: 14px; }
+  #raw { width: 100%; display: none; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--text-mid); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>rl_agent · Training dashboard <small id="samples"></small></h1>
+  <div class="controls">
+    <label>Smoothing
+      <input id="smooth" type="range" min="0" max="20" value="0">
+      <span id="smooth-v">0</span>
+    </label>
+    <label><input id="logy" type="checkbox"> log Y</label>
+    <button class="btn" onclick="pickFile()">Load metrics.jsonl</button>
+    <button class="btn ghost" onclick="exportCsv()">Download CSV</button>
+    <input id="file" type="file" accept=".jsonl,.json" style="display:none">
+  </div>
+</header>
+
+<div id="drop">
+  <b>Open a telemetry file</b> — <code>runs/&lt;run_id&gt;/metrics.jsonl</code> produced by
+  <code>rl_agent --mode train</code>. Pick the file above, or drag &amp; drop it anywhere on this page.
+</div>
+
+<main>
+  <div class="grid" id="summary"></div>
+  <div class="panel">
+    <div class="legend" id="legend"></div>
+    <div id="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div id="tooltip"></div>
+    </div>
+  </div>
+  <details id="rawwrap">
+    <summary>Raw rows</summary>
+    <table id="raw"></table>
+  </details>
+</main>
+
+<script>
+"use strict";
+
+/* ── Metric registry (mirrors godot/scripts/rl_chart.gd) ───────────── */
+const METRICS = [
+  { key: "mean_reward_per_step", label: "Reward / step",   color: "#73d986", mode: "max" },
+  { key: "policy_loss",          label: "Policy loss",     color: "#f29a33", mode: "min" },
+  { key: "value_loss",           label: "Value loss",      color: "#4da6f2", mode: "min" },
+  { key: "entropy",              label: "Entropy",         color: "#bf73f2", mode: "min" },
+  { key: "advantage_mean",       label: "Advantage mean",  color: "#f2cc4d", mode: "mid" },
+  { key: "alt_err",              label: "Eval alt err (m)",   color: "#f27366", mode: "min" },
+  { key: "spd_err",              label: "Eval spd err (m/s)", color: "#4dd9d9", mode: "min" },
+  { key: "eval_reward",          label: "Eval mean reward",   color: "#8cd973", mode: "max" },
+];
+const COLORS = {};
+METRICS.forEach(m => (COLORS[m.key] = m.color));
+
+const SUMMARY_FILENAME = "run.json";
+let jsonl = [];          // parsed records, in file order
+let meta = {};           // run_id / status read from run.json (same dir)
+let visible = {};        // metric key -> bool
+let canvas, ctx, tooltip, raf = null;
+
+/* ── File loading ──────────────────────────────────────────────────── */
+function pickFile() { document.getElementById("file").click(); }
+document.getElementById("file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (f) loadFile(f);
+});
+
+let drop = document.getElementById("drop");
+window.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("drag"); });
+window.addEventListener("dragleave", () => drop.classList.remove("drag"));
+window.addEventListener("drop", e => {
+  e.preventDefault(); drop.classList.remove("drag");
+  const f = e.dataTransfer.files[0];
+  if (f && /jsonl?$/i.test(f.name)) loadFile(f);
+});
+
+async function loadFile(file) {
+  const text = await file.text();
+  ingest(text, file.name);
+}
+
+function ingest(text, fileName) {
+  jsonl = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try { jsonl.push(JSON.parse(t)); } catch (_) { /* skip partial tail line */ }
+  }
+  if (!jsonl.length) { alert("No parseable JSON lines in that file."); return; }
+  document.getElementById("main").style.display = "block";
+  drop.style.display = "none";
+  document.getElementById("samples").textContent =
+    `— ${jsonl.length} iterations · ${fileName}`;
+  fetchManifest(fileName);
+  METRICS.forEach(m => (visible[m.key] = true));
+  visible["advantage_mean"] = false;
+  render();
+}
+
+/* Pick runs/<id>/run.json next to metrics.jsonl when reachable. */
+async function fetchManifest(fileName) {
+  try {
+    const base = fileName.replace(/[^/]*metrics\.jsonl$/, "");
+    const req = await fetch(base + SUMMARY_FILENAME);
+    if (req.ok) meta = await req.json();
+    renderSummary();
+  } catch (_) { /* relative fetch unavailable (file://) — manifest is best-effort */ }
+}
+
+/* ── Data helpers ──────────────────────────────────────────────────── */
+function valueOf(rec, key) {
+  switch (key) {
+    case "alt_err": case "spd_err": case "eval_reward":
+      return rec.eval ? rec.eval[key === "eval_reward" ? "total_reward" : key] : undefined;
+    default: return rec[key];
+  }
+}
+
+/* ── Smoothing ─────────────────────────────────────────────────────── */
+function smooth(ys, win) {
+  if (win <= 0) return ys;
+  const out = new Array(ys.length);
+  let acc = 0, n = 0;
+  for (let i = 0; i < ys.length; i++) {
+    acc += ys[i]; n++;
+    if (i - win >= 0) { acc -= ys[i - win]; n--; }
+    out[i] = acc / n;
+  }
+  return out;
+}
+
+/* ── Rendering ─────────────────────────────────────────────────────── */
+function render() {
+  renderSummary();
+  renderLegend();
+  drawChart();
+  renderRaw();
+}
+
+function renderSummary() {
+  const grid = document.getElementById("summary");
+  grid.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "card";
+  const status = meta.status || "completed";
+  const color = status === "completed" ? "var(--ok)" : status === "running" ? "var(--warn)" : "var(--err)";
+  head.innerHTML = `
+    <div class="name">Run ${meta.run_id ? "id" : "sample"}</div>
+    <div class="value" style="font-size:13px;color:${color}">${escapeHtml(meta.run_id || jsonl.length + " records")}</div>
+    <div class="meta">${meta.algo || "?"} · backend ${meta.backend || "?"} · status <b style="color:${color}">${status}</b></div>`;
+  grid.appendChild(head);
+
+  for (const m of METRICS) {
+    const xs = [], ys = [];
+    for (const r of jsonl) {
+      const v = valueOf(r, m.key);
+      if (typeof v === "number" && isFinite(v)) { xs.push(r.iteration); ys.push(v); }
+    }
+    if (!ys.length) continue;
+    const latest = ys[ys.length - 1];
+    const min = Math.min(...ys), max = Math.max(...ys);
+    let best = latest, deltaLabel = "";
+    if (m.mode === "min") { best = min; deltaLabel = "↓ min"; }
+    if (m.mode === "max") { best = max; deltaLabel = "↑ max"; }
+    if (m.mode === "mid") { best = (min + max) / 2; deltaLabel = "mid"; }
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <div class="name"><span class="swatch" style="background:${m.color}"></span>${m.label}</div>
+      <div class="value">${fmt(latest)}</div>
+      <div class="meta">range ${fmt(min)} … ${fmt(max)} · ${deltaLabel} ${fmt(best)}</div>`;
+    grid.appendChild(div);
+  }
+}
+
+function renderLegend() {
+  const legend = document.getElementById("legend");
+  legend.innerHTML = "";
+  for (const m of METRICS) {
+    const lbl = document.createElement("label");
+    lbl.onclick = () => {
+      visible[m.key] = !visible[m.key];
+      drawChart();
+      lbl.style.opacity = visible[m.key] ? "1" : ".35";
+    };
+    lbl.innerHTML = `<span class="sw" style="background:${m.color}"></span> ${m.label}`;
+    lbl.style.opacity = visible[m.key] ? "1" : ".35";
+    legend.appendChild(lbl);
+  }
+}
+
+function drawChart() {
+  const c = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth || c.parentElement.clientWidth || 800;
+  const H = c.clientHeight || 420;
+  c.width = W * dpr; c.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const PAL = { left: 52, right: 16, top: 18, bottom: 26 };
+  const pw = W - PAL.left - PAL.right, ph = H - PAL.top - PAL.bottom;
+  const win = +document.getElementById("smooth").value;
+
+  // Collect the visible series.
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  const series = [];
+  for (const m of METRICS) {
+    if (!visible[m.key]) continue;
+    const xs = [], ys = [];
+    for (const r of jsonl) {
+      const v = valueOf(r, m.key);
+      if (typeof v === "number" && isFinite(v)) { xs.push(r.iteration); ys.push(v); }
+    }
+    if (!ys.length) continue;
+    const s = smooth(ys, win);
+    const smin = Math.min(...s), smax = Math.max(...s);
+    xMin = Math.min(xMin, ...xs); xMax = Math.max(xMax, ...xs);
+    yMin = Math.min(yMin, smin); yMax = Math.max(yMax, smax);
+    series.push({ m, xs: xs.slice(), ys: s });
+  }
+  if (!series.length) return;
+
+  const logy = document.getElementById("logy").checked;
+  if (logy) {
+    const eps = 1e-9;
+    let lo = Infinity, hi = -Infinity;
+    for (const s of series) for (const y of s.ys) {
+      const a = Math.log10(Math.abs(y) + eps);
+      lo = Math.min(lo, a); hi = Math.max(hi, a);
+    }
+    if (isFinite(lo) && isFinite(hi)) { yMin = lo; yMax = hi; }
+  }
+  if (yMax - yMin < 1e-12) { yMin -= 1; yMax += 1; }
+  yMin -= (yMax - yMin) * 0.05; yMax += (yMax - yMin) * 0.05;
+
+  const X = i => PAL.left + (xMax === xMin ? 0 : (i - xMin) / (xMax - xMin)) * pw;
+  const Y = v => {
+    if (logy) v = Math.log10(Math.abs(v) + 1e-9);
+    return PAL.top + ph * (1 - (v - yMin) / (yMax - yMin));
+  };
+
+  // Grid + labels.
+  ctx.font = "11px monospace"; ctx.textBaseline = "middle";
+  const g = 5;
+  for (let i = 0; i <= g; i++) {
+    const y = PAL.top + ph * i / g;
+    const v = yMax - (yMax - yMin) * i / g;
+    ctx.strokeStyle = "#1b2436"; ctx.beginPath(); ctx.moveTo(PAL.left, y); ctx.lineTo(W - PAL.right, y); ctx.stroke();
+    ctx.fillStyle = "#5f6b82"; ctx.textAlign = "right";
+    ctx.fillText(fmt(v), PAL.left - 6, y);
+  }
+  ctx.strokeStyle = "#33405c"; ctx.strokeRect(PAL.left, PAL.top, pw, ph);
+  ctx.fillStyle = "#5f6b82"; ctx.textAlign = "left";
+  ctx.fillText("iter " + xMin, PAL.left, H - 10);
+  ctx.textAlign = "right";
+  ctx.fillText("iter " + xMax, W - PAL.right, H - 10);
+
+  // Series polylines.
+  for (const s of series) {
+    ctx.strokeStyle = s.m.color; ctx.lineWidth = 1.6; ctx.beginPath();
+    for (let i = 0; i < s.xs.length; i++) {
+      const x = X(s.xs[i]), y = Y(s.ys[i]);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Tooltip map.
+  chartHoverMap = { series, X, Y };
+}
+
+let chartHoverMap = null;
+document.getElementById("chart-wrap").addEventListener("mousemove", e => {
+  if (!chartHoverMap) return;
+  const rect = document.getElementById("chart").getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  // Nearest existing iteration x among the first visible series.
+  const { series, X } = chartHoverMap;
+  let best = null, bd = 1e9;
+  const probe = series[0];
+  if (!probe) return;
+  for (let i = 0; i < probe.xs.length; i++) {
+    const d = Math.abs(X(probe.xs[i]) - mx);
+    if (d < bd) { bd = d; best = probe.xs[i]; }
+  }
+  if (best == null) { tooltip.style.display = "none"; return; }
+  let html = `<div class="row" style="color:#8a95ab">iter ${best}</div>`;
+  for (const s of series) {
+    const idx = s.xs.indexOf(best);
+    const v = idx >= 0 ? s.ys[idx] : null;
+    const row = idx >= 0
+      ? `<div class="row"><span><span class="sw" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.m.color};margin-right:5px"></span>${s.m.label}</span><b>${fmt(v)}</b></div>`
+      : "";
+    html += row;
+  }
+  tooltip.innerHTML = html;
+  tooltip.style.display = "block";
+  tooltip.style.left = (mx + 14) + "px";
+  tooltip.style.top = Math.max(0, e.clientY - rect.top - 12) + "px";
+});
+document.getElementById("chart-wrap").addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+
+function renderRaw() {
+  const t = document.getElementById("raw");
+  t.innerHTML = "";
+  if (!jsonl.length) return;
+  const head = jsonl[0].eval ? [...Object.keys(jsonl[0]), "eval.*"] : Object.keys(jsonl[0]);
+  let html = "<tr><th>row</th>" + head.map(h => `<th>${escapeHtml(h)}</th>`).join("") + "</tr>";
+  jsonl.forEach((r, i) => {
+    const cells = Object.keys(r).map(k => escapeHtml(shortVal(r[k])));
+    let row = `<tr><td>${i}</td>` + cells.join("") + "</tr>";
+    if (r.eval) row = row.replace("</tr>", "<td>" + escapeHtml(shortVal(r.eval)) + "</td></tr>");
+    html += row;
+  });
+  t.innerHTML = html;
+}
+
+/* ── Utils ─────────────────────────────────────────────────────────── */
+function fmt(v) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a >= 10000) return v.toFixed(0);
+  if (a >= 100) return v.toFixed(1);
+  if (a >= 1) return v.toFixed(3);
+  return v.toPrecision(3);
+}
+function shortVal(v) {
+  if (typeof v === "number") return fmt(v);
+  if (typeof v === "object") return JSON.stringify(v).slice(0, 80);
+  return String(v);
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+document.getElementById("smooth").addEventListener("input", e => {
+  document.getElementById("smooth-v").textContent = e.target.value;
+  drawChart();
+});
+document.getElementById("logy").addEventListener("change", drawChart);
+
+function exportCsv() {
+  if (!jsonl.length) return;
+  const header = Object.keys(jsonl[0]).join(",");
+  const rows = jsonl.map(r => Object.values(r).map(v =>
+    typeof v === "object" ? JSON.stringify(v) : v).join(","));
+  const blob = new Blob([header + "\n" + rows.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "metrics.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* Optional: open a run directly, e.g. dashboard.html?file=runs/2026.../metrics.jsonl */
+window.addEventListener("DOMContentLoaded", () => {
+  const f = new URLSearchParams(location.search).get("file");
+  if (!f) return;
+  fetch(f)
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+    .then(text => ingest(text, f))
+    .catch(err => {
+      drop.innerHTML = `Could not load <code>${escapeHtml(f)}</code> (${escapeHtml(String(err))}) — serve the file over HTTP for <code>?file=</code>, or pick it manually.`;
+    });
+});
+</script>
+</body>
+</html>

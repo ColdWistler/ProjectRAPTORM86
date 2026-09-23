@@ -44,6 +44,9 @@ const LOG_PATH := "user://rl_training.log"
 const DEFAULT_CHECKPOINT := "res://../checkpoints"
 const DEFAULT_CONFIG := "res://../aircraft.toml"
 
+const ChartScript := preload("res://scripts/rl_chart.gd")
+const RUNS_DIR := "res://../runs"
+
 const BG_CARD := Color(0.09, 0.11, 0.17)
 const BORDER := Color(0.15, 0.19, 0.28)
 const BORDER_LIGHT := Color(0.20, 0.26, 0.36)
@@ -58,6 +61,7 @@ var _algo_option: OptionButton
 var _backend_option: OptionButton
 var _fields_container: GridContainer
 var _checkpoint_edit: LineEdit
+var _run_name_edit: LineEdit
 var _status: Label
 var _log_view: RichTextLabel
 var _binary_label: Label
@@ -68,6 +72,13 @@ var _eval_btn: BaseButton
 var _training_pid := 0
 var _log_offset := 0
 
+# ── Live telemetry chart state ──────────────────────────────────────
+var _chart: Control
+var _metric_option: OptionButton
+var _points := {}          # metric key -> Array of { "x": iteration, "y": value }
+var _telemetry_path := ""  # absolute path of the active run's metrics.jsonl
+var _telemetry_offset := 0
+
 
 func _ready() -> void:
 	_build_ui()
@@ -77,6 +88,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if _training_pid != 0:
 		_poll_log()
+		_poll_telemetry()
 		if not OS.is_process_running(_training_pid):
 			var code := OS.get_process_exit_code(_training_pid)
 			_training_pid = 0
@@ -189,6 +201,15 @@ func _build_ui() -> void:
 	_binary_label.add_theme_font_size_override("font_size", 13)
 	actions_inner.add_child(_binary_label)
 
+	var run_name_row := HBoxContainer.new()
+	run_name_row.add_theme_constant_override("separation", 12)
+	actions_inner.add_child(run_name_row)
+	run_name_row.add_child(_make_label("Run name"))
+	_run_name_edit = LineEdit.new()
+	_run_name_edit.placeholder_text = "optional label for the telemetry run id (e.g. first_attempt)"
+	_run_name_edit.custom_minimum_size.x = 460
+	run_name_row.add_child(_run_name_edit)
+
 	var buttons := HBoxContainer.new()
 	buttons.add_theme_constant_override("separation", 12)
 	actions_inner.add_child(buttons)
@@ -210,6 +231,49 @@ func _build_ui() -> void:
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status.add_theme_font_size_override("font_size", 14)
 	actions_inner.add_child(_status)
+
+	# ── Live metrics ────────────────────────────────────────────────
+	var chart_card := _make_card()
+	vbox.add_child(chart_card)
+	var chart_inner: VBoxContainer = chart_card.get_child(0)
+	chart_inner.add_child(_make_heading("Live metrics"))
+
+	var chart_row := HBoxContainer.new()
+	chart_row.add_theme_constant_override("separation", 12)
+	chart_inner.add_child(chart_row)
+	chart_row.add_child(_make_label("Plot"))
+	_metric_option = OptionButton.new()
+	for key in ChartScript.METRICS:
+		_metric_option.add_item(str(ChartScript.METRICS[key]["label"]))
+		_metric_option.set_item_metadata(_metric_option.item_count - 1, key)
+	_metric_option.select(0)
+	_metric_option.custom_minimum_size.x = 240
+	_metric_option.item_selected.connect(_on_metric_changed)
+	chart_row.add_child(_metric_option)
+
+	var chart_panel := PanelContainer.new()
+	var chart_style := StyleBoxFlat.new()
+	chart_style.bg_color = Color(0.02, 0.03, 0.05)
+	chart_style.border_width_left = 1
+	chart_style.border_width_right = 1
+	chart_style.border_width_top = 1
+	chart_style.border_width_bottom = 1
+	chart_style.border_color = BORDER_LIGHT
+	chart_panel.add_theme_stylebox_override("panel", chart_style)
+	chart_inner.add_child(chart_panel)
+
+	_chart = ChartScript.new()
+	_chart.custom_minimum_size = Vector2(0, 220)
+	_chart.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_chart.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	chart_panel.add_child(_chart)
+
+	var hint := Label.new()
+	hint.text = "Streams runs/<run_id>/metrics.jsonl while training. After the run, open rl_agent/dashboard.html in a browser for the full report."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_color_override("font_color", TEXT_DIM)
+	chart_inner.add_child(hint)
 
 	# ── Log ─────────────────────────────────────────────────────────
 	var log_card := _make_card()
@@ -300,6 +364,22 @@ func _on_algo_changed(_index: int) -> void:
 	_rebuild_fields()
 
 
+func _on_metric_changed(index: int) -> void:
+	var key := str(_metric_option.get_item_metadata(index))
+	_rebuild_chart(key)
+
+
+## Repoint the chart at another series: rebuild from the stored points for
+## the selected metric (cheap — runs only on dropdown changes).
+func _rebuild_chart(key: String) -> void:
+	_chart.clear()
+	_chart.set_metric(key)
+	var series: Array = _points.get(key, [])
+	for p in series:
+		_chart.push(int(p["x"]), float(p["y"]))
+	_chart.update_title()
+
+
 func _rebuild_fields() -> void:
 	for child in _fields_container.get_children():
 		_fields_container.remove_child(child)
@@ -383,6 +463,12 @@ func _build_args(eval_only: bool) -> Array:
 		args.append("--eval-episodes")
 		args.append(_format_value("int", _field_value("eval-episodes")))
 		return args
+	args.append("--run-dir")
+	args.append(ProjectSettings.globalize_path(RUNS_DIR))
+	var run_name := _run_name_edit.text.strip_edges()
+	if not run_name.is_empty():
+		args.append("--name")
+		args.append(run_name)
 	for field in ALGO_FIELDS[_selected_algo_id()]:
 		args.append("--" + field["key"])
 		args.append(_format_value(field["kind"], _field_value(field["key"])))
@@ -435,6 +521,88 @@ func _shell_quote(s: String) -> String:
 	return "'" + s.replace("'", "'\\''") + "'"
 
 
+# ── Telemetry streaming ─────────────────────────────────────────────
+## Poll the active run's metrics.jsonl and feed the live chart. Runs every
+## frame while the trainer subprocess is alive; the resolved path sticks
+## for the whole run so the chart keeps its data after the process exits.
+func _poll_telemetry() -> void:
+	_resolve_telemetry_path()
+	if _telemetry_path.is_empty() or not FileAccess.file_exists(_telemetry_path):
+		return
+	var f := FileAccess.open(_telemetry_path, FileAccess.READ)
+	if f == null:
+		return
+	var size := f.get_length()
+	if size < _telemetry_offset:
+		_telemetry_offset = 0  # file was replaced
+	f.seek(_telemetry_offset)
+	var chunk := f.get_as_text()
+	_telemetry_offset = f.get_position()
+	f.close()
+	if chunk.is_empty():
+		return
+	for line in chunk.split("\n"):
+		var rec: Variant = JSON.parse_string(line)
+		if typeof(rec) == TYPE_DICTIONARY:
+			_ingest_record(rec)
+
+
+## Run ids are UTC timestamps (`YYYYMMDD_HHMMSS_<millis>_<algo>_seed<n>`),
+## so the lexicographically newest directory is the current run. Resolve it
+## once, then stick with it — the chart keeps showing the last run after
+## training finishes.
+func _resolve_telemetry_path() -> void:
+	if not _telemetry_path.is_empty():
+		return
+	var dir := DirAccess.open(RUNS_DIR)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var newest := ""
+	var entry := dir.get_next()
+	while not entry.is_empty():
+		if dir.current_is_dir() and entry != "." and entry != "..":
+			if FileAccess.file_exists("%s/%s/metrics.jsonl" % [RUNS_DIR, entry]):
+				if entry > newest:
+					newest = entry
+		entry = dir.get_next()
+	dir.list_dir_end()
+	if not newest.is_empty():
+		_telemetry_path = ProjectSettings.globalize_path("%s/%s/metrics.jsonl" % [RUNS_DIR, newest])
+		_points.clear()
+		_telemetry_offset = 0
+
+
+func _ingest_record(rec: Dictionary) -> void:
+	var it := int(rec.get("iteration", -1))
+	if it < 0:
+		return
+	_push_point("mean_reward_per_step", it, rec.get("mean_reward_per_step"))
+	_push_point("policy_loss", it, rec.get("policy_loss"))
+	_push_point("value_loss", it, rec.get("value_loss"))
+	_push_point("entropy", it, rec.get("entropy"))
+	_push_point("advantage_mean", it, rec.get("advantage_mean"))
+	var ev: Variant = rec.get("eval")
+	if typeof(ev) == TYPE_DICTIONARY:
+		_push_point("alt_err", it, ev.get("alt_err"))
+		_push_point("spd_err", it, ev.get("spd_err"))
+		_push_point("eval_reward", it, ev.get("total_reward"))
+
+
+func _push_point(key: String, it: int, value: Variant) -> void:
+	if value == null or typeof(value) != TYPE_FLOAT:
+		return
+	if not _points.has(key):
+		_points[key] = []
+	var arr: Array = _points[key]
+	if arr.size() > 20000:
+		arr = arr.slice(arr.size() - 20000)
+	arr.append({ "x": it, "y": float(value) })
+	_points[key] = arr
+	if key == _chart.metric_key:
+		_chart.push(it, float(value))
+
+
 # ── Log streaming ────────────────────────────────────────────────────
 func _poll_log(tail := false) -> void:
 	if not FileAccess.file_exists(LOG_PATH):
@@ -471,6 +639,12 @@ func _clear_log() -> void:
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(LOG_PATH))
 	_log_view.text = ""
 	_log_offset = 0
+	# Reset run telemetry state so the next run streams a fresh chart.
+	_telemetry_path = ""
+	_telemetry_offset = 0
+	_points.clear()
+	_chart.set_metric("mean_reward_per_step")
+	_chart.clear()
 
 
 func _update_binary_label() -> void:
