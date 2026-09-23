@@ -63,6 +63,9 @@ algorithm, backend and hyper-parameters and runs training with a live log
 | `--eval-episodes N` | `3` | Episodes per eval run |
 | `--config PATH` | `aircraft.toml` | Aircraft config for `flight_core` |
 | `--checkpoint DIR` | `checkpoints` | Checkpoint directory |
+| `--telemetry on\|off` | `on` | Write structured telemetry (see §12) |
+| `--run-dir DIR` | `runs` | Root dir for per-run telemetry subdirectories |
+| `--name LABEL` | none | Optional human label appended to the run id |
 
 ## 3. Backends (`--backend cpu | gpu | auto`)
 
@@ -178,7 +181,8 @@ by `main_menu.gd`). It:
 - picks `auto` / `cpu` / `gpu`;
 - launches the `rl_agent` binary as a subprocess (`sh -c 'exec …'` so the
   Stop button kills the actual trainer), streaming its stdout into a live,
-  scrollable log;
+  scrollable log **and** charting the run's `metrics.jsonl` in the **Live
+  metrics** card (see §12);
 - locates the binary automatically (`target/release/rl_agent`, then
   `target/debug/rl_agent` — build with `cargo build -r -p rl_agent` if the
   panel reports it missing);
@@ -271,13 +275,16 @@ use rl_agent::algo::{Algorithm, AlgoSpec};
 use rl_agent::backend::{cpu_device, Cpu};
 use rl_agent::net::NetConfig;
 use rl_agent::ppo::{PpoAgent, PpoConfig};
+use rl_agent::telemetry::TelemetryConfig;
 use rl_agent::trainer::{evaluate, load_checkpoint, run, TrainerConfig};
 
 // Train — the spec selects the algorithm + its hyper-parameters:
 let device = cpu_device();
 let spec = AlgoSpec::Ppo { config: PpoConfig::default() };
+let telemetry = TelemetryConfig::disabled(); // or TelemetryConfig::default() for runs/
 let outcome = run::<Cpu>(
     &TrainerConfig::default(),
+    &telemetry,
     &NetConfig::default(),
     &spec,
     &device,
@@ -311,6 +318,79 @@ updates, the algorithm layer (spec serde round-trip, registry factory +
 `act`), and end-to-end trainer smoke tests — including a real-environment
 two-iteration run, same-seed reproducibility, FC-limit action mapping, new
 and legacy checkpoint round-trips to a temp directory.
+
+---
+
+## 12. Telemetry, log organization, and visualization
+
+Training tends to produce a wall of per-iteration console lines. To keep the
+console readable *and* the data useful, every run writes **structured
+telemetry** alongside the console output. Turn it off with `--telemetry off`
+(tests and library callers use `TelemetryConfig::disabled()`).
+
+### Run layout
+
+With default flags a training run creates one self-contained directory per
+run, keyed by a UTC timestamp so runs sort chronologically and never collide:
+
+```text
+runs/
+└── 20260923_143512_123_ppo_seed42_smoke/
+    ├── run.json        # manifest: status, timestamps, git commit, argv, all configs
+    └── metrics.jsonl   # one JSON object per PPO iteration (flush per write)
+```
+
+- `--name LABEL` appends a slugified label to the run id
+  (`20260923_143512_123_ppo_seed42_smoke`); `--run-dir DIR` relocates the
+  root.
+- `run.json` starts as `"status": "running"` and is rewritten to
+  `completed` on a normal finish (best-effort `interrupted` from `Drop` if
+  the process dies), so it doubles as a liveness/heartbeat record.
+- `metrics.jsonl` is append-only and flushed after **every iteration**, so
+  live consumers can tail it while training runs.
+
+### Metrics stream
+
+Each line of `metrics.jsonl`:
+
+```json
+{"iteration":12,"elapsed_s":34.2,"steps_per_s":1536.4,
+ "policy_loss":-0.02,"value_loss":0.51,"entropy":1.41,
+ "advantage_mean":0.12,"advantage_std":0.94,
+ "mean_reward_per_step":0.03,"mean_episode_steps":482.0,
+ "crash_rate":0.25,"episodes_completed":4,
+ "eval":{"alt_err":88.2,"spd_err":9.1,"total_reward":12.4,
+         "crashes":0,"episodes":3,"mean_steps":1888.0},
+ "checkpoint":true}
+```
+
+The rollout-derived fields (`mean_reward_per_step`, `mean_episode_steps`,
+`crash_rate`, `episodes_completed`, `steps_per_s`) are new with this
+stream — they were previously only visible as a console line. Flatten it to a
+table with any JSONL tool, or press **Download CSV** in the dashboard.
+
+### Live chart (Godot RL tab)
+
+The main-menu RL tab now shows a **Live metrics** card that streams the run's
+`metrics.jsonl` while the subprocess trains: pick a series
+(Reward/step, Policy/Value loss, Entropy, Advantage mean, or the eval
+metrics), hover for values, and read the latest value in the chart title. The
+raw console log stays below it (Clear log resets the chart for the next run).
+Only the resolved run dir is read — the chart survives after the process
+exits so you can inspect the finished run in-engine.
+
+### HTML dashboard (`rl_agent/dashboard.html`)
+
+For post-run analysis open `rl_agent/dashboard.html` in any browser (no
+dependencies, works offline from `file://`) and load a
+`runs/<run_id>/metrics.jsonl` (drag & drop or picker):
+
+- summary cards per metric (latest / range / best-in-class by direction),
+- an interactive multi-series chart with smoothing + log-Y,
+- a raw-rows table and a **Download CSV** export.
+
+> The dashboard is a static file with no build step; keep it in sync if you
+> add fields to `IterationRecord` in `rl_agent/src/telemetry.rs`.
 
 ---
 

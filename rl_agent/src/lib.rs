@@ -55,6 +55,7 @@ pub mod gae;
 pub mod net;
 pub mod normalize;
 pub mod ppo;
+pub mod telemetry;
 pub mod trainer;
 
 pub use algo::{Algorithm, AlgoSpec};

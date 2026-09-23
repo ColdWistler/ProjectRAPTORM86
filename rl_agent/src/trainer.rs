@@ -18,6 +18,7 @@ use crate::gae::compute_gae;
 use crate::net::NetConfig;
 use crate::normalize::RunningNormalizer;
 use crate::ppo::PpoConfig;
+use crate::telemetry::{IterationRecord, RunMeta, TelemetryConfig, TelemetryWriter};
 use crate::{ACTION_DIM, AVIONICS_OBS_DIM};
 use burn::tensor::backend::AutodiffBackend;
 use flight_core::{AvionicsAction, AvionicsEnvironment, EnvConfig};
@@ -166,7 +167,7 @@ impl Default for TrainerConfig {
 }
 
 /// Aggregated evaluation metrics.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct EvalMetrics {
     /// Mean per-step |baro_altitude − target| over all eval steps.
     pub alt_err: f32,
@@ -182,6 +183,36 @@ pub struct EvalMetrics {
     pub mean_steps: f32,
 }
 
+/// Aggregated per-rollout statistics (rewards, episodes, throughput).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RolloutStats {
+    /// Total reward over the rollout (crash penalties included).
+    pub reward_sum: f64,
+    /// Episodes finished this rollout (crash or step-budget).
+    pub completed_episodes: usize,
+    /// Of the finished episodes, how many ended by crashing.
+    pub crash_count: usize,
+    /// Sum of steps across finished episodes, for the mean.
+    pub episode_len_sum: usize,
+}
+
+impl RolloutStats {
+    /// Mean per-step reward, crash penalties included.
+    pub fn mean_reward_per_step(&self, steps: usize) -> f32 {
+        (self.reward_sum / steps.max(1) as f64) as f32
+    }
+
+    /// Mean steps per finished episode.
+    pub fn mean_episode_steps(&self) -> f32 {
+        (self.episode_len_sum as f64 / self.completed_episodes.max(1) as f64) as f32
+    }
+
+    /// Crash rate over finished episodes (0..=1). `0` when nothing finished.
+    pub fn crash_rate(&self) -> f32 {
+        self.crash_count as f32 / self.completed_episodes.max(1) as f32
+    }
+}
+
 /// What `run` hands back for tests / the CLI.
 pub struct TrainingOutcome<B: AutodiffBackend<FloatElem = f32>> {
     /// Trained algorithm (final params after all iterations).
@@ -195,9 +226,12 @@ pub struct TrainingOutcome<B: AutodiffBackend<FloatElem = f32>> {
 /// Run `tcfg.iterations` training iterations on the avionics environment.
 ///
 /// The algorithm is built from `spec` through the [`make_algorithm`]
-/// registry, so the loop itself stays algorithm-agnostic.
+/// registry, so the loop itself stays algorithm-agnostic. When `telemetry`
+/// is enabled, every iteration is appended (flushed) to the run's
+/// `metrics.jsonl` and the run manifest (`run.json`) is finished on exit.
 pub fn run<B: AutodiffBackend<FloatElem = f32>>(
     tcfg: &TrainerConfig,
+    telemetry: &TelemetryConfig,
     ncfg: &NetConfig,
     spec: &AlgoSpec,
     device: &B::Device,
@@ -210,14 +244,30 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
     let mut normalizer = RunningNormalizer::new(ncfg.obs_dim);
     let (gamma, lambda) = agent.td_params();
 
+    let meta = RunMeta {
+        algo: agent.id(),
+        backend: std::any::type_name::<B::Device>(),
+        tcfg,
+        ncfg,
+        spec,
+    };
+    let mut tele = TelemetryWriter::start(telemetry, &meta)?;
+    if let Some(w) = tele.as_ref() {
+        println!("[rl_agent] telemetry  run: {}", w.run_id());
+    }
+
     let mut obs = env.reset();
     normalizer.observe(&obs);
 
     let mut last_eval: Option<EvalMetrics> = None;
+    let run_start = std::time::Instant::now();
+    let mut last_iter_at = run_start;
 
     for it in 0..tcfg.iterations {
         let mut buffer = RolloutBuffer::new(ncfg.obs_dim, ncfg.action_dim);
         let mut final_obs: Option<Vec<f32>> = None;
+        let mut roll = RolloutStats::default();
+        let mut ep_steps = 0usize;
 
         // ---- 1. Rollout ----
         for _ in 0..tcfg.rollout_steps {
@@ -239,10 +289,16 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
                 truncated: outcome.truncated,
             });
 
+            roll.reward_sum += reward;
+            ep_steps += 1;
             let next_f32: Vec<f32> = outcome.obs.iter().map(|&x| x as f32).collect();
             final_obs = Some(next_f32);
 
             if outcome.terminated || outcome.truncated {
+                roll.completed_episodes += 1;
+                roll.crash_count += usize::from(outcome.terminated);
+                roll.episode_len_sum += ep_steps;
+                ep_steps = 0;
                 obs = env.reset();
                 normalizer.observe(&obs);
             } else {
@@ -279,19 +335,13 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
         };
         let stats = agent.update(&batch);
 
-        if tcfg.print_every > 0 && (it % tcfg.print_every == 0 || it == tcfg.iterations - 1) {
-            println!(
-                "[rl_agent] iter {:>4}/{}  policy {:.4}  value {:.4}  entropy {:.4}  adv {:.3}±{:.3}",
-                it + 1,
-                tcfg.iterations,
-                stats.policy_loss,
-                stats.value_loss,
-                stats.entropy,
-                stats.advantage_mean,
-                stats.advantage_std,
-            );
-        }
+        // ---- 4. Eval + checkpoint + telemetry ----
+        let iter_elapsed = run_start.elapsed().as_secs_f64();
+        let since_last = last_iter_at.elapsed().as_secs_f64().max(1e-9);
+        last_iter_at = std::time::Instant::now();
+        let steps_per_s = tcfg.rollout_steps as f64 / since_last;
 
+        let mut iter_eval: Option<&EvalMetrics> = None;
         if tcfg.eval_every > 0 && it % tcfg.eval_every == 0 {
             last_eval = Some(evaluate(
                 agent.as_ref(),
@@ -300,17 +350,61 @@ pub fn run<B: AutodiffBackend<FloatElem = f32>>(
                 tcfg.eval_episodes,
                 tcfg.env_max_steps,
             ));
-            if let Some(ev) = last_eval {
+            if let Some(ev) = last_eval.as_ref() {
                 println!(
                     "[rl_agent] eval       alt_err {:.1} m  spd_err {:.1} m/s  reward {:.1}  crashes {}/{}",
                     ev.alt_err, ev.spd_err, ev.total_reward, ev.crashes, ev.episodes,
                 );
             }
+            iter_eval = last_eval.as_ref();
         }
 
+        let mut saved = false;
         if tcfg.save_every > 0 && (it % tcfg.save_every == 0 || it == tcfg.iterations - 1) {
             save_checkpoint(agent.as_ref(), &normalizer, tcfg, ncfg, &tcfg.checkpoint_dir)?;
+            saved = true;
         }
+
+        if let Some(w) = tele.as_mut() {
+            w.record(&IterationRecord {
+                iteration: it,
+                elapsed_s: iter_elapsed,
+                steps_per_s,
+                policy_loss: stats.policy_loss,
+                value_loss: stats.value_loss,
+                entropy: stats.entropy,
+                advantage_mean: stats.advantage_mean,
+                advantage_std: stats.advantage_std,
+                mean_reward_per_step: roll.mean_reward_per_step(tcfg.rollout_steps),
+                mean_episode_steps: roll.mean_episode_steps(),
+                crash_rate: roll.crash_rate(),
+                episodes_completed: roll.completed_episodes,
+                eval: iter_eval,
+                checkpoint: saved,
+            })?;
+        }
+
+        if tcfg.print_every > 0 && (it % tcfg.print_every == 0 || it == tcfg.iterations - 1) {
+            println!(
+                "[rl_agent] iter {:>4}/{}  policy {:.4}  value {:.4}  entropy {:.4}  \
+                 adv {:.3}±{:.3}  rew/step {:.4}  crash {:>3.0}%  eps {:>2}  {:>7.1} sps",
+                it + 1,
+                tcfg.iterations,
+                stats.policy_loss,
+                stats.value_loss,
+                stats.entropy,
+                stats.advantage_mean,
+                stats.advantage_std,
+                roll.mean_reward_per_step(tcfg.rollout_steps),
+                roll.crash_rate() * 100.0,
+                roll.completed_episodes,
+                steps_per_s,
+            );
+        }
+    }
+
+    if let Some(w) = tele.as_mut() {
+        w.finish()?;
     }
 
     Ok(TrainingOutcome {
@@ -500,7 +594,7 @@ mod tests {
                 minibatch_size: 32,
             },
         };
-        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run should succeed")
+        run::<Cpu>(&tcfg, &crate::telemetry::TelemetryConfig::disabled(), &ncfg, &spec, &device, &config_path()).expect("run should succeed")
     }
 
     #[test]
@@ -567,7 +661,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run");
+        run::<Cpu>(&tcfg, &crate::telemetry::TelemetryConfig::disabled(), &ncfg, &spec, &device, &config_path()).expect("run");
 
         let cp = load_checkpoint::<Cpu>(&tcfg.checkpoint_dir, &device, tcfg.seed).expect("load");
         assert_eq!(cp.algorithm.net_config().hidden, 16);
@@ -612,7 +706,7 @@ mod tests {
         let spec = AlgoSpec::Ppo {
             config: PpoConfig::default(),
         };
-        run::<Cpu>(&tcfg, &ncfg, &spec, &device, &config_path()).expect("run");
+        run::<Cpu>(&tcfg, &crate::telemetry::TelemetryConfig::disabled(), &ncfg, &spec, &device, &config_path()).expect("run");
 
         // Rewrite the checkpoint as a legacy one: drop algo.json, add ppo.json.
         std::fs::remove_file(std::path::Path::new(&dir).join("algo.json")).expect("remove algo.json");

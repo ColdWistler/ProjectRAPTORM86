@@ -93,7 +93,10 @@ physics run in Rust while Godot handles all assets and visualization.
   with `--backend cpu|gpu|auto` — `auto` probes the GPU and falls back to the
   CPU. The algorithm is **pluggable**: `--algo` selects a registered model
   (`rl_agent::algo::AlgoSpec`), and the main menu's **RL** tab launches
-  training from Godot with a live log (see
+  training from Godot with a **live metrics chart**. Every run streams
+  **structured telemetry** into `runs/<run_id>/` (`metrics.jsonl` +
+  `run.json` manifest) which the Godot panel charts live and
+  `rl_agent/dashboard.html` turns into a full post-run report (see
   [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements

@@ -14,6 +14,7 @@ use burn::tensor::backend::AutodiffBackend;
 use rl_agent::algo::{AlgoSpec, ALGO_PPO};
 use rl_agent::backend::{cpu_device, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
+use rl_agent::telemetry::TelemetryConfig;
 use rl_agent::trainer::{
     evaluate, load_checkpoint, run, AvionicsEnv, TrainerConfig,
 };
@@ -54,6 +55,15 @@ TRAIN MODE (default):
   --eval-episodes N     episodes per eval run                    (default 3)
   --config PATH         aircraft.toml for flight_core            (default aircraft.toml)
   --checkpoint DIR      checkpoint directory                     (default checkpoints)
+
+TELEMETRY (train mode):
+  Every iteration is appended to runs/<run_id>/metrics.jsonl and the run
+  manifest lives in runs/<run_id>/run.json (see docs/rl_agent_guide.md §12).
+
+  --telemetry on|off    write structured telemetry               (default on)
+  --run-dir DIR         root dir for per-run subdirectories      (default runs)
+  --name LABEL          optional human label for this run        (default none)
+                        (embedded in the run id, e.g. ..._ppo_seed42_smoke)
 
 EVAL MODE:
   rl_agent --mode eval --checkpoint DIR [--backend cpu|gpu] [--eval-episodes N]
@@ -182,7 +192,8 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
             Ok(())
         }
         "train" => {
-            let outcome = run::<B>(&tcfg, &ncfg, &spec, &device, &config_path)?;
+            let telemetry = build_telemetry_config(args)?;
+            let outcome = run::<B>(&tcfg, &telemetry, &ncfg, &spec, &device, &config_path)?;
             println!(
                 "[rl_agent] training complete (algo {}) on bootstrap from {}",
                 outcome.algorithm.id(),
@@ -223,6 +234,25 @@ fn build_trainer_config(args: &HashMap<String, String>) -> Result<TrainerConfig,
         cfg.checkpoint_dir = dir.clone();
     }
     Ok(cfg)
+}
+
+fn build_telemetry_config(args: &HashMap<String, String>) -> Result<TelemetryConfig, Box<dyn std::error::Error>> {
+    let enabled = args
+        .get("telemetry")
+        .map(String::as_str)
+        .unwrap_or("on");
+    if enabled == "off" {
+        return Ok(TelemetryConfig::disabled());
+    }
+    if enabled != "on" {
+        return Err(format!("--telemetry must be `on` or `off`, got `{enabled}`").into());
+    }
+    let run_root = args
+        .get("run-dir")
+        .cloned()
+        .unwrap_or_else(|| "runs".to_string());
+    let name = args.get("name").cloned();
+    Ok(TelemetryConfig { run_root, name })
 }
 
 fn build_net_config(args: &HashMap<String, String>) -> Result<NetConfig, Box<dyn std::error::Error>> {
