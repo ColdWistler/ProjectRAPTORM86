@@ -3,16 +3,17 @@
 //! The executable selects a tensor backend at runtime (`--backend
 //! cpu|gpu|auto`) and either trains (`train`) or rolls out a checkpointed
 //! policy under deterministic actions (`eval`). In `auto` mode the GPU is
-//! probed with a tiny tensor op and any panic during GPU execution falls
-//! back to the CPU backend.
+//! probed with the real training workload under a wall-clock timeout and any
+//! panic or stall falls back to the CPU backend.
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::time::Duration;
 
 use burn::tensor::backend::AutodiffBackend;
 
 use rl_agent::algo::{AlgoSpec, ALGO_PPO};
-use rl_agent::backend::{cpu_device, try_gpu_device, Cpu, Gpu};
+use rl_agent::backend::{cpu_device, probe_gpu_train, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
 use rl_agent::telemetry::TelemetryConfig;
 use rl_agent::trainer::{
@@ -74,7 +75,8 @@ EVAL MODE:
 BACKENDS:
   --backend cpu   ndarray backend (no GPU required)
   --backend gpu   wgpu/Vulkan backend (errors if unavailable)
-  --backend auto  probe GPU, fall back to CPU on failure (default)
+  --backend auto  probe GPU with the real training workload under a
+                  wall-clock timeout; fall back to CPU on failure (default)
 
   --help  print this message
 ";
@@ -125,18 +127,48 @@ fn parse_args() -> HashMap<String, String> {
     out
 }
 
+/// Wall-clock budget for the functional GPU probe ([`probe_gpu_train`]). A
+/// device that cannot complete ~16 autodiff updates plus 128 synced
+/// per-step forwards in this window is treated as unusable and `auto` falls
+/// back to CPU. Healthy GPU boxes finish it in well under a second.
+const GPU_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 fn run_main(args: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
     let backend = args.get("backend").map(String::as_str).unwrap_or("auto");
 
     match backend {
         "auto" => match try_gpu_device() {
-            Some(device) => match catch_unwind(AssertUnwindSafe(|| exec::<Gpu>(args, device))) {
-                Ok(res) => res,
-                Err(_) => {
-                    eprintln!("rl_agent: warning: GPU execution panicked — falling back to CPU");
-                    exec::<Cpu>(args, cpu_device())
+            Some(device) => {
+                // A micro matmul passing (`try_gpu_device`) is not enough:
+                // wgpu/Vulkan on some machines survives that but stalls in
+                // autodiff/fusion codegen or per-call dispatch, leaving a
+                // `running` run that never writes telemetry. Probe with the
+                // real training workload under a wall-clock budget and fall
+                // back to CPU when it does not complete.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let probe_device = device.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(probe_gpu_train(probe_device));
+                });
+                let probe_started = std::time::Instant::now();
+                match rx.recv_timeout(GPU_PROBE_TIMEOUT) {
+                    Ok(Ok(())) => exec::<Gpu>(args, device),
+                    Ok(Err(e)) => {
+                        eprintln!(
+                            "rl_agent: warning: GPU probe failed after {:.1}s ({e}) — using CPU",
+                            probe_started.elapsed().as_secs_f32()
+                        );
+                        exec::<Cpu>(args, cpu_device())
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "rl_agent: warning: GPU probe timed out after {:.1}s — using CPU",
+                            probe_started.elapsed().as_secs_f32()
+                        );
+                        exec::<Cpu>(args, cpu_device())
+                    }
                 }
-            },
+            }
             None => {
                 eprintln!("rl_agent: warning: no usable Vulkan GPU found — using CPU");
                 exec::<Cpu>(args, cpu_device())
