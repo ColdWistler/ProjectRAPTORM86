@@ -98,9 +98,11 @@ physics run in Rust while Godot handles all assets and visualization.
   **structured telemetry** into `runs/<run_id>/` (`metrics.jsonl` +
   `run.json` manifest) which the Godot panel charts live, the browser-report
   `rl_agent/dashboard.html` renders any run as a full post-run report, and
-  the native `rl_dash` desktop app (egui) live-follows training in a single
-  comparison chart per metric — overlay any set of runs, and the RL tab can
-  pop it open automatically
+  the native `rl_dash` desktop app (egui) live-follows training — overlay
+  any set of runs on a comparison chart (iteration / env-steps / wall-clock
+  axes, best-so-far and log-scale toggles, eval/checkpoint guides, seed
+  mean±std bands), a run×iteration heatmap, and a per-run summary table; the
+  RL tab can pop it open automatically
   (see [docs/rl_agent_guide.md](docs/rl_agent_guide.md))
 
 ## Requirements

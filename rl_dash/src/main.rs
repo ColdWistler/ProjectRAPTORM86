@@ -3,7 +3,10 @@
 //! Reads the same per-run files the trainer writes
 //! (`runs/<run_id>/run.json` + `runs/<run_id>/metrics.jsonl`, see
 //! `rl_agent/src/telemetry.rs`), live-follows the newest run while
-//! training runs, and lets you overlay any number of runs for comparison.
+//! training runs, and lets you overlay any number of runs for comparison —
+//! on iteration / env-steps / wall-clock axes, as a run×iteration heatmap,
+//! or in a per-run summary table. Extra views: best-so-far envelopes,
+//! log-scale, eval/checkpoint guides, and seed mean±std bands.
 //!
 //! ```bash
 //! cargo run -p rl_dash --release                 # watches ./runs
@@ -19,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, Points, Polygon, VLine};
 use serde::Deserialize;
 
 /// Metric registry — keys mirror `metrics.jsonl` fields (and
@@ -30,10 +33,20 @@ const METRICS: &[(&str, &str)] = &[
     ("value_loss", "Value loss"),
     ("entropy", "Entropy"),
     ("advantage_mean", "Advantage mean"),
+    ("advantage_std", "Advantage std"),
+    ("steps_per_s", "Env steps / s"),
+    ("crash_rate", "Crash rate"),
+    ("mean_episode_steps", "Episode steps"),
+    ("episodes_completed", "Episodes completed"),
     ("alt_err", "Eval alt err (m)"),
     ("spd_err", "Eval spd err (m/s)"),
     ("eval_reward", "Eval mean reward"),
 ];
+
+/// Colors for vertical guide lines (eval / checkpoint markers) on the chart.
+/// Excluded from `PALETTE` so run colors never collide with guides.
+const EVAL_MARKER: egui::Color32 = egui::Color32::from_rgb(150, 160, 180);
+const CKPT_MARKER: egui::Color32 = egui::Color32::from_rgb(242, 204, 77);
 
 /// Per-run line colors, assigned by position in the run list.
 const PALETTE: [egui::Color32; 8] = [
@@ -79,6 +92,15 @@ struct RunManifest {
     backend: Option<String>,
     #[serde(default)]
     git_commit: Option<String>,
+    /// Raw hyper-parameter blocks, retained so runs that share a config
+    /// (same algo/backend/network/algorithm/trainer — seed excluded) can be
+    /// grouped into mean±std seed-replication bands.
+    #[serde(default)]
+    trainer: Option<serde_json::Value>,
+    #[serde(default)]
+    network: Option<serde_json::Value>,
+    #[serde(default)]
+    algorithm: Option<serde_json::Value>,
 }
 
 #[allow(dead_code)]
@@ -117,6 +139,14 @@ struct MetricsRecord {
     #[serde(default)]
     crash_rate: Option<f64>,
     #[serde(default)]
+    advantage_std: Option<f64>,
+    #[serde(default)]
+    mean_episode_steps: Option<f64>,
+    /// Episodes completed *this iteration*; the dashboard accumulates it for
+    /// the `episodes_completed` metric.
+    #[serde(default)]
+    episodes_completed: Option<u64>,
+    #[serde(default)]
     checkpoint: bool,
     #[serde(default)]
     eval: Option<EvalMetrics>,
@@ -132,6 +162,10 @@ impl MetricsRecord {
             "value_loss" => self.value_loss,
             "entropy" => self.entropy,
             "advantage_mean" => self.advantage_mean,
+            "advantage_std" => self.advantage_std,
+            "steps_per_s" => self.steps_per_s,
+            "crash_rate" => self.crash_rate,
+            "mean_episode_steps" => self.mean_episode_steps,
             "alt_err" => self.eval.as_ref().and_then(|e| e.alt_err),
             "spd_err" => self.eval.as_ref().and_then(|e| e.spd_err),
             "eval_reward" => self.eval.as_ref().and_then(|e| e.total_reward),
@@ -141,6 +175,34 @@ impl MetricsRecord {
 }
 
 // ── Run model ────────────────────────────────────────────────────────
+
+/// Horizontal axis of the chart: what each record's x-coordinate means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XMode {
+    /// PPO iteration number (the index each telemetry row is stamped with).
+    Iteration,
+    /// Cumulative environment steps (sample-efficiency view).
+    Steps,
+    /// Wall-clock seconds since the run started.
+    Elapsed,
+}
+
+impl XMode {
+    fn label(self) -> &'static str {
+        match self {
+            XMode::Iteration => "iteration",
+            XMode::Steps => "cumulative env steps",
+            XMode::Elapsed => "wall clock (s)",
+        }
+    }
+}
+
+/// Top-level layout: the line chart or the run×iteration heatmap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewMode {
+    Chart,
+    Heatmap,
+}
 
 struct RunModel {
     dir: PathBuf,
@@ -239,12 +301,124 @@ impl RunModel {
         }
     }
 
-    /// Value series for one metric: `[(iteration, value), …]`.
-    fn series(&self, key: &str) -> Vec<[f64; 2]> {
+    /// X-coordinate for every logged record under the selected axis mode.
+    /// `Steps` reconstructs cumulative environment steps from the logged
+    /// throughput × wall-clock deltas (the writer logs no per-iteration step
+    /// counts); a missing clock/rate falls back to a 1 s slot.
+    fn x_values(&self, mode: XMode) -> Vec<f64> {
+        match mode {
+            XMode::Iteration => self.records.iter().map(|r| r.iteration as f64).collect(),
+            XMode::Elapsed => self
+                .records
+                .iter()
+                .map(|r| r.elapsed_s.unwrap_or(r.iteration as f64))
+                .collect(),
+            XMode::Steps => {
+                let mut cum = 0.0;
+                let mut prev: Option<f64> = None;
+                self.records
+                    .iter()
+                    .map(|r| {
+                        let rate = r.steps_per_s.unwrap_or(0.0);
+                        let dt = match (r.elapsed_s, prev) {
+                            (Some(e), Some(p)) => (e - p).max(0.0),
+                            (Some(e), None) => e,
+                            _ => 1.0,
+                        };
+                        prev = r.elapsed_s;
+                        cum += rate * dt;
+                        cum
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Value series for one metric in the given axis mode. `episodes_completed`
+    /// is cumulative across the run (the writer logs per-iteration counts).
+    fn series_for(&self, key: &str, mode: XMode) -> Vec<[f64; 2]> {
+        let xs = self.x_values(mode);
+        let mut cum_episodes = 0.0;
         self.records
             .iter()
-            .filter_map(|r| r.metric(key).map(|v| [r.iteration as f64, v]))
+            .zip(&xs)
+            .filter_map(|(r, &x)| {
+                if key == "episodes_completed" {
+                    let n = r.episodes_completed?;
+                    cum_episodes += n as f64;
+                    Some([x, cum_episodes])
+                } else {
+                    r.metric(key).map(|v| [x, v])
+                }
+            })
             .collect()
+    }
+
+    /// X positions (current mode) of every eval iteration (vertical guides).
+    fn eval_xs(&self, mode: XMode) -> Vec<f64> {
+        self.x_values(mode)
+            .iter()
+            .zip(&self.records)
+            .filter(|(_, r)| r.eval.is_some())
+            .map(|(&x, _)| x)
+            .collect()
+    }
+
+    /// X positions (current mode) of every checkpoint write (vertical guides).
+    fn checkpoint_xs(&self, mode: XMode) -> Vec<f64> {
+        self.x_values(mode)
+            .iter()
+            .zip(&self.records)
+            .filter(|(_, r)| r.checkpoint)
+            .map(|(&x, _)| x)
+            .collect()
+    }
+
+    /// `(x, total_reward)` for every eval — the sparse dots overlaid on the
+    /// reward curve.
+    fn eval_reward_dots(&self, mode: XMode) -> Vec<[f64; 2]> {
+        self.x_values(mode)
+            .iter()
+            .zip(&self.records)
+            .filter_map(|(&x, r)| r.eval.as_ref().and_then(|e| e.total_reward).map(|v| [x, v]))
+            .collect()
+    }
+
+    /// Config identity for seed-replication grouping: algo, backend, network,
+    /// algorithm, and trainer config (the `seed` value excluded). Runs sharing
+    /// it are treated as replications of the same experiment. `None` for
+    /// manifests that lack the config blocks (those stay individual lines).
+    fn group_key(&self) -> Option<String> {
+        let m = self.manifest.as_ref()?;
+        let mut trainer = m.trainer.clone()?;
+        if let Some(obj) = trainer.as_object_mut() {
+            obj.remove("seed");
+        }
+        let algo = m.algo.clone().unwrap_or_default();
+        let backend = m.backend.clone().unwrap_or_default();
+        let network = m.network.as_ref().map(|v| v.to_string()).unwrap_or_default();
+        let algorithm = m.algorithm.as_ref().map(|v| v.to_string()).unwrap_or_default();
+        Some(format!("{algo}|{backend}|{network}|{algorithm}|{trainer}"))
+    }
+
+    /// Total wall-clock seconds at the last record (`None` when unlogged).
+    fn last_elapsed(&self) -> Option<f64> {
+        self.records.last().and_then(|r| r.elapsed_s)
+    }
+
+    /// Mean `steps_per_s` across records that carry the field.
+    fn mean_sps(&self) -> Option<f64> {
+        let vals: Vec<f64> = self.records.iter().filter_map(|r| r.steps_per_s).collect();
+        if vals.is_empty() {
+            None
+        } else {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        }
+    }
+
+    /// Cumulative environment steps at the last record (via [`Self::x_values`]).
+    fn total_env_steps(&self) -> Option<f64> {
+        self.x_values(XMode::Steps).last().copied()
     }
 
     fn status(&self) -> &str {
@@ -294,6 +468,81 @@ fn smooth(pts: &[[f64; 2]], window: u32) -> Vec<[f64; 2]> {
     out
 }
 
+/// Running max (or running min for loss metrics) — the "best-so-far" envelope.
+fn best_so_far(pts: &[[f64; 2]], lower_better: bool) -> Vec<[f64; 2]> {
+    let mut best = if lower_better {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
+    let mut out = Vec::with_capacity(pts.len());
+    for &p in pts {
+        best = if lower_better { best.min(p[1]) } else { best.max(p[1]) };
+        out.push([p[0], best]);
+    }
+    out
+}
+
+/// Metrics where a *lower* value is better (drives the best-so-far direction).
+fn lower_is_better(key: &str) -> bool {
+    matches!(key, "policy_loss" | "value_loss")
+}
+
+/// Map a series through log10(y) for the log-scale toggle; y ≤ 0 is dropped
+/// (the logarithm is undefined there).
+fn log10_pts(pts: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    pts.iter()
+        .filter(|p| p[1].is_finite() && p[1] > 0.0)
+        .map(|&[x, y]| [x, y.log10()])
+        .collect()
+}
+
+/// Linear interpolation between two colors (heatmap scale).
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+/// Heatmap cell color for a normalized value `t ∈ [0, 1]`: cold → warm → hot.
+fn value_color(t: f64) -> egui::Color32 {
+    let (cold, mid, hot) = (
+        egui::Color32::from_rgb(24, 62, 120),
+        egui::Color32::from_rgb(240, 200, 80),
+        egui::Color32::from_rgb(230, 80, 56),
+    );
+    let t = t.clamp(0.0, 1.0) as f32;
+    if t < 0.5 {
+        lerp_color(cold, mid, t * 2.0)
+    } else {
+        lerp_color(mid, hot, (t - 0.5) * 2.0)
+    }
+}
+
+/// Short human label for a burn backend path (`..::WgpuDevice` → `WgpuDevice`).
+fn short_backend(backend: Option<&str>) -> &str {
+    backend
+        .and_then(|b| b.rsplit("::").next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("?")
+}
+
+/// `seconds` → `3m 24s` / `1h 05m`, `—` when unknown.
+fn fmt_duration(secs: Option<f64>) -> String {
+    let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) else {
+        return "—".into();
+    };
+    let s = s.round() as u64;
+    let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Tick formatter: plain but not absurdly long.
 fn fmt(v: f64) -> String {
     let a = v.abs();
@@ -323,6 +572,15 @@ struct DashApp {
     banner: Option<String>,
     /// Polls since the last runs-dir rescan (auto-discovery of new runs).
     polls_since_rescan: u8,
+    /// Layout + chart switches (see the side panel).
+    view: ViewMode,
+    x_mode: XMode,
+    log_y: bool,
+    show_best: bool,
+    show_evals: bool,
+    show_checkpoints: bool,
+    seed_bands: bool,
+    show_summary: bool,
 }
 
 impl DashApp {
@@ -336,6 +594,14 @@ impl DashApp {
             follow_live: true,
             banner: None,
             polls_since_rescan: 0,
+            view: ViewMode::Chart,
+            x_mode: XMode::Iteration,
+            log_y: false,
+            show_best: false,
+            show_evals: false,
+            show_checkpoints: false,
+            seed_bands: false,
+            show_summary: true,
         };
         app.rescan();
         app
@@ -428,8 +694,9 @@ impl eframe::App for DashApp {
             .default_size(320.0)
             .show(ui, |ui| self.side_panel(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.plot_panel(ui);
+        egui::CentralPanel::default().show(ui, |ui| match self.view {
+            ViewMode::Chart => self.plot_panel(ui),
+            ViewMode::Heatmap => self.heatmap_panel(ui),
         });
     }
 }
@@ -454,12 +721,41 @@ impl DashApp {
                 }
             });
 
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.view, ViewMode::Chart, "Chart");
+            ui.selectable_value(&mut self.view, ViewMode::Heatmap, "Heatmap");
+        });
+
+        egui::ComboBox::from_label("X-axis")
+            .selected_text(match self.x_mode {
+                XMode::Iteration => "Iteration",
+                XMode::Steps => "Env steps",
+                XMode::Elapsed => "Wall clock",
+            })
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.x_mode, XMode::Iteration, "Iteration");
+                ui.selectable_value(&mut self.x_mode, XMode::Steps, "Env steps");
+                ui.selectable_value(&mut self.x_mode, XMode::Elapsed, "Wall clock");
+            });
+
         let smooth_label = if self.window == 0 {
             "Smoothing: off".to_string()
         } else {
             format!("Smoothing: window {}", self.window)
         };
         ui.add(egui::Slider::new(&mut self.window, 0..=50).text(smooth_label));
+
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.show_best, "Best-so-far");
+            ui.checkbox(&mut self.log_y, "Log y");
+            ui.checkbox(&mut self.show_evals, "Evaluations");
+            ui.checkbox(&mut self.show_checkpoints, "Checkpoints");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.seed_bands, "Seed bands");
+            ui.checkbox(&mut self.show_summary, "Run summary");
+        });
 
         ui.horizontal(|ui| {
             let follow = &mut self.follow_live;
@@ -534,67 +830,283 @@ impl DashApp {
         let key = self.metric_key();
         let label = self.metric_label();
         let window = self.window;
+        let mode = self.x_mode;
+        let log_y = self.log_y;
+        let lower_better = lower_is_better(key);
 
-        // Gather the visible, non-empty series.
-        let mut lines: Vec<Line> = Vec::new();
-        let mut shown_runs: Vec<(String, f64)> = Vec::new();
-        for (i, (id, run)) in self.runs.iter().enumerate() {
+        // Pre-built plot items so the seed-band grouping / log / best-so-far
+        // transforms live next to each other instead of inline in the show fn.
+        #[derive(Clone)]
+        struct SeriesItem {
+            name: String,
+            color: egui::Color32,
+            pts: Vec<[f64; 2]>,
+            dashed: bool,
+            width: f32,
+        }
+        struct BandItem {
+            name: String,
+            color: egui::Color32,
+            mean: Vec<[f64; 2]>,
+            lower: Vec<[f64; 2]>,
+            upper: Vec<[f64; 2]>,
+        }
+
+        let mut items: Vec<SeriesItem> = Vec::new();
+        let mut bands: Vec<BandItem> = Vec::new();
+        let mut eval_dots: Vec<(String, egui::Color32, Vec<[f64; 2]>)> = Vec::new();
+        let mut eval_xs: Vec<f64> = Vec::new();
+        let mut checkpoint_xs: Vec<f64> = Vec::new();
+        let mut shown_runs: Vec<(String, egui::Color32, f64)> = Vec::new();
+        // Visible runs grouped by manifest config (for mean±std bands).
+        type GroupMembers = Vec<(String, egui::Color32, Vec<[f64; 2]>)>;
+        let mut groups: BTreeMap<String, GroupMembers> = BTreeMap::new();
+        let mut palette_i = 0usize;
+
+        for (id, run) in self.runs.iter() {
             if !self.visible.get(id).copied().unwrap_or(false) {
                 continue;
             }
-            let pts = smooth(&run.series(key), window);
-            if pts.is_empty() {
+            let raw = run.series_for(key, mode);
+            if raw.is_empty() {
                 continue;
             }
-            if let Some(last) = pts.last() {
-                shown_runs.push((id.clone(), last[1]));
+            let color = PALETTE[palette_i % PALETTE.len()];
+            palette_i += 1;
+            if let Some(&p) = raw.last() {
+                shown_runs.push((id.clone(), color, p[1]));
             }
-            lines.push(
-                Line::new(id.as_str(), PlotPoints::from(pts))
-                    .color(PALETTE[i % PALETTE.len()])
-                    .width(2.0),
-            );
+
+            if key == "mean_reward_per_step" && self.show_evals {
+                let dots = run.eval_reward_dots(mode);
+                if !dots.is_empty() {
+                    eval_dots.push((id.clone(), color, dots));
+                }
+            }
+            if self.show_checkpoints {
+                checkpoint_xs.extend(run.checkpoint_xs(mode));
+            }
+            if self.show_evals {
+                eval_xs.extend(run.eval_xs(mode));
+            }
+
+            let pts = smooth(&raw, window);
+            let best = best_so_far(&pts, lower_better);
+            if self.seed_bands {
+                if let Some(g) = run.group_key() {
+                    groups.entry(g).or_default().push((id.clone(), color, pts));
+                    continue;
+                }
+            }
+            items.push(SeriesItem {
+                name: id.clone(),
+                color,
+                pts,
+                dashed: false,
+                width: 2.0,
+            });
+            if self.show_best && !best.is_empty() {
+                items.push(SeriesItem {
+                    name: format!("{id} best-so-far"),
+                    color,
+                    pts: best,
+                    dashed: true,
+                    width: 1.0,
+                });
+            }
+        }
+
+        // Collapse config groups (<2 members → plain lines; ≥2 → mean±std band).
+        for (g, members) in groups {
+            if members.len() < 2 {
+                for (mid, color, pts) in members {
+                    let best = best_so_far(&pts, lower_better);
+                    items.push(SeriesItem {
+                        name: mid.clone(),
+                        color,
+                        pts,
+                        dashed: false,
+                        width: 2.0,
+                    });
+                    if self.show_best && !best.is_empty() {
+                        items.push(SeriesItem {
+                            name: format!("{mid} best-so-far"),
+                            color,
+                            pts: best,
+                            dashed: true,
+                            width: 1.0,
+                        });
+                    }
+                }
+                continue;
+            }
+            // Bands align members by iteration index (records are one per PPO
+            // iteration), with x = mean of the members' x at that index.
+            let n = members.iter().map(|(_, _, s)| s.len()).max().unwrap_or(0);
+            let (mut mean_pts, mut lower, mut upper) = (Vec::new(), Vec::new(), Vec::new());
+            for i in 0..n {
+                let vs: Vec<(f64, f64)> = members
+                    .iter()
+                    .filter_map(|(_, _, s)| s.get(i).map(|&p| (p[0], p[1])))
+                    .collect();
+                if vs.is_empty() {
+                    continue;
+                }
+                let mean = vs.iter().map(|(_, y)| *y).sum::<f64>() / vs.len() as f64;
+                let var = vs.iter().map(|(_, y)| (*y - mean).powi(2)).sum::<f64>() / vs.len() as f64;
+                let sd = var.sqrt();
+                let x = vs.iter().map(|(x, _)| *x).sum::<f64>() / vs.len() as f64;
+                mean_pts.push([x, mean]);
+                lower.push([x, mean - sd]);
+                upper.push([x, mean + sd]);
+            }
+            let algo = g.split('|').next().unwrap_or("group");
+            let short = if algo.is_empty() { "group" } else { algo };
+            bands.push(BandItem {
+                name: format!("{short} ± std (n={})", members.len()),
+                color: members[0].1,
+                mean: mean_pts,
+                lower,
+                upper,
+            });
+        }
+
+        if self.show_summary {
+            self.summary_table(ui);
+            ui.separator();
         }
 
         ui.horizontal(|ui| {
             ui.heading(label);
-            if lines.is_empty() {
+            let total = items.len() + bands.len();
+            if total == 0 {
                 ui.label(
                     egui::RichText::new("  no visible data — tick a run on the left (or train!)")
                         .weak(),
                 );
             } else {
-                ui.label(egui::RichText::new(format!("  {} run(s)", lines.len())).weak());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "  {} item(s) · x = {}",
+                        total,
+                        mode.label()
+                    ))
+                    .weak(),
+                );
             }
         });
 
-        let mut hover: Option<egui_plot::PlotPoint> = None;
-        if !lines.is_empty() {
-            // Auto-bounds are on by default, so new points always fit the plot.
-            let _plot_resp = Plot::new("metrics")
-                .legend(Legend::default())
-                .x_axis_label("iteration")
-                .y_axis_label(label)
-                .show(ui, |plot_ui| {
-                    for line in lines {
-                        plot_ui.line(line);
-                    }
-                    hover = plot_ui.pointer_coordinate();
-                });
+        if items.is_empty() && bands.is_empty() {
+            return;
+        }
 
-            if let Some(p) = hover {
-                ui.label(
-                    egui::RichText::new(format!("cursor → iter {:.0} · {}", p.x, fmt(p.y)))
-                        .monospace()
-                        .weak(),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("hover the plot for values · drag to pan · scroll to zoom")
-                        .weak()
-                        .small(),
-                );
-            }
+        let y_axis_label = if log_y {
+            format!("log₁₀({label})")
+        } else {
+            label.to_string()
+        };
+        let mut hover: Option<egui_plot::PlotPoint> = None;
+        let _plot_resp = Plot::new("metrics")
+            .legend(Legend::default())
+            .x_axis_label(mode.label())
+            .y_axis_label(y_axis_label)
+            .show(ui, |plot_ui| {
+                // Vertical guides first so data draws on top of them. VLine
+                // contributes no bounds (`PlotBounds::NOTHING`), so autoscaling
+                // stays driven by the real series. Empty names keep them out
+                // of the legend.
+                for (i, &x) in eval_xs.iter().enumerate() {
+                    plot_ui.vline(
+                        VLine::new("", x)
+                            .id(egui::Id::new(("eval_vline", i)))
+                            .color(EVAL_MARKER)
+                            .width(1.0)
+                            .style(LineStyle::dotted_dense()),
+                    );
+                }
+                for (i, &x) in checkpoint_xs.iter().enumerate() {
+                    plot_ui.vline(
+                        VLine::new("", x)
+                            .id(egui::Id::new(("ckpt_vline", i)))
+                            .color(CKPT_MARKER)
+                            .width(1.0)
+                            .style(LineStyle::dashed_loose()),
+                    );
+                }
+                // Seed-replication bands: mean line + mean±std polygon.
+                for band in &bands {
+                    let upper = if log_y { log10_pts(&band.upper) } else { band.upper.clone() };
+                    let lower = if log_y { log10_pts(&band.lower) } else { band.lower.clone() };
+                    let mut poly = Vec::with_capacity(upper.len() + lower.len());
+                    poly.extend(upper.iter().copied());
+                    poly.extend(lower.iter().rev().copied());
+                    if poly.len() >= 3 {
+                        plot_ui.polygon(
+                            Polygon::new(format!("{} band", band.name), PlotPoints::from(poly))
+                                .fill_color(band.color.gamma_multiply(0.22))
+                                .stroke(egui::Stroke::NONE),
+                        );
+                    }
+                    let mean = if log_y { log10_pts(&band.mean) } else { band.mean.clone() };
+                    if !mean.is_empty() {
+                        plot_ui.line(
+                            Line::new(band.name.clone(), PlotPoints::from(mean))
+                                .color(band.color)
+                                .width(2.0)
+                                .style(LineStyle::dashed_dense()),
+                        );
+                    }
+                }
+                // Per-run series (plain + best-so-far dashed).
+                for item in &items {
+                    let pts = if log_y { log10_pts(&item.pts) } else { item.pts.clone() };
+                    if pts.is_empty() {
+                        continue;
+                    }
+                    let style = if item.dashed {
+                        LineStyle::dotted_loose()
+                    } else {
+                        LineStyle::Solid
+                    };
+                    plot_ui.line(
+                        Line::new(item.name.clone(), PlotPoints::from(pts))
+                            .color(item.color)
+                            .width(item.width)
+                            .style(style),
+                    );
+                }
+                // Sparse eval dots overlaid on the reward curve.
+                for (id, color, dots) in &eval_dots {
+                    let pts = if log_y { log10_pts(dots) } else { dots.clone() };
+                    if pts.is_empty() {
+                        continue;
+                    }
+                    plot_ui.points(
+                        Points::new(format!("{id} eval"), PlotPoints::from(pts))
+                            .color(*color)
+                            .radius(4.0)
+                            .filled(true),
+                    );
+                }
+                hover = plot_ui.pointer_coordinate();
+            });
+
+        if let Some(p) = hover {
+            ui.label(
+                egui::RichText::new(format!(
+                    "cursor → {} · {}",
+                    fmt(p.x),
+                    fmt(p.y)
+                ))
+                .monospace()
+                .weak(),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("hover the plot for values · drag to pan · scroll to zoom")
+                    .weak()
+                    .small(),
+            );
         }
 
         // Latest-value strip for the visible runs.
@@ -602,16 +1114,15 @@ impl DashApp {
             ui.separator();
             ui.label(egui::RichText::new("Latest values").strong());
             ui.horizontal_wrapped(|ui| {
-                for (i, (id, v)) in shown_runs.iter().enumerate() {
-                    let color = PALETTE[i % PALETTE.len()];
-                    ui.colored_label(color, format!("{id}: {}", fmt(*v)));
+                for (id, color, v) in &shown_runs {
+                    ui.colored_label(*color, format!("{id}: {}", fmt(*v)));
                 }
             });
         }
 
         // Run details for the first visible run (its manifest).
-        if let Some((id, _)) = shown_runs.first().cloned() {
-            if let Some(run) = self.runs.get(&id) {
+        if let Some((id, _, _)) = shown_runs.first() {
+            if let Some(run) = self.runs.get(id) {
                 if let Some(m) = &run.manifest {
                     ui.separator();
                     ui.collapsing(format!("Details · {id}"), |ui| {
@@ -628,6 +1139,243 @@ impl DashApp {
                 }
             }
         }
+    }
+
+    /// Per-run leaderboard: status, progress, throughput, reward extremes.
+    /// Newest run first; only runs ticked in the side panel are listed.
+    fn summary_table(&mut self, ui: &mut egui::Ui) {
+        let rows: Vec<(String, &RunModel)> = self
+            .runs
+            .iter()
+            .rev() // newest (lexicographically last) first
+            .filter(|(id, _)| self.visible.get(*id).copied().unwrap_or(false))
+            .map(|(id, run)| (id.clone(), run))
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+
+        egui::CollapsingHeader::new("Run summary")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("run_summary")
+                    .striped(true)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in [
+                            "run", "status", "iters", "wall", "env steps", "avg SPS", "final",
+                            "best", "crash", "backend",
+                        ] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+
+                        for (id, run) in rows {
+                            let status = run.status();
+                            let live = run.is_live();
+                            let status_color = if live {
+                                egui::Color32::from_rgb(115, 217, 134)
+                            } else if status == "completed" {
+                                egui::Color32::from_rgb(150, 170, 200)
+                            } else {
+                                egui::Color32::from_rgb(242, 154, 51)
+                            };
+
+                            ui.monospace(id);
+                            ui.colored_label(status_color, if live { "● live" } else { status });
+                            ui.label(run.records.len().to_string());
+                            let wall = run.last_elapsed();
+                            ui.label(fmt_duration(wall));
+                            ui.label(
+                                run.total_env_steps()
+                                    .map(|v| format!("{v:.0}"))
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            ui.label(
+                                run.mean_sps()
+                                    .map(|v| format!("{v:.0}"))
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            let series = run.series_for("mean_reward_per_step", XMode::Iteration);
+                            let final_v = series.last().map(|p| p[1]);
+                            let best_v = series.iter().map(|p| p[1]).fold(f64::NAN, f64::max);
+                            let v = if best_v.is_nan() { None } else { Some(best_v) };
+                            ui.label(final_v.map(fmt).unwrap_or_else(|| "—".into()));
+                            ui.label(v.map(fmt).unwrap_or_else(|| "—".into()));
+                            ui.label(
+                                run.records
+                                    .iter()
+                                    .rev()
+                                    .find_map(|r| r.crash_rate)
+                                    .map(fmt)
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            ui.label(
+                                run.manifest
+                                    .as_ref()
+                                    .map(|m| short_backend(m.backend.as_deref()).to_string())
+                                    .unwrap_or_else(|| "?".into()),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+    /// Iteration × run heatmap for the selected metric. Every row (run)
+    /// normalizes over its own value range so per-run trends stay readable;
+    /// each column buckets a span of iterations into the mean value.
+    fn heatmap_panel(&mut self, ui: &mut egui::Ui) {
+        let label = self.metric_label();
+        let rows: Vec<(String, Vec<[f64; 2]>)> = self
+            .runs
+            .iter()
+            .rev() // newest run on top
+            .filter(|(id, run)| {
+                self.visible.get(*id).copied().unwrap_or(false)
+                    && !run.series_for(self.metric_key(), XMode::Iteration).is_empty()
+            })
+            .map(|(id, run)| (id.clone(), run.series_for(self.metric_key(), XMode::Iteration)))
+            .collect();
+        if rows.is_empty() {
+            ui.label(
+                egui::RichText::new("no visible data — tick a run on the left (or train!)").weak(),
+            );
+            return;
+        }
+
+        let max_iter = rows.iter().map(|(_, s)| s.len()).max().unwrap_or(1);
+        const MAX_COLS: usize = 96;
+        let cols = max_iter.min(MAX_COLS);
+        let bucket = (max_iter as f64 / cols as f64).ceil().max(1.0) as usize;
+
+        // Bucket each row into per-column means.
+        let mut matrix: Vec<Vec<Option<f64>>> = Vec::with_capacity(rows.len());
+        let mut norms: Vec<Option<(f64, f64)>> = Vec::with_capacity(rows.len());
+        for (_id, series) in &rows {
+            let mut counts = vec![0usize; cols];
+            let mut sums = vec![0.0f64; cols];
+            for &[x, v] in series {
+                let col = ((x as usize) / bucket).min(cols - 1);
+                counts[col] += 1;
+                sums[col] += v;
+            }
+            let row: Vec<Option<f64>> = counts
+                .iter()
+                .zip(&sums)
+                .map(|(&n, &s)| if n == 0 { None } else { Some(s / n as f64) })
+                .collect();
+            let vals: Vec<f64> = row.iter().filter_map(|c| *c).collect();
+            norms.push(if vals.is_empty() {
+                None
+            } else {
+                let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+                for v in &vals {
+                    mn = mn.min(*v);
+                    mx = mx.max(*v);
+                }
+                Some((mn, mx))
+            });
+            matrix.push(row);
+        }
+
+        // Layout: run-id labels on the left, colored cells to the right.
+        let label_w = 280.0f32;
+        let gap = 1.0f32;
+        let cell_h = 18.0f32;
+        let row_h = cell_h + gap;
+        let cell_w = ((ui.available_width() - label_w) / cols as f32).clamp(2.0, 14.0);
+        let matrix_w = cell_w * cols as f32 + (cols as f32 - 1.0) * gap;
+        let legend_h = 46.0f32;
+        let height = rows.len() as f32 * row_h + legend_h;
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            let (response, painter) = ui.allocate_painter(
+                egui::Vec2::new(label_w + matrix_w, height),
+                egui::Sense::hover(),
+            );
+            let origin = response.rect.min;
+            let text = egui::FontId::monospace(11.0);
+            let weak = egui::Color32::from_gray(170);
+
+            for (r, (((id, _), row), norm)) in rows.iter().zip(&matrix).zip(&norms).enumerate() {
+                let y0 = origin.y + r as f32 * row_h;
+                painter.text(
+                    egui::pos2(origin.x + label_w - 8.0, y0 + cell_h / 2.0),
+                    egui::Align2::RIGHT_CENTER,
+                    id,
+                    text.clone(),
+                    weak,
+                );
+                for (c, cell) in row.iter().enumerate() {
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            origin.x + label_w + c as f32 * (cell_w + gap),
+                            y0,
+                        ),
+                        egui::vec2(cell_w, cell_h),
+                    );
+                    let fill = match cell {
+                        None => egui::Color32::from_rgb(22, 26, 34), // missing data
+                        Some(v) => {
+                            let t = match norm {
+                                Some((mn, mx)) => (*v - *mn) / (*mx - *mn),
+                                None => 0.5,
+                            };
+                            value_color(t)
+                        }
+                    };
+                    painter.rect_filled(rect, 0.0, fill);
+                }
+            }
+
+            // Legend: value scale + "per-row normalized" note.
+            let leg_y = origin.y + rows.len() as f32 * row_h + 8.0;
+            let leg_w = 140.0f32;
+            let leg = egui::Rect::from_min_size(
+                egui::pos2(origin.x + label_w, leg_y),
+                egui::vec2(leg_w, 8.0),
+            );
+            for i in 0..leg_w as usize {
+                let t = i as f64 / leg_w as f64;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(leg.left() + i as f32, leg.top()),
+                        egui::vec2(1.0, leg.height()),
+                    ),
+                    0.0,
+                    value_color(t),
+                );
+            }
+            painter.text(
+                egui::pos2(leg.left(), leg.bottom() + 4.0),
+                egui::Align2::LEFT_TOP,
+                "low → high · rows normalized to their own range",
+                egui::FontId::proportional(11.0),
+                weak,
+            );
+
+            // Hover tooltip: run, iteration span, and bucketed value.
+            if let Some(hp) = response.hover_pos() {
+                let dx = hp.x - (origin.x + label_w);
+                let dy = hp.y - origin.y;
+                if dx >= 0.0 && dy >= 0.0 {
+                    let c = (dx / (cell_w + gap)) as usize;
+                    let r = (dy / row_h) as usize;
+                    if c < cols && r < rows.len() {
+                        let (id, _) = &rows[r];
+                        let i0 = c * bucket;
+                        let i1 = (i0 + bucket).saturating_sub(1);
+                        let txt = matrix[r][c]
+                            .map(fmt)
+                            .unwrap_or_else(|| "no data".to_string());
+                        response.clone().on_hover_ui(|ui| {
+                            ui.monospace(format!("{id}\niter {i0}–{i1} · {label}: {txt}"));
+                        });
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -918,7 +1666,10 @@ mod tests {
             for _ in 0..3 {
                 app.poll_all();
             }
-            let has_data = app.runs.values().any(|r| !r.series(key).is_empty());
+            let has_data = app
+                .runs
+                .values()
+                .any(|r| !r.series_for(key, XMode::Iteration).is_empty());
             if !has_data {
                 continue;
             }
@@ -965,6 +1716,165 @@ mod tests {
                 "compare plot rect must be sizable for `{key}` (clip {max_clip_w:.0}x{max_clip_h:.0})"
             );
         }
+
+        // Overlay constellation (log y + best-so-far + evals + checkpoints +
+        // seed bands on the steps axis) and the heatmap must render without
+        // panicking on the same real data.
+        {
+            let mut app = DashApp::new(root.clone(), 0);
+            for _ in 0..3 {
+                app.poll_all();
+            }
+            if app
+                .runs
+                .values()
+                .any(|r| !r.series_for("mean_reward_per_step", XMode::Iteration).is_empty())
+            {
+                app.log_y = true;
+                app.show_best = true;
+                app.show_evals = true;
+                app.show_checkpoints = true;
+                app.seed_bands = true;
+                app.x_mode = XMode::Steps;
+                let _ = egui::Context::default().run_ui(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.plot_panel(ui);
+                    });
+                });
+                app.view = ViewMode::Heatmap;
+                let _ = egui::Context::default().run_ui(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.heatmap_panel(ui);
+                    });
+                });
+            }
+        }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn make_run(records: &[&str], manifest: Option<&str>) -> RunModel {
+        let dir = std::env::temp_dir().join(format!(
+            "rl_dash_feat_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(m) = manifest {
+            std::fs::write(dir.join("run.json"), m).unwrap();
+        }
+        std::fs::write(
+            dir.join("metrics.jsonl"),
+            records.join("\n") + "\n",
+        )
+        .unwrap();
+        let mut run = RunModel::new(dir.clone());
+        run.poll();
+        let _ = std::fs::remove_dir_all(&dir);
+        run
+    }
+
+    #[test]
+    fn x_modes_and_cumulative_episodes_series() {
+        // 0 s → 10 s at 100 sps → 30 s at 150 sps.
+        let run = make_run(
+            &[
+                r#"{"iteration":0,"elapsed_s":0.0,"steps_per_s":100.0,"episodes_completed":2}"#,
+                r#"{"iteration":1,"elapsed_s":10.0,"steps_per_s":100.0,"episodes_completed":3}"#,
+                r#"{"iteration":2,"elapsed_s":30.0,"steps_per_s":150.0,"episodes_completed":4}"#,
+            ],
+            None,
+        );
+        assert_eq!(
+            run.x_values(XMode::Iteration),
+            vec![0.0, 1.0, 2.0],
+            "iteration axis is the record index"
+        );
+        assert_eq!(run.x_values(XMode::Elapsed), vec![0.0, 10.0, 30.0]);
+        assert_eq!(
+            run.x_values(XMode::Steps),
+            vec![0.0, 1000.0, 4000.0],
+            "steps = Σ throughput × wall-clock delta (10×100 + 20×150)"
+        );
+        let eps = run.series_for("episodes_completed", XMode::Iteration);
+        assert_eq!(
+            eps,
+            vec![[0.0, 2.0], [1.0, 5.0], [2.0, 9.0]],
+            "episodes_completed accumulates across the run"
+        );
+    }
+
+    #[test]
+    fn best_so_far_respects_metric_direction() {
+        let pts = [[0.0, 1.0], [1.0, 3.0], [2.0, 2.0], [3.0, 4.0]];
+        assert_eq!(
+            best_so_far(&pts, false),
+            vec![[0.0, 1.0], [1.0, 3.0], [2.0, 3.0], [3.0, 4.0]],
+            "running max keeps the envelope"
+        );
+        assert_eq!(
+            best_so_far(&pts, true),
+            vec![[0.0, 1.0], [1.0, 1.0], [2.0, 1.0], [3.0, 1.0]],
+            "running min for loss metrics"
+        );
+    }
+
+    #[test]
+    fn log10_pts_drops_nonpositive_and_transforms() {
+        let pts = [[0.0, 100.0], [1.0, -5.0], [2.0, 0.0], [3.0, 1.0]];
+        let out = log10_pts(&pts);
+        assert_eq!(out.len(), 2, "non-positive values are dropped");
+        assert!((out[0][0] - 0.0).abs() < 1e-9 && (out[0][1] - 2.0).abs() < 1e-9);
+        assert!((out[1][0] - 3.0).abs() < 1e-9 && out[1][1].abs() < 1e-9);
+    }
+
+    #[test]
+    fn group_key_ignores_seed_but_keeps_config() {
+        let base = r#"{
+            "status":"completed","algo":"ppo","backend":"burn_ndarray::backend::NdArrayDevice",
+            "trainer":{"iterations":100,"rollout_steps":2048,"seed":42},
+            "network":{"obs_dim":9,"hidden":[32,32],"action_dim":2},
+            "algorithm":{"name":"ppo","clip":0.2}
+        }"#;
+        let a = make_run(&[r#"{"iteration":0}"#], Some(base));
+        let b = make_run(
+            &[r#"{"iteration":0}"#],
+            Some(&base.replace("\"seed\":42", "\"seed\":7")),
+        );
+        assert_eq!(
+            a.group_key(),
+            b.group_key(),
+            "different seeds but same config → one replication group"
+        );
+        let c = make_run(
+            &[r#"{"iteration":0}"#],
+            Some(&base.replace("\"clip\":0.2", "\"clip\":0.15")),
+        );
+        assert_ne!(
+            a.group_key(),
+            c.group_key(),
+            "a real config change splits the group"
+        );
+        let nodata = make_run(&[r#"{"iteration":0}"#], None);
+        assert_eq!(nodata.group_key(), None, "no manifest config → no group");
+    }
+
+    #[test]
+    fn summary_adjectives_compute_from_records() {
+        let run = make_run(
+            &[
+                r#"{"iteration":0,"elapsed_s":2.0,"steps_per_s":100.0,"mean_reward_per_step":-0.5}"#,
+                r#"{"iteration":1,"elapsed_s":7.0,"steps_per_s":120.0,"mean_reward_per_step":0.3}"#,
+            ],
+            None,
+        );
+        assert_eq!(run.last_elapsed(), Some(7.0));
+        assert_eq!(run.mean_sps(), Some(110.0));
+        assert_eq!(run.total_env_steps(), Some(800.0));
+        assert_eq!(fmt_duration(Some(125.0)), "2m 05s");
+        assert_eq!(fmt_duration(None), "—");
+        assert_eq!(short_backend(Some("burn_ndarray::backend::NdArrayDevice")), "NdArrayDevice");
     }
 }
