@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use egui_plot::{Legend, Line, Plot, PlotBounds, PlotPoints};
+use egui_plot::{Legend, Line, Plot, PlotPoints};
 use serde::Deserialize;
 
 /// Metric registry — keys mirror `metrics.jsonl` fields (and
@@ -822,44 +822,58 @@ impl DashApp {
                 }
             });
 
-            match bounds {
-                Some((min, max)) => {
-                    // auto_bounds is overridden every frame by
-                    // PlotUi::set_plot_bounds, so the strip stays pinned to the
-                    // sliding window instead of re-scaling to all history.
-                    let plot = Plot::new(("kde_strip", key))
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .auto_bounds([false, false])
-                        .show_x(false)
-                        .show_y(false)
-                        .show_crosshair(false)
-                        .height(104.0);
-                    plot.show(ui, |plot_ui| {
-                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(min, max));
-                        for (i, id, pts) in &series {
-                            let windowed: Vec<[f64; 2]> = pts
-                                .iter()
-                                .filter(|p| p[0] >= min[0] && p[0] <= max[0])
-                                .cloned()
-                                .collect();
-                            plot_ui.line(
-                                Line::new(id.as_str(), PlotPoints::from(windowed))
-                                    .color(PALETTE[*i % PALETTE.len()])
-                                    .width(1.6),
-                            );
+            // Rendered exactly like the Compare tab: auto-bounds fit whatever
+            // points are passed, so a card can never be blank as long as any
+            // data exists (compare's "Auto-bounds are on by default, so new
+            // points always fit the plot"). The trailing window is applied by
+            // *clipping the data* to [min, max] instead of pinning the plot
+            // bounds every frame — the manual set_plot_bounds/auto_bounds(false)
+            // path is what left cards empty. If clipping ever removes every
+            // point, fall back to the full series so the graph still shows.
+            let clipped: Vec<(usize, String, Vec<[f64; 2]>)> = match bounds {
+                Some((min, max)) => series
+                    .iter()
+                    .filter_map(|(i, id, pts)| {
+                        let w: Vec<[f64; 2]> = pts
+                            .iter()
+                            .filter(|p| p[0] >= min[0] && p[0] <= max[0])
+                            .cloned()
+                            .collect();
+                        if w.is_empty() {
+                            None
+                        } else {
+                            Some((*i, id.clone(), w))
                         }
-                    });
-                }
-                None => {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("awaiting data — tick a run on the left")
-                            .weak()
-                            .small(),
-                    );
-                }
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let plotted = if clipped.is_empty() { series.clone() } else { clipped };
+            if plotted.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("awaiting data — tick a run on the left")
+                        .weak()
+                        .small(),
+                );
+            } else {
+                let plot = Plot::new(("kde_strip", key))
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .show_x(false)
+                    .show_y(false)
+                    .show_crosshair(false)
+                    .height(104.0);
+                plot.show(ui, |plot_ui| {
+                    for (i, id, pts) in &plotted {
+                        plot_ui.line(
+                            Line::new(id.as_str(), PlotPoints::from(pts.clone()))
+                                .color(PALETTE[*i % PALETTE.len()])
+                                .width(2.0),
+                        );
+                    }
+                });
             }
         });
     }
@@ -1149,6 +1163,91 @@ mod tests {
         assert_eq!(m.status.as_deref(), Some("completed"));
         assert_eq!(m.algo.as_deref(), Some("ppo"));
         assert_eq!(m.git_commit.as_deref(), Some("d48a301"));
+    }
+
+    #[test]
+    fn strip_view_allots_plots_and_draws_lines_with_real_data() {
+        // The strip ("Live monitoring") view must actually allocate wide plot
+        // rects and draw line paths — not just compute bounds. Runs the real
+        // `strip_panel` in a headless egui context (no window needed) against
+        // a copy of the repo's newest run and inspects the emitted shapes.
+        // Skipped when the repo has no runs.
+        let repo_runs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("rl_dash sits at repo root")
+            .join("runs");
+        let Some(newest) = discover_runs(&repo_runs).into_iter().next_back() else {
+            return;
+        };
+        let id = newest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("rl_dash_strip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dst = root.join(&id);
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::copy(newest.join("metrics.jsonl"), dst.join("metrics.jsonl")).unwrap();
+        if newest.join("run.json").exists() {
+            std::fs::copy(newest.join("run.json"), dst.join("run.json")).unwrap();
+        }
+
+        // Render the strip under both axis modes with the smallest allowed
+        // trailing window (exercises data clipping). Every mode must allocate
+        // wide plots and draw line paths — auto-bounds like the Compare tab,
+        // so a card must never blank when data exists.
+        for time_axis in [false, true] {
+            let mut app = DashApp::new(root.clone(), 0);
+            app.strip_view = true;
+            app.time_axis = time_axis;
+            app.strip_window = 10;
+            for _ in 0..3 {
+                app.poll_all();
+            }
+
+            let ctx = egui::Context::default();
+            let out = ctx.run_ui(Default::default(), |ctx| {
+                // Emulate the eframe root layout (side runs panel + central view).
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::Panel::left("runs_test")
+                        .resizable(true)
+                        .default_size(320.0)
+                        .show(ui, |ui| {
+                            app.side_panel(ui);
+                        });
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        app.strip_panel(ui);
+                    });
+                });
+            });
+            let paths = out
+                .shapes
+                .iter()
+                .filter(|c| {
+                    matches!(c.shape, egui::Shape::Path(_))
+                        || matches!(c.shape, egui::Shape::LineSegment { .. })
+                })
+                .count();
+            let max_clip_w = out
+                .shapes
+                .iter()
+                .map(|c| c.clip_rect.width())
+                .fold(0.0f32, f32::max);
+            let max_clip_h = out
+                .shapes
+                .iter()
+                .map(|c| c.clip_rect.height())
+                .fold(0.0f32, f32::max);
+            assert!(
+                paths >= 1,
+                "strip must draw at least one line path for {id} (time_axis={time_axis}; drew {paths})"
+            );
+            assert!(
+                max_clip_w > 100.0 && max_clip_h > 80.0,
+                "strip plot rects must be sizable (time_axis={time_axis}; clip {max_clip_w:.0}x{max_clip_h:.0})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
