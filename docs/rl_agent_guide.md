@@ -415,9 +415,23 @@ cargo run -p rl_dash -- --metric policy_loss
   so a running trainer updates ~5×/s with no re-parsing of old lines. The
   runs dir is also re-scanned every second, so a run the trainer spawns
   *after* the dashboard opens (e.g. from the RL tab) appears on its own.
-- **Compare** — the dashboard's chart: pick any metric, overlay any run
-  against the same axes, hover for cursor values, and read the latest values
-  beneath the plot.
+- **Chart view** — pick any metric (reward, policy/value loss, entropy,
+  advantage mean/std, env steps/s throughput, crash rate, episode length,
+  cumulative episodes, eval errors), overlay any run against the same axes,
+  hover for cursor values, and read the latest values beneath the plot.
+  - **X-axis** switches between iteration, cumulative **env steps**
+    (sample-efficiency comparison), and wall clock.
+  - **Best-so-far** draws each run's running max envelope (running min for
+    loss metrics); **Log y** rescales for losses spanning decades.
+  - **Evaluations / Checkpoints** draw vertical guides at eval/checkpoint
+    iterations, plus eval-reward dots overlaid on the reward curve.
+  - **Seed bands** groups runs that share a manifest config (seed excluded)
+    and plots their mean ± std as filled bands across replications.
+- **Heatmap view** — a run × iteration color matrix of any metric; each row
+  normalizes over its own range so per-run trends stay readable.
+- **Run summary** — a collapsible leaderboard per visible run: status, iters,
+  wall time, cumulative env steps, average SPS, final/best reward, crash
+  rate, backend.
 - Smoothing (EMA window) applies to the chart.
 - Launch it from the Godot RL tab's **Open desktop dashboard** button (or
   `--runs DIR` on the CLI for the Godot-spawned trainer's run dir); with the
