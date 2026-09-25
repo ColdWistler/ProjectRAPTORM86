@@ -1150,4 +1150,67 @@ mod tests {
         assert_eq!(m.algo.as_deref(), Some("ppo"));
         assert_eq!(m.git_commit.as_deref(), Some("d48a301"));
     }
+
+    #[test]
+    fn real_newest_run_renders_strip_points() {
+        // End-to-end guard against schema drift between rl_agent's telemetry
+        // writer and this reader: copy the repo's newest run (it exists on
+        // dev machines after any training) into a temp root, build the app,
+        // and assert the strip pipeline — poll → series → window_bounds —
+        // yields renderable points. Skipped when the repo has no runs.
+        let repo_runs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("rl_dash sits at repo root")
+            .join("runs");
+        let Some(newest) = discover_runs(&repo_runs).into_iter().next_back() else {
+            return; // no runs on this machine — nothing to verify against
+        };
+        let id = newest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("rl_dash_real_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dst = root.join(&id);
+        std::fs::create_dir_all(&dst).unwrap();
+        if newest.join("metrics.jsonl").exists() {
+            std::fs::copy(newest.join("metrics.jsonl"), dst.join("metrics.jsonl")).unwrap();
+        }
+        if newest.join("run.json").exists() {
+            std::fs::copy(newest.join("run.json"), dst.join("run.json")).unwrap();
+        }
+
+        let mut app = DashApp::new(root.clone(), 0);
+        for _ in 0..6 {
+            app.poll_all(); // initial load + a couple of auto-rsescans
+        }
+        let run = app
+            .runs
+            .get(&id)
+            .unwrap_or_else(|| panic!("newest run `{id}` must be discovered"));
+        assert!(!run.records.is_empty(), "newest run's telemetry parses into records");
+        assert!(
+            !run.series("mean_reward_per_step").is_empty(),
+            "reward series must be non-empty"
+        );
+
+        // Replicate strip_card's series construction for every metric card.
+        for (key, _) in METRICS {
+            let series: Vec<(usize, String, Vec<[f64; 2]>)> = app
+                .runs
+                .iter()
+                .enumerate()
+                .filter(|(_, (rid, _))| app.visible.get(*rid).copied().unwrap_or(false))
+                .filter_map(|(i, (rid, r))| {
+                    let pts = smooth(&r.series_x(key, false), 0);
+                    (!pts.is_empty()).then(|| (i, rid.clone(), pts))
+                })
+                .collect();
+            assert!(
+                DashApp::window_bounds(&series, 120.0).is_some(),
+                "strip card for `{key}` must have a window on the newest run"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
