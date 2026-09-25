@@ -72,8 +72,8 @@ algorithm, backend and hyper-parameters and runs training with a live log
 | Value | Behavior |
 |---|---|
 | `cpu` | `Autodiff<NdArray>` on `NdArrayDevice::Cpu`. No GPU required; fast to start and fully deterministic with a seed. |
-| `gpu` | `Autodiff<Wgpu>` (Vulkan compute). **Errors** if no working GPU is found or the GPU panics mid-run. |
-| `auto` (default) | Probes `[WgpuDevice::DefaultGpu, WgpuDevice::DiscreteGpu(0)]` with a tiny matmul+sum under `catch_unwind`; uses the first device that yields a finite result, else falls back to CPU (with a warning). If GPU execution panics later, the **entire run** restarts on CPU. |
+| `gpu` | `Autodiff<Wgpu>` (Vulkan compute) on the first device that survives the functional probe. **Errors** if no working GPU is found or the GPU panics mid-run. |
+| `auto` (default) | Selects the GPU only if it is genuinely usable for *this* workload, else falls back to CPU with a one-line warning. Selection: (1) pick the discrete GPU first (`DiscreteGpu(0)`, then `IntegratedGpu(0)`, then wgpu's `DefaultDevice` — override with `RL_GPU_DEVICE=discrete\|integrated\|default`); (2) a tiny matmul under `catch_unwind`; (3) `probe_gpu_train` — 16 real autodiff updates + 128 rollout-style per-step forwards that sync to the host every step, all under a 20 s wall-clock timeout *and* a 0.5 ms/synced-forward budget. A device that stalls (or panics — e.g. the old `into_scalar` bug) or whose per-call dispatch overhead exceeds the budget is rejected: on the reference laptop wgpu measures ≥1 ms/step and trains at ~48 sps vs ~2 000 sps on CPU. If GPU execution panics later, the **entire run** restarts on CPU. |
 
 Both backends are compiled into one binary — switching is a flag, not a
 rebuild. The only place concrete backend types are named is

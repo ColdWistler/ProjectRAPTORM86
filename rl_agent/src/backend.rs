@@ -11,7 +11,10 @@
 //! workload (autodiff updates + rollout-style synced forwards) under a
 //! wall-clock timeout imposed by the caller. Some wgpu/Vulkan runtimes pass a
 //! micro matmul yet stall in autodiff/fusion codegen or per-call dispatch;
-//! those must not be selected by `auto`.
+//! those must not be selected by `auto`. The probe additionally times its
+//! synced per-step forwards and rejects devices at ≥0.5 ms/step — such a path
+//! trains slower than the ndarray CPU backend on this tiny 19→128→128 net
+//! (measured ~48 sps GPU vs ~2 000 sps CPU on the reference box).
 //!
 //! Every training routine is generic over `B: AutodiffBackend`, so this
 //! module is the only place that names concrete backend types.
@@ -23,6 +26,7 @@ use burn::backend::{NdArray, Wgpu};
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
+use std::time::Duration;
 
 /// CPU backend: autodiff layered on the ndarray backend.
 pub type Cpu = Autodiff<NdArray>;
@@ -63,11 +67,30 @@ pub fn parse_backend(s: &str) -> BackendKind {
 /// Probe candidate GPU devices with a tiny tensor op under `catch_unwind`.
 /// Returns the first device that completes a small matmul + reduction
 /// with finite output, or `None` when no GPU works.
+///
+/// The discrete GPU is preferred: on laptops wgpu's `DefaultDevice` ("high
+/// power" adapter) can land on the integrated iGPU, which crawls on real
+/// training loads (~15 sps vs ~1100 sps CPU here) even though it passes the
+/// micro probe. `RL_GPU_DEVICE=discrete|integrated|default` overrides the
+/// candidate order for diagnosis.
 pub fn try_gpu_device() -> Option<WgpuDevice> {
-    for device in [WgpuDevice::DefaultDevice, WgpuDevice::DiscreteGpu(0)] {
+    let order: &[WgpuDevice] = match std::env::var("RL_GPU_DEVICE").as_deref() {
+        Ok("integrated") => &[
+            WgpuDevice::IntegratedGpu(0),
+            WgpuDevice::DefaultDevice,
+            WgpuDevice::DiscreteGpu(0),
+        ],
+        Ok("default") => &[WgpuDevice::DefaultDevice, WgpuDevice::DiscreteGpu(0)],
+        _ => &[
+            WgpuDevice::DiscreteGpu(0),
+            WgpuDevice::IntegratedGpu(0),
+            WgpuDevice::DefaultDevice,
+        ],
+    };
+    for device in order {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let x: Tensor<RawGpu, 2> =
-                Tensor::<RawGpu, 1>::from_floats([1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
+                Tensor::<RawGpu, 1>::from_floats([1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], device)
                     .reshape([2, 3]);
             let y = x.clone().matmul(x.transpose());
             let value: f32 = y.sum().into_scalar();
@@ -94,6 +117,12 @@ const GPU_PROBE_UPDATES: usize = 16;
 /// Rollout-style per-step forwards the probe runs (each syncs to the host,
 /// mirroring `act` during a rollout).
 const GPU_PROBE_STEPS: usize = 128;
+/// Per-step budget for the probe's synced forwards. A *healthy* GPU finishes
+/// one tiny forward + host sync in well under 0.1 ms; anything at or above
+/// 0.5 ms/step is not going to beat the CPU backend on this 19→128→128
+/// workload (on this box the wgpu path measures ≥1 ms/step and trains at
+/// ~48 sps vs ~2 000 sps on CPU), so `auto` should never select it.
+const GPU_PROBE_STEP_BUDGET: Duration = Duration::from_micros(500);
 
 /// Tiny feed-forward net used *only* by the `auto` backend probe.
 ///
@@ -121,8 +150,12 @@ impl<B: Backend> ProbeNet<B> {
         const ACTION: usize = 4;
         Self {
             fc1: LinearConfig::new(OBS, HIDDEN).with_bias(true).init(device),
-            fc2: LinearConfig::new(HIDDEN, HIDDEN).with_bias(true).init(device),
-            mu_head: LinearConfig::new(HIDDEN, ACTION).with_bias(true).init(device),
+            fc2: LinearConfig::new(HIDDEN, HIDDEN)
+                .with_bias(true)
+                .init(device),
+            mu_head: LinearConfig::new(HIDDEN, ACTION)
+                .with_bias(true)
+                .init(device),
             value_head: LinearConfig::new(HIDDEN, 1).with_bias(true).init(device),
         }
     }
@@ -170,7 +203,9 @@ pub fn probe_gpu_train(device: WgpuDevice) -> Result<(), String> {
         for i in 0..GPU_PROBE_UPDATES {
             let f = (i as f32 + 1.0) * 0.05;
             let x = Tensor::<Gpu, 1>::from_floats([f; 19], &device).reshape([1, 19]);
-            let value_loss = (net.value(x.clone()) - target.clone()).powf_scalar(2.0).mean();
+            let value_loss = (net.value(x.clone()) - target.clone())
+                .powf_scalar(2.0)
+                .mean();
             let policy_loss = net.mean(x).powf_scalar(2.0).mean();
             let loss = value_loss + policy_loss;
             let grads = loss.backward();
@@ -180,25 +215,132 @@ pub fn probe_gpu_train(device: WgpuDevice) -> Result<(), String> {
 
         // Phase 2: rollout-style per-step forwards that sync to the host
         // every step (the per-call dispatch overhead that stalls `act`).
+        // Time it: a device that only survives phase 1 but takes ≥0.5 ms per
+        // synced forward would train slower than the CPU backend (the very
+        // stall this probe exists to catch), so reject it here.
+        let phase2_started = std::time::Instant::now();
         for i in 0..GPU_PROBE_STEPS {
             let f = (i as f32 + 1.0) * 0.01;
             let x = Tensor::<Gpu, 1>::from_floats([f; 19], &device).reshape([1, 19]);
             let v: f32 = net.value(x.clone()).into_scalar();
-            let m: f32 = net.mean(x).into_scalar();
+            // `mean` is [1, action_dim] — reduce before `into_scalar` (which only
+            // accepts 1-element tensors; on a [1, 4] it panics with a Tensor
+            // Operation Error and every `auto` run falls back to CPU).
+            let m: f32 = net.mean(x.clone()).mean().into_scalar();
             if !v.is_finite() || !m.is_finite() {
                 return Err("GPU probe produced non-finite values".to_string());
             }
         }
+        let per_step = phase2_started.elapsed().div_f32(GPU_PROBE_STEPS as f32);
+        if per_step > GPU_PROBE_STEP_BUDGET {
+            return Err(format!(
+                "GPU probe too slow for training: {:.1} ms/synced-forward vs \
+                 {:.1} ms budget (wgpu dispatch overhead makes it slower than CPU)",
+                per_step.as_secs_f64() * 1000.0,
+                GPU_PROBE_STEP_BUDGET.as_secs_f64() * 1000.0
+            ));
+        }
         Ok(())
     }));
     std::panic::set_hook(prev_hook);
-    result
-        .map_err(|e| {
-            let msg = e
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_else(|| "unknown panic payload".to_string());
-            format!("GPU probe panicked: {msg}")
-        })?
+    result.map_err(|e| {
+        let msg = e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown panic payload".to_string());
+        format!("GPU probe panicked: {msg}")
+    })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Time `probe_gpu_train` on each candidate device under a per-device
+    /// wall-clock budget. `#[ignore]` because it initialises wgpu/Vulkan and
+    /// can be slow or environment-dependent; run with
+    /// `cargo test -p rl_agent -- --ignored --nocapture` to diagnose which
+    /// physical GPU is actually trainable on a given machine. Results go to
+    /// stderr so they show live even if a later device hangs.
+    #[test]
+    #[ignore]
+    fn probe_timing_all_devices() {
+        const DEVICE_BUDGET: Duration = Duration::from_secs(40);
+        for device in [WgpuDevice::DefaultDevice, WgpuDevice::DiscreteGpu(0)] {
+            eprintln!("probe_timing: starting {device:?}");
+            let d = device.clone();
+            let t = std::time::Instant::now();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(probe_gpu_train(d));
+            });
+            match rx.recv_timeout(DEVICE_BUDGET) {
+                Ok(Ok(())) => eprintln!(
+                    "probe_timing: {device:?} OK in {:.2}s",
+                    t.elapsed().as_secs_f64()
+                ),
+                Ok(Err(e)) => eprintln!(
+                    "probe_timing: {device:?} FAILED after {:.2}s: {e}",
+                    t.elapsed().as_secs_f64()
+                ),
+                Err(_) => eprintln!(
+                    "probe_timing: {device:?} HUNG (>{}s)",
+                    DEVICE_BUDGET.as_secs()
+                ),
+            }
+        }
+    }
+
+    /// Isolate where the wgpu backend loses time: raw matmul throughput (no
+    /// host sync) vs per-op `into_scalar` sync latency vs a real single-step
+    /// forward + sync (the rollout `act` cost). `#[ignore]` like the other
+    /// wgpu tests; run with `--ignored --nocapture` (use `--release` for
+    /// honest CPU-side op-submission timings).
+    #[test]
+    #[ignore]
+    fn gpu_op_latency() {
+        let device = WgpuDevice::DiscreteGpu(0);
+        let a = Tensor::<RawGpu, 2>::ones([128, 128], &device);
+
+        // 1) Raw matmul throughput: 200 fused matmuls, single sync at the end.
+        let t = Instant::now();
+        let mut y = a.clone();
+        for _ in 0..200 {
+            y = y.matmul(a.clone());
+        }
+        let _hold: f32 = y.sum().into_scalar();
+        eprintln!(
+            "gpu_lat: 200x[128,128] matmuls (1 sync total): {:.3}s",
+            t.elapsed().as_secs_f64()
+        );
+
+        // 2) Per-op host-sync latency: the cost paid on every rollout step.
+        let t = Instant::now();
+        for _ in 0..200 {
+            let _v: f32 = a.clone().sum().into_scalar();
+        }
+        let e = t.elapsed();
+        eprintln!(
+            "gpu_lat: 200x sum+into_scalar syncs: {:.3}s ({:.2} ms/op)",
+            e.as_secs_f64(),
+            e.as_secs_f64() * 1000.0 / 200.0
+        );
+
+        // 3) Real net forward + two syncs per call: the rollout `act()` shape.
+        let net = ProbeNet::<RawGpu>::new(&device);
+        let x = Tensor::<RawGpu, 1>::from_floats([0.5f32; 19], &device).reshape([1, 19]);
+        let t = Instant::now();
+        for _ in 0..200 {
+            let _v: f32 = net.value(x.clone()).into_scalar();
+            let _m: f32 = net.mean(x.clone()).mean().into_scalar();
+        }
+        let e = t.elapsed();
+        eprintln!(
+            "gpu_lat: 200x net fwd + 2 syncs: {:.3}s ({:.2} ms/step)",
+            e.as_secs_f64(),
+            e.as_secs_f64() * 1000.0 / 200.0
+        );
+    }
 }

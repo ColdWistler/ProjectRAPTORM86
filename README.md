@@ -91,8 +91,9 @@ physics run in Rust while Godot handles all assets and visualization.
   gradient-norm clipping) training the `AvionicsEnvironment` attitude-control
   task from the noisy 19-channel sensor bus. CPU (ndarray) and GPU
   (wgpu/Vulkan) backends are compiled into one binary and selected at runtime
-  with `--backend cpu|gpu|auto` — `auto` probes the GPU and falls back to the
-  CPU. The algorithm is **pluggable**: `--algo` selects a registered model
+  with `--backend cpu|gpu|auto` — `auto` probes the GPU (discrete first) and
+  only trains on it when it is genuinely fast enough for this workload, else
+  falls back to the CPU. The algorithm is **pluggable**: `--algo` selects a registered model
   (`rl_agent::algo::AlgoSpec`), and the main menu's **RL** tab launches
   training from Godot with a **live metrics chart**. Every run streams
   **structured telemetry** into `runs/<run_id>/` (`metrics.jsonl` +
