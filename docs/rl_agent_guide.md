@@ -414,19 +414,11 @@ cargo run -p rl_dash -- --metric policy_loss
   keeps the newest run plotted and re-reads `metrics.jsonl` by byte offset,
   so a running trainer updates ~5×/s with no re-parsing of old lines. The
   runs dir is also re-scanned every second, so a run the trainer spawns
-  *after* the dashboard opens (e.g. from the RL tab) appears on its own —
-  and the strip views stay anchored to the newest run, so a fresh live run
-  streams in at the right edge even next to a long completed run.
-- Two live views, switchable in the sidebar:
-  - **Strip** (default) — a system-monitor grid: one scrolling strip-chart
-    per metric, side by side like KDE System Monitor. Each card shows the
-    metric's current value (a color dot per overlaid run) and the window's
-    min..max; the graph pins the newest point to the right edge and the
-    trailing window (10–5000 units) scrolls left as data lands. Set the tail
-    window or flip the x axis to `elapsed_s` for a wall-clock scroller.
-  - **Compare** — the single-chart view: pick any metric, overlay any run
-    against the same axes, hover for cursor values, read latest values beneath.
-- Smoothing (EMA window) applies to both views.
+  *after* the dashboard opens (e.g. from the RL tab) appears on its own.
+- **Compare** — the dashboard's chart: pick any metric, overlay any run
+  against the same axes, hover for cursor values, and read the latest values
+  beneath the plot.
+- Smoothing (EMA window) applies to the chart.
 - Launch it from the Godot RL tab's **Open desktop dashboard** button (or
   `--runs DIR` on the CLI for the Godot-spawned trainer's run dir); with the
   RL tab's **Open on Start** checkbox it opens automatically whenever
