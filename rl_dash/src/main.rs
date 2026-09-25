@@ -184,9 +184,7 @@ impl RunModel {
         let path = self.dir.join("metrics.jsonl");
         let mut f = match std::fs::File::open(&path) {
             Ok(f) => f,
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound && self.records.is_empty() =>
-            {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.records.is_empty() => {
                 // Brand-new run whose metrics.jsonl hasn't been created yet —
                 // benign (discovery already treats run.json-only dirs as runs).
                 return;
@@ -249,22 +247,6 @@ impl RunModel {
             .collect()
     }
 
-    /// Value series with a selectable x axis: iteration (default) or
-    /// `elapsed_s`. A record without a timestamp keeps its iteration index as
-    /// the x-coordinate, so a time-streaked file never drops a point.
-    fn series_x(&self, key: &str, time: bool) -> Vec<[f64; 2]> {
-        if !time {
-            return self.series(key);
-        }
-        self.records
-            .iter()
-            .filter_map(|r| {
-                r.metric(key)
-                    .map(|v| [r.elapsed_s.unwrap_or(r.iteration as f64), v])
-            })
-            .collect()
-    }
-
     fn status(&self) -> &str {
         self.manifest
             .as_ref()
@@ -286,10 +268,7 @@ fn discover_runs(root: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && (p.join("metrics.jsonl").exists() || p.join("run.json").exists())
-        })
+        .filter(|p| p.is_dir() && (p.join("metrics.jsonl").exists() || p.join("run.json").exists()))
         .collect();
     dirs.sort_by(|a, b| {
         let an = a.file_name().unwrap_or_default().to_string_lossy();
@@ -341,12 +320,6 @@ struct DashApp {
     metric: usize,
     window: u32,
     follow_live: bool,
-    /// Strip (system-monitor) view vs. the single-metric comparison view.
-    strip_view: bool,
-    /// Trailing window width for the strip view, in x units.
-    strip_window: u32,
-    /// Strip view x axis: elapsed seconds (wall-clock-ish) vs. iteration.
-    time_axis: bool,
     banner: Option<String>,
     /// Polls since the last runs-dir rescan (auto-discovery of new runs).
     polls_since_rescan: u8,
@@ -361,9 +334,6 @@ impl DashApp {
             metric,
             window: 0,
             follow_live: true,
-            strip_view: true,
-            strip_window: 120,
-            time_axis: false,
             banner: None,
             polls_since_rescan: 0,
         };
@@ -459,11 +429,7 @@ impl eframe::App for DashApp {
             .show(ui, |ui| self.side_panel(ui));
 
         egui::CentralPanel::default().show(ui, |ui| {
-            if self.strip_view {
-                self.strip_panel(ui);
-            } else {
-                self.plot_panel(ui);
-            }
+            self.plot_panel(ui);
         });
     }
 }
@@ -479,28 +445,14 @@ impl DashApp {
         );
         ui.separator();
 
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.strip_view, true, "Strip");
-            ui.selectable_value(&mut self.strip_view, false, "Compare");
-        });
-        if self.strip_view {
-            let tail_label = if self.time_axis {
-                format!("Tail window: {} s", self.strip_window)
-            } else {
-                format!("Tail window: {} iter", self.strip_window)
-            };
-            ui.add(egui::Slider::new(&mut self.strip_window, 10..=5000).text(tail_label));
-            ui.checkbox(&mut self.time_axis, "Time axis (elapsed_s)");
-        } else {
-            egui::ComboBox::from_label("Metric")
-                .selected_text(self.metric_label())
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    for (i, (_, label)) in METRICS.iter().enumerate() {
-                        ui.selectable_value(&mut self.metric, i, *label);
-                    }
-                });
-        }
+        egui::ComboBox::from_label("Metric")
+            .selected_text(self.metric_label())
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                for (i, (_, label)) in METRICS.iter().enumerate() {
+                    ui.selectable_value(&mut self.metric, i, *label);
+                }
+            });
 
         let smooth_label = if self.window == 0 {
             "Smoothing: off".to_string()
@@ -544,7 +496,11 @@ impl DashApp {
                 ui.horizontal(|ui| {
                     let vis = self.visible.entry(id.clone()).or_insert(true);
                     ui.checkbox(vis, "");
-                    let label = if is_newest { format!("{id} ◀") } else { id.clone() };
+                    let label = if is_newest {
+                        format!("{id} ◀")
+                    } else {
+                        id.clone()
+                    };
                     ui.label(egui::RichText::new(label).monospace());
                     let status_text = if live { "● live" } else { status.as_str() };
                     ui.colored_label(color, status_text);
@@ -634,11 +590,9 @@ impl DashApp {
                 );
             } else {
                 ui.label(
-                    egui::RichText::new(
-                        "hover the plot for values · drag to pan · scroll to zoom",
-                    )
-                    .weak()
-                    .small(),
+                    egui::RichText::new("hover the plot for values · drag to pan · scroll to zoom")
+                        .weak()
+                        .small(),
                 );
             }
         }
@@ -675,208 +629,6 @@ impl DashApp {
             }
         }
     }
-
-    /// Bounds for a sliding trailing window shared by every strip card: the
-    /// newest point across all visible series pins the right edge and the
-    /// window trails `tail` x-units behind. Y covers only the points inside
-    /// the window and gets a small pad. `None` when nothing has data yet.
-    fn window_bounds(
-        series: &[(usize, String, Vec<[f64; 2]>)],
-        tail: f64,
-    ) -> Option<([f64; 2], [f64; 2])> {
-        // The strip is anchored to the *newest* run with data, not the max x
-        // across all runs: its latest point pins the right edge. Otherwise a
-        // completed run with thousands of iterations would pin the window far
-        // to the right and a fresh live run's early points (small x) would sit
-        // outside the visible window — invisible until it catches up.
-        let newest = series
-            .last()
-            .and_then(|(_, _, pts)| pts.last().map(|p| p[0]))
-            .unwrap_or_else(|| {
-                series
-                    .iter()
-                    .filter_map(|(_, _, pts)| pts.last().map(|p| p[0]))
-                    .fold(f64::NEG_INFINITY, f64::max)
-            });
-        if !newest.is_finite() {
-            return None;
-        }
-        let (x_min, x_max) = (newest - tail, newest);
-        let mut y_min = f64::INFINITY;
-        let mut y_max = f64::NEG_INFINITY;
-        for (_, _, pts) in series {
-            for p in pts {
-                if p[0] >= x_min && p[0] <= x_max {
-                    y_min = y_min.min(p[1]);
-                    y_max = y_max.max(p[1]);
-                }
-            }
-        }
-        if !y_min.is_finite() {
-            return Some(([x_min, 0.0], [x_max, 1.0]));
-        }
-        let mut pad = (y_max - y_min) * 0.08;
-        if pad <= 0.0 {
-            pad = y_max.abs().max(1e-9) * 0.05 + 1e-9;
-        }
-        Some(([x_min, y_min - pad], [x_max, y_max + pad]))
-    }
-
-    /// System-monitor style grid: one scrolling strip-chart per metric. Runs
-    /// overlay in their palette color; the header carries the current value
-    /// and the window's min..max readout.
-    fn strip_panel(&mut self, ui: &mut egui::Ui) {
-        let smoothing = self.window;
-        let tail = self.strip_window.clamp(10, 10_000) as f64;
-        let time = self.time_axis;
-
-        ui.horizontal(|ui| {
-            ui.heading("Live monitoring");
-            ui.label(
-                egui::RichText::new(
-                    "trailing window — the newest point pins the right edge and the chart scrolls left as data lands",
-                )
-                .weak()
-                .small(),
-            );
-        });
-        ui.add_space(6.0);
-
-        let axis = if time { "elapsed_s" } else { "iteration" };
-        let units = if time { "s" } else { "iter" };
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new("strip_grid")
-                    .num_columns(2)
-                    .spacing([16.0, 10.0])
-                    .show(ui, |ui| {
-                        for (mi, (key, label)) in METRICS.iter().enumerate() {
-                            self.strip_card(ui, key, label, smoothing, tail, time);
-                            if mi % 2 == 1 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "x = {axis} · trailing window {tail:.0} {units} · dot colors are runs (hover a dot for its id)"
-                    ))
-                    .weak()
-                    .small(),
-                );
-            });
-    }
-
-    fn strip_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        key: &str,
-        label: &str,
-        smoothing: u32,
-        tail: f64,
-        time: bool,
-    ) {
-        // Visible runs that actually have a point for this metric.
-        let mut series: Vec<(usize, String, Vec<[f64; 2]>)> = Vec::new();
-        for (i, (id, run)) in self.runs.iter().enumerate() {
-            if !self.visible.get(id).copied().unwrap_or(false) {
-                continue;
-            }
-            let pts = smooth(&run.series_x(key, time), smoothing);
-            if pts.is_empty() {
-                continue;
-            }
-            series.push((i, id.clone(), pts));
-        }
-        let bounds = Self::window_bounds(&series, tail);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-
-            // Header: metric name, per-run color dots, and the live readout
-            // (newest run's latest value + this window's min..max).
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(label).strong());
-                for (i, id, _) in &series {
-                    ui.label(egui::RichText::new("●").color(PALETTE[*i % PALETTE.len()]))
-                        .on_hover_text(id.clone());
-                }
-                if let Some((min, max)) = bounds {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some((i, id, pts)) = series.last() {
-                            ui.label(
-                                egui::RichText::new(fmt(pts.last().map(|p| p[1]).unwrap_or(0.0)))
-                                    .color(PALETTE[*i % PALETTE.len()])
-                                    .strong(),
-                            )
-                            .on_hover_text(id.clone());
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("[{}, {}]", fmt(min[1]), fmt(max[1])))
-                                .weak()
-                                .small(),
-                        );
-                    });
-                }
-            });
-
-            // Rendered exactly like the Compare tab: auto-bounds fit whatever
-            // points are passed, so a card can never be blank as long as any
-            // data exists (compare's "Auto-bounds are on by default, so new
-            // points always fit the plot"). The trailing window is applied by
-            // *clipping the data* to [min, max] instead of pinning the plot
-            // bounds every frame — the manual set_plot_bounds/auto_bounds(false)
-            // path is what left cards empty. If clipping ever removes every
-            // point, fall back to the full series so the graph still shows.
-            let clipped: Vec<(usize, String, Vec<[f64; 2]>)> = match bounds {
-                Some((min, max)) => series
-                    .iter()
-                    .filter_map(|(i, id, pts)| {
-                        let w: Vec<[f64; 2]> = pts
-                            .iter()
-                            .filter(|p| p[0] >= min[0] && p[0] <= max[0])
-                            .cloned()
-                            .collect();
-                        if w.is_empty() {
-                            None
-                        } else {
-                            Some((*i, id.clone(), w))
-                        }
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            let plotted = if clipped.is_empty() { series.clone() } else { clipped };
-            if plotted.is_empty() {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("awaiting data — tick a run on the left")
-                        .weak()
-                        .small(),
-                );
-            } else {
-                let plot = Plot::new(("kde_strip", key))
-                    .allow_drag(false)
-                    .allow_zoom(false)
-                    .allow_scroll(false)
-                    .show_x(false)
-                    .show_y(false)
-                    .show_crosshair(false)
-                    .height(104.0);
-                plot.show(ui, |plot_ui| {
-                    for (i, id, pts) in &plotted {
-                        plot_ui.line(
-                            Line::new(id.as_str(), PlotPoints::from(pts.clone()))
-                                .color(PALETTE[*i % PALETTE.len()])
-                                .width(2.0),
-                        );
-                    }
-                });
-            }
-        });
-    }
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
@@ -894,10 +646,7 @@ fn parse_args() -> (PathBuf, usize) {
             }
             "--metric" => {
                 if let Some(v) = it.next() {
-                    metric = METRICS
-                        .iter()
-                        .position(|(k, _)| *k == v)
-                        .unwrap_or(0);
+                    metric = METRICS.iter().position(|(k, _)| *k == v).unwrap_or(0);
                 }
             }
             "--help" | "-h" => {
@@ -985,7 +734,11 @@ mod tests {
         )
         .unwrap();
         run.poll();
-        assert_eq!(run.records.len(), 2, "append must be picked up exactly once");
+        assert_eq!(
+            run.records.len(),
+            2,
+            "append must be picked up exactly once"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1020,7 +773,10 @@ mod tests {
         let found = discover_runs(&root);
         assert_eq!(found.len(), 3);
         let last = found.last().unwrap().file_name().unwrap().to_string_lossy();
-        assert_eq!(last, "20260103_000000_000_ppo_seed42", "newest run sorts last");
+        assert_eq!(
+            last, "20260103_000000_000_ppo_seed42",
+            "newest run sorts last"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1035,11 +791,17 @@ mod tests {
         let mut run = RunModel::new(dir.clone());
         run.poll();
         assert!(run.records.is_empty());
-        assert!(run.error.is_none(), "missing file on a fresh run is not an error");
+        assert!(
+            run.error.is_none(),
+            "missing file on a fresh run is not an error"
+        );
 
         // Once the file lands the same RunModel picks it up.
-        std::fs::write(dir.join("metrics.jsonl"), "{\"iteration\":1,\"elapsed_s\":1.0,\"mean_reward_per_step\":0.5}\n")
-            .unwrap();
+        std::fs::write(
+            dir.join("metrics.jsonl"),
+            "{\"iteration\":1,\"elapsed_s\":1.0,\"mean_reward_per_step\":0.5}\n",
+        )
+        .unwrap();
         run.poll();
         assert_eq!(run.records.len(), 1);
         assert!(run.error.is_none());
@@ -1057,60 +819,6 @@ mod tests {
     }
 
     #[test]
-    fn series_x_switches_between_iteration_and_elapsed_time() {
-        let dir = std::env::temp_dir().join(format!("rl_dash_x_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("metrics.jsonl"),
-            "{\"iteration\":1,\"elapsed_s\":10.0,\"mean_reward_per_step\":0.1}\n\
-             {\"iteration\":2,\"elapsed_s\":14.5,\"mean_reward_per_step\":0.2}\n",
-        )
-        .unwrap();
-        let mut run = RunModel::new(dir.clone());
-        run.poll();
-        assert_eq!(run.series_x("mean_reward_per_step", false), vec![[1.0, 0.1], [2.0, 0.2]]);
-        assert_eq!(run.series_x("mean_reward_per_step", true), vec![[10.0, 0.1], [14.5, 0.2]]);
-        // A record without elapsed_s keeps its iteration index as the x.
-        std::fs::write(dir.join("metrics.jsonl"), "{\"iteration\":3,\"mean_reward_per_step\":0.3}\n")
-            .unwrap();
-        run.poll();
-        assert_eq!(run.series_x("mean_reward_per_step", true).last().unwrap(), &[3.0, 0.3]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn window_bounds_slides_and_pads_but_only_over_visible_series() {
-        let series: Vec<(usize, String, Vec<[f64; 2]>)> = vec![(
-            0,
-            "run".into(),
-            vec![[0.0, 1.0], [10.0, 5.0], [20.0, 3.0]],
-        )];
-        let (min, max) = DashApp::window_bounds(&series, 8.0).unwrap();
-        assert_eq!(min[0], 12.0, "window trails the newest x by the tail");
-        assert_eq!(max[0], 20.0, "newest x pins the right edge");
-        assert!(min[1] <= 3.0 && max[1] >= 3.0, "y covers only in-window points, padded");
-        assert!(
-            DashApp::window_bounds(&[], 8.0).is_none(),
-            "no series -> no window"
-        );
-    }
-
-    #[test]
-    fn window_bounds_anchors_the_newest_run_not_the_longest() {
-        // A long old run (500 iters) and a fresh live run (5 iters): the
-        // window must follow the live run, otherwise its early points would be
-        // outside the visible window (the "only the completed run shows" bug).
-        let series: Vec<(usize, String, Vec<[f64; 2]>)> = vec![
-            (0, "old_completed".into(), (0..500).map(|i| [i as f64, i as f64]).collect()),
-            (1, "new_live".into(), vec![[1.0, 0.1], [5.0, 0.2]]),
-        ];
-        let (min, max) = DashApp::window_bounds(&series, 120.0).unwrap();
-        assert_eq!(max[0], 5.0, "right edge = the live run's newest point");
-        assert_eq!(min[0], 5.0 - 120.0, "window trails the live run, not iter 500");
-        assert!(min[1] <= 0.1 && max[1] >= 0.2, "both runs' in-window points are covered");
-    }
-
-    #[test]
     fn auto_rescan_picks_up_a_run_spawned_after_launch() {
         // The RL tab spawns the trainer, which creates its run dir *after* the
         // dashboard's first scan — that run must appear without a click.
@@ -1124,7 +832,11 @@ mod tests {
         .unwrap();
 
         let mut app = DashApp::new(root.clone(), 0);
-        assert_eq!(app.runs.len(), 1, "dashboard opens with only the completed run");
+        assert_eq!(
+            app.runs.len(),
+            1,
+            "dashboard opens with only the completed run"
+        );
 
         // Trainer spawns its live run after launch.
         std::fs::create_dir_all(root.join("20260923_120000_000_ppo_seed42")).unwrap();
@@ -1137,7 +849,11 @@ mod tests {
         for _ in 0..4 {
             app.poll_all();
         }
-        assert_eq!(app.runs.len(), 1, "rescan only triggers every 5 polls (~1 s)");
+        assert_eq!(
+            app.runs.len(),
+            1,
+            "rescan only triggers every 5 polls (~1 s)"
+        );
         app.poll_all();
         assert_eq!(
             app.runs.len(),
@@ -1166,43 +882,45 @@ mod tests {
     }
 
     #[test]
-    fn strip_view_allots_plots_and_draws_lines_with_real_data() {
-        // The strip ("Live monitoring") view must actually allocate wide plot
-        // rects and draw line paths — not just compute bounds. Runs the real
-        // `strip_panel` in a headless egui context (no window needed) against
-        // a copy of the repo's newest run and inspects the emitted shapes.
-        // Skipped when the repo has no runs.
+    fn compare_view_renders_every_metric_with_real_data() {
+        // End-to-end guard against schema drift between rl_agent's telemetry
+        // writer and this reader: copy the repo's newest run into a temp root,
+        // build the app, and render the Compare panel headlessly for every
+        // selectable metric. Any metric that has data must produce at least
+        // one drawn line path inside a sizable plot rect. Skipped when the
+        // repo has no runs.
         let repo_runs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("rl_dash sits at repo root")
             .join("runs");
         let Some(newest) = discover_runs(&repo_runs).into_iter().next_back() else {
-            return;
+            return; // no runs on this machine — nothing to verify against
         };
         let id = newest
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap();
-        let root = std::env::temp_dir().join(format!("rl_dash_strip_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rl_dash_cmp_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dst = root.join(&id);
         std::fs::create_dir_all(&dst).unwrap();
-        std::fs::copy(newest.join("metrics.jsonl"), dst.join("metrics.jsonl")).unwrap();
+        if newest.join("metrics.jsonl").exists() {
+            std::fs::copy(newest.join("metrics.jsonl"), dst.join("metrics.jsonl")).unwrap();
+        }
         if newest.join("run.json").exists() {
             std::fs::copy(newest.join("run.json"), dst.join("run.json")).unwrap();
         }
 
-        // Render the strip under both axis modes with the smallest allowed
-        // trailing window (exercises data clipping). Every mode must allocate
-        // wide plots and draw line paths — auto-bounds like the Compare tab,
-        // so a card must never blank when data exists.
-        for time_axis in [false, true] {
-            let mut app = DashApp::new(root.clone(), 0);
-            app.strip_view = true;
-            app.time_axis = time_axis;
-            app.strip_window = 10;
+        for (_i, (key, _)) in METRICS.iter().enumerate() {
+            // The panel would show "no visible data" for metrics this run never
+            // wrote; only assert against metrics that actually have points.
+            let mut app = DashApp::new(root.clone(), _i);
             for _ in 0..3 {
                 app.poll_all();
+            }
+            let has_data = app.runs.values().any(|r| !r.series(key).is_empty());
+            if !has_data {
+                continue;
             }
 
             let ctx = egui::Context::default();
@@ -1216,7 +934,7 @@ mod tests {
                             app.side_panel(ui);
                         });
                     egui::CentralPanel::default().show(ui, |ui| {
-                        app.strip_panel(ui);
+                        app.plot_panel(ui);
                     });
                 });
             });
@@ -1240,74 +958,11 @@ mod tests {
                 .fold(0.0f32, f32::max);
             assert!(
                 paths >= 1,
-                "strip must draw at least one line path for {id} (time_axis={time_axis}; drew {paths})"
+                "compare view must draw a line path for `{key}` on {id} (drew {paths})"
             );
             assert!(
                 max_clip_w > 100.0 && max_clip_h > 80.0,
-                "strip plot rects must be sizable (time_axis={time_axis}; clip {max_clip_w:.0}x{max_clip_h:.0})"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn real_newest_run_renders_strip_points() {
-        // End-to-end guard against schema drift between rl_agent's telemetry
-        // writer and this reader: copy the repo's newest run (it exists on
-        // dev machines after any training) into a temp root, build the app,
-        // and assert the strip pipeline — poll → series → window_bounds —
-        // yields renderable points. Skipped when the repo has no runs.
-        let repo_runs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("rl_dash sits at repo root")
-            .join("runs");
-        let Some(newest) = discover_runs(&repo_runs).into_iter().next_back() else {
-            return; // no runs on this machine — nothing to verify against
-        };
-        let id = newest
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap();
-        let root = std::env::temp_dir().join(format!("rl_dash_real_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let dst = root.join(&id);
-        std::fs::create_dir_all(&dst).unwrap();
-        if newest.join("metrics.jsonl").exists() {
-            std::fs::copy(newest.join("metrics.jsonl"), dst.join("metrics.jsonl")).unwrap();
-        }
-        if newest.join("run.json").exists() {
-            std::fs::copy(newest.join("run.json"), dst.join("run.json")).unwrap();
-        }
-
-        let mut app = DashApp::new(root.clone(), 0);
-        for _ in 0..6 {
-            app.poll_all(); // initial load + a couple of auto-rsescans
-        }
-        let run = app
-            .runs
-            .get(&id)
-            .unwrap_or_else(|| panic!("newest run `{id}` must be discovered"));
-        assert!(!run.records.is_empty(), "newest run's telemetry parses into records");
-        assert!(
-            !run.series("mean_reward_per_step").is_empty(),
-            "reward series must be non-empty"
-        );
-
-        // Replicate strip_card's series construction for every metric card.
-        for (key, _) in METRICS {
-            let series: Vec<(usize, String, Vec<[f64; 2]>)> = app
-                .runs
-                .iter()
-                .enumerate()
-                .filter(|(_, (rid, _))| app.visible.get(*rid).copied().unwrap_or(false))
-                .filter_map(|(i, (rid, r))| {
-                    let pts = smooth(&r.series_x(key, false), 0);
-                    (!pts.is_empty()).then(|| (i, rid.clone(), pts))
-                })
-                .collect();
-            assert!(
-                DashApp::window_bounds(&series, 120.0).is_some(),
-                "strip card for `{key}` must have a window on the newest run"
+                "compare plot rect must be sizable for `{key}` (clip {max_clip_w:.0}x{max_clip_h:.0})"
             );
         }
         let _ = std::fs::remove_dir_all(&root);
