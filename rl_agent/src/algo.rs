@@ -20,6 +20,7 @@
 use crate::net::NetConfig;
 use crate::ppo::{PpoAgent, PpoConfig};
 use crate::a2c::{A2cAgent, A2cConfig};
+use crate::d3qn::{D3qnConfig, D3qnAgent};
 use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -27,10 +28,11 @@ use std::path::Path;
 /// Algorithm id used by `--algo ppo` and the menu dropdown.
 pub const ALGO_PPO: &str = "ppo";
 pub const ALGO_A2C: &str = "a2c";
+pub const ALGO_D3QN: &str = "d3qn";
 
 /// Every registered algorithm id. Selections (CLI helpers, menu dropdowns)
 /// are drawn from this list.
-pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C];
+pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN];
 
 /// Serializable selection of *which* algorithm + hyper-parameters to run.
 /// Persisted into every checkpoint as `algo.json`.
@@ -50,6 +52,11 @@ pub enum AlgoSpec {
         /// A2C hyper-parameters.
         config: A2cConfig,
     },
+    /// Continuous D3QN — dueling Q + prioritized replay + tanh continuous actions.
+    D3qn {
+        /// D3QN hyper-parameters.
+        config: D3qnConfig,
+    },
 }
 
 impl AlgoSpec {
@@ -58,6 +65,7 @@ impl AlgoSpec {
         match self {
             AlgoSpec::Ppo { .. } => ALGO_PPO,
             AlgoSpec::A2c { .. } => ALGO_A2C,
+            AlgoSpec::D3qn { .. } => ALGO_D3QN,
         }
     }
 
@@ -68,6 +76,7 @@ impl AlgoSpec {
                 config: PpoConfig::default(),
             }),
             ALGO_A2C => Ok(AlgoSpec::A2c { config: A2cConfig::default() }),
+            ALGO_D3QN => Ok(AlgoSpec::D3qn { config: D3qnConfig::default() }),
             other => Err(format!(
                 "unknown algorithm `{other}` (registered: {})",
                 ALGORITHM_IDS.join(", ")
@@ -177,6 +186,7 @@ pub fn make_algorithm<B: AutodiffBackend<FloatElem = f32>>(
     match *spec {
         AlgoSpec::Ppo { config } => Box::new(PpoAgent::<B>::new(device, net_cfg, &config, seed)),
         AlgoSpec::A2c { config } => Box::new(A2cAgent::<B>::new(device, net_cfg, &config, seed)),
+        AlgoSpec::D3qn { config } => Box::new(D3qnAgent::<B>::new(device, net_cfg, &config, seed)),
     }
 }
 
@@ -225,6 +235,24 @@ mod tests {
         match back {
             AlgoSpec::A2c { config } => assert_eq!(config, A2cConfig::default()),
             _ => panic!("expected A2c spec"),
+        }
+    }
+
+    #[test]
+    fn from_id_resolves_d3qn() {
+        assert_eq!(AlgoSpec::from_id(ALGO_D3QN).expect("d3qn").id(), ALGO_D3QN);
+    }
+
+    #[test]
+    fn d3qn_spec_serde_round_trip() {
+        use crate::d3qn::D3qnConfig;
+        let spec = AlgoSpec::D3qn { config: D3qnConfig::default() };
+        let json = spec.to_json().expect("serialize");
+        let back = AlgoSpec::from_json(&json).expect("deserialize");
+        assert_eq!(back.id(), ALGO_D3QN);
+        match back {
+            AlgoSpec::D3qn { config } => assert_eq!(config.hidden, D3qnConfig::default().hidden),
+            _ => panic!("expected D3qn spec"),
         }
     }
 
