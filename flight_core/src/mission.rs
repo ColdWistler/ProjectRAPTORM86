@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 pub const MISSION_FEATURE_DIM: usize = 13;
 
+fn wrap_pi(angle: f64) -> f64 {
+    angle.rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MissionPhase {
@@ -436,6 +440,7 @@ pub struct MissionEnvironment {
     rng: rand::rngs::StdRng,
     last_signals: MissionSignals,
     termination: MissionTermination,
+    cached_features: MissionFeatures,
 }
 
 impl MissionEnvironment {
@@ -480,25 +485,39 @@ impl MissionEnvironment {
             rng: rand::rngs::StdRng::seed_from_u64(seed),
             last_signals: MissionSignals::default(),
             termination: MissionTermination::None,
+            cached_features: MissionFeatures::default(),
         })
     }
 
 
     pub fn reset(&mut self) -> MissionReset {
-        let s = self.scenario.clone();
+        let (north, east, altitude) = sample_pickup(&self.config, &mut self.rng);
+        let s = MissionScenario {
+            id: "random".into(),
+            pickup_north: north,
+            pickup_east: east,
+            pickup_altitude: altitude,
+            initial_phase: MissionPhase::Outbound,
+            initial_north: Some(0.0),
+            initial_east: Some(0.0),
+            initial_altitude: Some(self.config.cruise_altitude),
+            initial_airspeed: None,
+        };
         self.reset_with_scenario(&s)
     }
 
     pub fn reset_with_scenario(&mut self, scenario: &MissionScenario) -> MissionReset {
         let start_north = scenario.initial_north.unwrap_or(0.0);
         let start_east = scenario.initial_east.unwrap_or(0.0);
+        let start_alt = scenario.initial_altitude.unwrap_or(self.config.cruise_altitude);
+        let start_speed = scenario.initial_airspeed.unwrap_or(self.capture_speed).max(1.0);
+        self.inner.reset_trimmed(start_alt, start_speed);
         {
             let sm = self.inner.state_mut();
             sm.pos_x = start_north;
             sm.pos_y = start_east;
-            sm.pos_z = -(scenario.initial_altitude.unwrap_or(1000.0));
-            let speed = scenario.initial_airspeed.unwrap_or(self.capture_speed);
-            sm.u = speed;
+            sm.pos_z = -start_alt;
+            sm.u = start_speed;
             sm.v = 0.0;
             sm.w = 0.0;
         }
@@ -510,11 +529,13 @@ impl MissionEnvironment {
         self.capture_attempts = 0;
         self.last_signals = MissionSignals::default();
         self.termination = MissionTermination::None;
-        let s = self.inner.aircraft_state();
-        self.previous_pickup_distance = ((s.pos_x - self.scenario.pickup_north).powi(2) + (s.pos_y - self.scenario.pickup_east).powi(2)).sqrt();
-        self.previous_home_distance = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
-        self.inner.reset_trimmed(s.altitude(), s.airspeed().max(1.0));
-        MissionReset { avionics: self.inner.observation(), features: self.features(), phase: self.phase }
+        {
+            let s = self.inner.aircraft_state();
+            self.previous_pickup_distance = ((s.pos_x - self.scenario.pickup_north).powi(2) + (s.pos_y - self.scenario.pickup_east).powi(2)).sqrt();
+            self.previous_home_distance = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
+        }
+        self.cached_features = MissionFeatures::default();
+        MissionReset { avionics: self.inner.observation(), features: self.cached_features.clone(), phase: self.phase }
     }
 
     pub fn step(&mut self, action: AvionicsAction) -> MissionStep {
@@ -528,9 +549,7 @@ impl MissionEnvironment {
         let pickup_altitude = self.scenario.pickup_altitude;
         let current_speed = s.airspeed();
         let capture_speed = self.capture_speed;
-        if pickup_distance <= self.config.pickup_radius {
-            self.capture_attempts += 1;
-        }
+
         let termination = if inner_terminated || s.altitude() <= self.config.ground_altitude {
             self.termination = MissionTermination::GroundImpact;
             MissionTermination::GroundImpact
@@ -544,26 +563,43 @@ impl MissionEnvironment {
             self.termination = MissionTermination::Timeout;
             MissionTermination::Timeout
         } else {
-            match (self.phase, phase_before) {
-                (MissionPhase::Outbound, MissionPhase::Outbound) => {
-                    if pickup_distance <= self.config.pickup_radius { self.phase = MissionPhase::Capture; self.capture_attempts += 1; }
-                }
-                (MissionPhase::Capture, MissionPhase::Outbound) => {
-                    if pickup_distance > 2.0 * self.config.pickup_radius { self.phase = MissionPhase::Outbound; self.dwell_steps = 0; }
-                    else if pickup_distance <= 2.0 * self.config.pickup_radius && (s.altitude() - pickup_altitude).abs() <= self.config.pickup_vertical_tolerance && current_speed <= capture_speed {
-                        self.dwell_steps += 1; if self.dwell_steps >= self.config.capture_dwell_steps { self.phase = MissionPhase::Return; }
-                    } else { self.dwell_steps = 0; }
-                }
-                (MissionPhase::Return, MissionPhase::Return) => {
-                    let home_dist = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
-                    if home_dist <= self.config.home_radius && (s.altitude() - self.config.cruise_altitude).abs() <= self.config.home_vertical_tolerance {
-                        self.phase = MissionPhase::Done; self.termination = MissionTermination::CapturedAndReturned;
+            match self.phase {
+                MissionPhase::Outbound => {
+                    if pickup_distance <= self.config.pickup_radius {
+                        self.phase = MissionPhase::Capture;
+                        self.capture_attempts += 1;
                     }
                 }
-                _ => {}
+                MissionPhase::Capture => {
+                    if pickup_distance > 2.0 * self.config.pickup_radius {
+                        self.phase = MissionPhase::Outbound;
+                        self.dwell_steps = 0;
+                    } else if pickup_distance <= self.config.pickup_radius
+                        && (s.altitude() - pickup_altitude).abs() <= self.config.pickup_vertical_tolerance
+                        && current_speed <= capture_speed
+                    {
+                        self.dwell_steps += 1;
+                        if self.dwell_steps >= self.config.capture_dwell_steps {
+                            self.phase = MissionPhase::Return;
+                        }
+                    } else {
+                        self.dwell_steps = 0;
+                    }
+                }
+                MissionPhase::Return => {
+                    let home_dist = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
+                    if home_dist <= self.config.home_radius
+                        && (s.altitude() - self.config.cruise_altitude).abs() <= self.config.home_vertical_tolerance
+                    {
+                        self.phase = MissionPhase::Done;
+                        self.termination = MissionTermination::CapturedAndReturned;
+                    }
+                }
+                MissionPhase::Done => {}
             }
             self.termination
         };
+
         let signals = MissionSignals {
             progress_outbound: self.previous_pickup_distance.max(0.0) - pickup_distance.max(0.0),
             progress_inbound: 0.0,
@@ -573,18 +609,24 @@ impl MissionEnvironment {
             dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64,
             time_penalty: 1.0,
             energy_penalty: action.throttle.clamp(0.0, 1.0),
-            crash: matches!(self.termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds),
+            crash: matches!(termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds),
             captured: (self.phase == MissionPhase::Capture && self.dwell_steps >= self.config.capture_dwell_steps) || self.phase == MissionPhase::Return || self.phase == MissionPhase::Done,
             returned: self.phase == MissionPhase::Done,
         };
+
+        let heading = s.euler_angles().2;
+        let pickup_bearing = f64::atan2(self.scenario.pickup_east - s.pos_y, self.scenario.pickup_north - s.pos_x) - heading;
+        let pickup_bearing = wrap_pi(pickup_bearing);
+        let home_bearing = f64::atan2(-s.pos_y, -s.pos_x) - heading;
+        let home_bearing = wrap_pi(home_bearing);
         let features = MissionFeatures {
             pickup_distance_norm: pickup_distance / 2500.0,
-            pickup_bearing_sin: 0.0,
-            pickup_bearing_cos: 1.0,
+            pickup_bearing_sin: pickup_bearing.sin(),
+            pickup_bearing_cos: pickup_bearing.cos(),
             pickup_altitude_error_norm: (pickup_altitude - s.altitude()) / 500.0,
             home_distance_norm: (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt() / self.config.home_radius,
-            home_bearing_sin: 0.0,
-            home_bearing_cos: 1.0,
+            home_bearing_sin: home_bearing.sin(),
+            home_bearing_cos: home_bearing.cos(),
             phase: match self.phase { MissionPhase::Outbound => 0.0, MissionPhase::Capture => 1.0, MissionPhase::Return => 2.0, MissionPhase::Done => 2.0 },
             speed_margin_norm: (current_speed - self.v_stall) / 10.0,
             time_remaining_fraction: (1.0 - (self.step_count as f64 / self.config.max_steps.max(1) as f64)).clamp(0.0, 1.0),
@@ -593,6 +635,7 @@ impl MissionEnvironment {
             vertical_offset_norm: (s.altitude() - pickup_altitude).abs() / self.config.pickup_vertical_tolerance.max(1e-6),
         };
         self.previous_pickup_distance = pickup_distance;
+        self.cached_features = features.clone();
         self.last_signals = signals;
         MissionStep { avionics: self.inner.observation(), features, signals, termination, terminated: matches!(termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds | MissionTermination::CapturedAndReturned), truncated: termination == MissionTermination::Timeout }
     }
@@ -608,10 +651,8 @@ impl MissionEnvironment {
     pub fn termination(&self) -> MissionTermination { self.termination }
     pub fn context(&self) -> MissionContext { MissionContext { phase: self.phase, step: self.step_count, captured: self.captured } }
     pub fn features(&self) -> MissionFeatures {
-        let s = self.inner.aircraft_state();
-        MissionFeatures { pickup_distance_norm: 0.0, pickup_bearing_sin: 0.0, pickup_bearing_cos: 1.0, pickup_altitude_error_norm: 0.0, home_distance_norm: 0.0, home_bearing_sin: 0.0, home_bearing_cos: 1.0, phase: match self.phase { MissionPhase::Outbound => 0.0, MissionPhase::Capture => 1.0, MissionPhase::Return => 2.0, MissionPhase::Done => 2.0 }, speed_margin_norm: (s.airspeed() - self.v_stall) / 10.0, time_remaining_fraction: (1.0 - (self.step_count as f64 / self.config.max_steps.max(1) as f64)).clamp(0.0, 1.0), capture_dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64, horizontal_offset_norm: 0.0, vertical_offset_norm: 0.0 }
+        self.cached_features.clone()
     }
-    pub fn frame(&self) -> crate::frame::FlightFrame { self.inner.frame() }
     pub fn step_count(&self) -> usize { self.step_count }
     pub fn state_mut(&mut self) -> &mut crate::state::AircraftState { self.inner.state_mut() }
 }
