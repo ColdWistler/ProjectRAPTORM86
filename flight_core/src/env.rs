@@ -20,6 +20,8 @@ use nalgebra::Vector3;
 use crate::atmosphere::Atmosphere;
 #[cfg(feature = "full-avionics")]
 use crate::avionics::{AvionicsSystem, FaultFlag, FaultFlags};
+#[cfg(feature = "full-avionics")]
+use crate::frame::FlightFrame;
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -223,6 +225,7 @@ impl Environment {
             rudder,
             throttle,
             flap: flaps,
+            wing_sweep: 0.0,
         };
         step(
             &mut self.sim.state,
@@ -452,10 +455,15 @@ impl AvionicsEnvironment {
         crate::avionics::standard_stack(dt)
     }
 
-    /// Reset to trimmed level flight and clear all injected faults.
-    pub fn reset(&mut self) -> (AvionicsObservation, usize) {
+    /// Reset to trimmed level flight at an arbitrary altitude and airspeed.
+    pub fn reset_trimmed(
+        &mut self,
+        altitude: f64,
+        airspeed: f64,
+    ) -> (AvionicsObservation, usize) {
         let prev_steps = self.step_count;
         self.sim.reset();
+        self.sim.trim_level_flight(altitude, airspeed);
         self.avionics.reset();
         self.step_count = 0;
         self.avionics.bus_mut().fc_fault_flags = FaultFlags::default();
@@ -463,6 +471,21 @@ impl AvionicsEnvironment {
             wx.reset();
         }
         (self.observation(), prev_steps)
+    }
+
+    /// Mutable physics state, for scenario placement and tests.
+    pub fn state_mut(&mut self) -> &mut crate::state::AircraftState {
+        &mut self.sim.state
+    }
+
+    /// Loaded airframe configuration.
+    pub fn aircraft_config(&self) -> &crate::config::AircraftConfig {
+        &self.sim.config
+    }
+
+    /// Reset to trimmed level flight and clear all injected faults.
+    pub fn reset(&mut self) -> (AvionicsObservation, usize) {
+        self.reset_trimmed(1000.0, 60.0)
     }
 
     /// Apply an attitude command, run the avionics stack, advance the physics
@@ -502,6 +525,7 @@ impl AvionicsEnvironment {
             rudder: rud,
             throttle: thr,
             flap: 0.0,
+            wing_sweep: 0.0,
         };
         step(
             &mut self.sim.state,
@@ -578,6 +602,34 @@ impl AvionicsEnvironment {
     /// Current step index within the episode (0-based).
     pub fn step_count(&self) -> usize {
         self.step_count
+    }
+
+    /// Ground-truth flight state for the most recent step.
+    ///
+    /// The observation vector ([`Self::observation`]) is deliberately limited to
+    /// the noisy sensor bus the agent may perceive, so it carries no attitude,
+    /// ground track, or true altitude. Anything that needs to *show* the
+    /// aircraft — a live training viewer, a replay, a debugging overlay —
+    /// reads it from here instead.
+    ///
+    /// Sampling this mid-`step` (rather than after it) yields a frame whose
+    /// physics and avionics halves describe different instants; call it once
+    /// the step has completed.
+    pub fn frame(&self) -> FlightFrame {
+        FlightFrame::capture(&self.sim.state, self.avionics.bus())
+    }
+
+    /// The live 6-DOF physics state.
+    ///
+    /// Exposed for inspection and replay; training should prefer
+    /// [`Self::frame`], which additionally folds in the avionics bus.
+    pub fn aircraft_state(&self) -> &crate::state::AircraftState {
+        &self.sim.state
+    }
+
+    /// The avionics sensor bus (noisy outputs plus ground-truth `true_*`).
+    pub fn bus(&self) -> &crate::avionics::AvionicsBus {
+        self.avionics.bus()
     }
 }
 
