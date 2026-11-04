@@ -22,6 +22,7 @@ use crate::ppo::{PpoAgent, PpoConfig};
 use crate::a2c::{A2cAgent, A2cConfig};
 use crate::d3qn::{D3qnConfig, D3qnAgent};
 use crate::sac::{SacConfig, SacAgent};
+use crate::td3::{Td3Agent, Td3Config};
 use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -31,10 +32,11 @@ pub const ALGO_PPO: &str = "ppo";
 pub const ALGO_A2C: &str = "a2c";
 pub const ALGO_D3QN: &str = "d3qn";
 pub const ALGO_SAC: &str = "sac";
+pub const ALGO_TD3: &str = "td3";
 
 /// Every registered algorithm id. Selections (CLI helpers, menu dropdowns)
 /// are drawn from this list.
-pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN, ALGO_SAC];
+pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN, ALGO_SAC, ALGO_TD3];
 
 /// Serializable selection of *which* algorithm + hyper-parameters to run.
 /// Persisted into every checkpoint as `algo.json`.
@@ -64,6 +66,12 @@ pub enum AlgoSpec {
         /// SAC hyper-parameters.
         config: SacConfig,
     },
+    /// TD3 — off-policy twin-delayed DDPG with deterministic actor, twin critics,
+    /// target noise smoothing, and delayed policy updates.
+    Td3 {
+        /// TD3 hyper-parameters.
+        config: Td3Config,
+    },
 }
 
 impl AlgoSpec {
@@ -74,6 +82,7 @@ impl AlgoSpec {
             AlgoSpec::A2c { .. } => ALGO_A2C,
             AlgoSpec::D3qn { .. } => ALGO_D3QN,
             AlgoSpec::Sac { .. } => ALGO_SAC,
+            AlgoSpec::Td3 { .. } => ALGO_TD3,
         }
     }
 
@@ -86,6 +95,7 @@ impl AlgoSpec {
             ALGO_A2C => Ok(AlgoSpec::A2c { config: A2cConfig::default() }),
             ALGO_D3QN => Ok(AlgoSpec::D3qn { config: D3qnConfig::default() }),
             ALGO_SAC => Ok(AlgoSpec::Sac { config: SacConfig::default() }),
+            ALGO_TD3 => Ok(AlgoSpec::Td3 { config: Td3Config::default() }),
             other => Err(format!(
                 "unknown algorithm `{other}` (registered: {})",
                 ALGORITHM_IDS.join(", ")
@@ -197,6 +207,7 @@ pub fn make_algorithm<B: AutodiffBackend<FloatElem = f32>>(
         AlgoSpec::A2c { config } => Box::new(A2cAgent::<B>::new(device, net_cfg, &config, seed)),
         AlgoSpec::D3qn { config } => Box::new(D3qnAgent::<B>::new(device, net_cfg, &config, seed)),
         AlgoSpec::Sac { config } => Box::new(SacAgent::<B>::new(device, net_cfg, &config, seed)),
+        AlgoSpec::Td3 { config } => Box::new(Td3Agent::<B>::new(device, net_cfg, &config, seed)),
     }
 }
 
@@ -264,6 +275,47 @@ mod tests {
             AlgoSpec::D3qn { config } => assert_eq!(config.hidden, D3qnConfig::default().hidden),
             _ => panic!("expected D3qn spec"),
         }
+    }
+
+    #[test]
+    fn from_id_resolves_td3() {
+        assert_eq!(AlgoSpec::from_id(ALGO_TD3).expect("td3").id(), ALGO_TD3);
+    }
+
+    #[test]
+    fn td3_spec_serde_round_trip() {
+        use crate::td3::Td3Config;
+        let spec = AlgoSpec::Td3 { config: Td3Config::default() };
+        let json = spec.to_json().expect("serialize");
+        let back = AlgoSpec::from_json(&json).expect("deserialize");
+        assert_eq!(back.id(), ALGO_TD3);
+        match back {
+            AlgoSpec::Td3 { config } => assert_eq!(config, Td3Config::default()),
+            _ => panic!("expected Td3 spec"),
+        }
+    }
+
+    #[test]
+    fn factory_builds_td3_and_acts() {
+        use crate::td3::Td3Config;
+        let device = crate::backend::cpu_device();
+        let ncfg = NetConfig {
+            obs_dim: 4,
+            hidden: 16,
+            action_dim: 4,
+            log_std_init: -0.5,
+        };
+        let mut algo: Box<dyn Algorithm<Cpu>> = make_algorithm(
+            &AlgoSpec::Td3 { config: Td3Config::default() },
+            &ncfg,
+            1,
+            &device,
+        );
+        assert_eq!(algo.id(), ALGO_TD3);
+        let (action, logp) = algo.act(&[0.1, -0.2, 0.3, 0.4]);
+        assert_eq!(action.len(), 4);
+        assert!(logp.is_finite());
+        assert!(action.iter().all(|a| a.abs() < 1.0));
     }
 
     #[test]

@@ -58,6 +58,7 @@ pub mod ppo;
 pub mod a2c;
 pub mod d3qn;
 pub mod sac;
+pub mod td3;
 pub mod stream;
 pub mod telemetry;
 pub mod contracts;
