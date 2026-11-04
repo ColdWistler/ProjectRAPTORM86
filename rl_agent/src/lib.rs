@@ -66,6 +66,7 @@ pub mod trainer;
 pub mod mission_env;
 pub mod policy;
 pub mod eval;
+pub mod selector;
 
 pub use algo::{Algorithm, AlgoSpec};
 
