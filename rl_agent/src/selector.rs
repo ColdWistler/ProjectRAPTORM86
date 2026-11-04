@@ -6,10 +6,17 @@
 //!
 //! Uses [`MissionContext`] (Task 2) via [`PolicyContext`].
 
+use crate::learned_gate::{features_to_input, GateMLP};
 use crate::policy::{ExpertCard, HeuristicPolicy, Policy, PolicyContext};
 use crate::contracts::MISSION_OBS_DIM;
-use flight_core::{MissionPhase, MissionContext};
+use flight_core::{MissionFeatures, MissionPhase, MISSION_FEATURE_DIM};
 use std::collections::HashMap;
+
+fn phase_feature_array(p: MissionPhase) -> [f32; MISSION_FEATURE_DIM] {
+    let mut f = [0.0f32; MISSION_FEATURE_DIM];
+    f[7] = crate::learned_gate::idx_from_phase(p) as f32;
+    f
+}
 
 /// Convert MissionPhase to config key (snake_case, matching serde rename).
 fn phase_key(p: MissionPhase) -> String {
@@ -29,6 +36,8 @@ pub struct SelectorConfig {
     pub hysteresis_steps: usize,
     /// Maximum throttle slew per step during bumpless transfer.
     pub bumpless_slew_max: f32,
+    /// When true, replace the config-phase mapping with learned MLP gate.
+    pub learned_gate_enabled: bool,
     /// When true, fall back to heuristic if selected expert fails.
     pub heuristic_fallback: bool,
 }
@@ -39,6 +48,7 @@ impl SelectorConfig {
             phases: HashMap::new(),
             hysteresis_steps: 3,
             bumpless_slew_max: 0.05,
+            learned_gate_enabled: false,
             heuristic_fallback: true,
         }
     }
@@ -64,10 +74,17 @@ pub struct PhaseSelector {
     last_phase: MissionPhase,
     status: SelectorStatus,
     card: ExpertCard,
+    gate: Option<GateMLP>,
 }
 
 impl PhaseSelector {
+    /// Build with a learned gate (already trained). When `None`, behaves as the
+    /// rule-based hybrid selector from before this feature.
     pub fn new(config: SelectorConfig, heuristic: HeuristicPolicy) -> Self {
+        Self::with_gate(config, heuristic, None)
+    }
+
+    pub fn with_gate(config: SelectorConfig, heuristic: HeuristicPolicy, gate: Option<GateMLP>) -> Self {
         let card = ExpertCard {
             id: "hybrid_selector_v1".into(),
             model: crate::policy::ModelKind::Heuristic,
@@ -78,7 +95,11 @@ impl PhaseSelector {
             trained_steps: 0,
             seed: 42,
             git_commit: "selector_v1".into(),
-            notes: "rule-based hybrid selector with hysteresis + bumpless transfer".into(),
+            notes: if config.learned_gate_enabled {
+                "rule-based hybrid selector + learned phase gate"
+            } else {
+                "rule-based hybrid selector with hysteresis + bumpless transfer"
+            }.into(),
         };
         Self {
             config,
@@ -89,13 +110,28 @@ impl PhaseSelector {
             last_phase: MissionPhase::Outbound,
             status: SelectorStatus::Stable,
             card,
+            gate,
         }
     }
 
-    /// Select expert label for phase using hysteresis gate.
+    /// Select expert label for phase.
+    ///
+    /// When `config.learned_gate_enabled` is true and a gate is wired in, the
+    /// MLP predicts the phase (argmax over 4 logits) from mission features
+    /// instead of falling back to the config phase→expert map. Hysteresis is
+    /// preserved around label transitions so the bumpless throttle filter
+    /// stays attached to this selector.
     pub fn select_policy(&mut self, ctx: &PolicyContext) -> String {
-        let target = self.config.phases.get(&phase_key(ctx.phase)).cloned();
-        let target_label = target.unwrap_or_else(|| "heuristic".into());
+        let target_label = if self.config.learned_gate_enabled && self.gate.is_some() {
+            let x = ctx
+                .features
+                .map(|f| features_to_input(&f))
+                .unwrap_or_else(|| phase_feature_array(ctx.phase));
+            self.gate.as_ref().unwrap().predict_label(&x)
+        } else {
+            let target = self.config.phases.get(&phase_key(ctx.phase)).cloned();
+            target.unwrap_or_else(|| "heuristic".into())
+        };
 
         if ctx.phase == self.last_phase {
             self.stable_cnt += 1;
@@ -113,6 +149,12 @@ impl PhaseSelector {
         }
 
         self.current_expert_label.clone()
+    }
+
+    /// Wired-in learned gate (pre-trained). Used by callers that want the
+    /// learned gating path instead of constructing one fresh.
+    pub fn set_gate(&mut self, gate: Option<GateMLP>) {
+        self.gate = gate;
     }
 
     /// Return status after selection.
@@ -199,6 +241,7 @@ impl Policy for PhaseSelector {
             phase: MissionPhase::Outbound,
             step: 0,
             captured: false,
+            features: None,
         });
     }
 
@@ -257,6 +300,7 @@ mod tests {
             phase,
             step: 0,
             captured: false,
+            features: None,
         }
     }
 
@@ -288,11 +332,13 @@ mod tests {
         let l1 = sel.select_policy(&default_ctx(MissionPhase::Capture));
         assert_eq!(l1, "heuristic"); // hasn't met hysteresis yet
         // Second step.
-        let ctx = PolicyContext { phase: MissionPhase::Capture, step: 1, captured: false };
+        let ctx = PolicyContext { phase: MissionPhase::Capture, step: 1, captured: false,
+            features: None };
         let l2 = sel.select_policy(&ctx);
         assert_eq!(l2, "heuristic");
         // Third step hits hysteresis.
-        let ctx3 = PolicyContext { phase: MissionPhase::Capture, step: 2, captured: false };
+        let ctx3 = PolicyContext { phase: MissionPhase::Capture, step: 2, captured: false,
+            features: None };
         let l3 = sel.select_policy(&ctx3);
         assert_eq!(l3, "sac_capture");
     }
@@ -350,5 +396,35 @@ mod tests {
         sel.reset(&default_ctx(MissionPhase::Outbound));
         let card = sel.card();
         assert_eq!(card.id, "hybrid_selector_v1");
+    }
+
+    #[test]
+    fn learned_gate_predicts_30_exam() {
+        let gate = crate::learned_gate::train_gate();
+        let exam = crate::learned_gate::exam_scenarios();
+        let mut correct = 0;
+        for (x, label) in exam {
+            if gate.predict_idx(&x) == label {
+                correct += 1;
+            }
+        }
+        assert!(correct >= 22, "exam predictions too weak: {}/30", correct);
+        println!("Exam predictions: {}/30", correct);
+    }
+
+    #[test]
+    fn selector_uses_gate_when_enabled() {
+        let mut cfg = SelectorConfig::new();
+        cfg.learned_gate_enabled = true;
+        let mut sel = PhaseSelector::with_gate(
+            cfg,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            Some(crate::learned_gate::train_gate()),
+        );
+        let label = sel.select_policy(&default_ctx(MissionPhase::Outbound));
+        assert!(label == "heuristic" || matches!(label.as_str(), "outbound" | "capture" | "return" | "done"));
+        // Gate should stay deterministic when called repeatedly.
+        let label2 = sel.select_policy(&default_ctx(MissionPhase::Outbound));
+        assert_eq!(label, label2);
     }
 }
