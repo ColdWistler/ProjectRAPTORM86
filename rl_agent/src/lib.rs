@@ -67,6 +67,7 @@ pub mod mission_env;
 pub mod policy;
 pub mod eval;
 pub mod selector;
+pub mod weather_exam;
 
 pub use algo::{Algorithm, AlgoSpec};
 
