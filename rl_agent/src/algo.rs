@@ -21,6 +21,7 @@ use crate::net::NetConfig;
 use crate::ppo::{PpoAgent, PpoConfig};
 use crate::a2c::{A2cAgent, A2cConfig};
 use crate::d3qn::{D3qnConfig, D3qnAgent};
+use crate::sac::{SacConfig, SacAgent};
 use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -29,10 +30,11 @@ use std::path::Path;
 pub const ALGO_PPO: &str = "ppo";
 pub const ALGO_A2C: &str = "a2c";
 pub const ALGO_D3QN: &str = "d3qn";
+pub const ALGO_SAC: &str = "sac";
 
 /// Every registered algorithm id. Selections (CLI helpers, menu dropdowns)
 /// are drawn from this list.
-pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN];
+pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN, ALGO_SAC];
 
 /// Serializable selection of *which* algorithm + hyper-parameters to run.
 /// Persisted into every checkpoint as `algo.json`.
@@ -57,6 +59,11 @@ pub enum AlgoSpec {
         /// D3QN hyper-parameters.
         config: D3qnConfig,
     },
+    /// Soft Actor-Critic — off-policy twin critics + entropy bonus + Polyak tau.
+    Sac {
+        /// SAC hyper-parameters.
+        config: SacConfig,
+    },
 }
 
 impl AlgoSpec {
@@ -66,6 +73,7 @@ impl AlgoSpec {
             AlgoSpec::Ppo { .. } => ALGO_PPO,
             AlgoSpec::A2c { .. } => ALGO_A2C,
             AlgoSpec::D3qn { .. } => ALGO_D3QN,
+            AlgoSpec::Sac { .. } => ALGO_SAC,
         }
     }
 
@@ -77,6 +85,7 @@ impl AlgoSpec {
             }),
             ALGO_A2C => Ok(AlgoSpec::A2c { config: A2cConfig::default() }),
             ALGO_D3QN => Ok(AlgoSpec::D3qn { config: D3qnConfig::default() }),
+            ALGO_SAC => Ok(AlgoSpec::Sac { config: SacConfig::default() }),
             other => Err(format!(
                 "unknown algorithm `{other}` (registered: {})",
                 ALGORITHM_IDS.join(", ")
@@ -187,6 +196,7 @@ pub fn make_algorithm<B: AutodiffBackend<FloatElem = f32>>(
         AlgoSpec::Ppo { config } => Box::new(PpoAgent::<B>::new(device, net_cfg, &config, seed)),
         AlgoSpec::A2c { config } => Box::new(A2cAgent::<B>::new(device, net_cfg, &config, seed)),
         AlgoSpec::D3qn { config } => Box::new(D3qnAgent::<B>::new(device, net_cfg, &config, seed)),
+        AlgoSpec::Sac { config } => Box::new(SacAgent::<B>::new(device, net_cfg, &config, seed)),
     }
 }
 
