@@ -504,6 +504,13 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
             config.batch_size = get_num(args, "batch-size", config.batch_size)?;
             config.alpha = get_num(args, "alpha", config.alpha)?;
         }
+        AlgoSpec::Td3 { config } => {
+            config.lr = get_num(args, "lr", config.lr)?;
+            config.gamma = get_num(args, "gamma", config.gamma)?;
+            config.hidden = get_num(args, "hidden", config.hidden)?;
+            config.batch_size = get_num(args, "batch-size", config.batch_size)?;
+            config.policy_delay = get_num(args, "policy-delay", config.policy_delay)?;
+        }
     }
     Ok(spec)
 }
