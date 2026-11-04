@@ -488,6 +488,11 @@ impl AvionicsEnvironment {
         &self.sim.state
     }
 
+    /// Ground-truth flight frame for the current step.
+    pub fn frame(&self) -> crate::frame::FlightFrame {
+        crate::frame::FlightFrame::capture(&self.sim.state, self.avionics.bus())
+    }
+
     /// Reset to trimmed level flight and clear all injected faults.
     pub fn reset(&mut self) -> (AvionicsObservation, usize) {
         self.reset_trimmed(1000.0, 60.0)
