@@ -32,6 +32,22 @@ const METRICS := {
 	"alt_err":              { "label": "Eval alt err (m)",   "color": Color(0.95, 0.45, 0.40) },
 	"spd_err":              { "label": "Eval spd err (m/s)", "color": Color(0.30, 0.85, 0.85) },
 	"eval_reward":          { "label": "Eval mean reward",   "color": Color(0.55, 0.80, 0.45) },
+	# Ground-truth env telemetry (`env` block in metrics.jsonl). Absent on
+	# runs recorded before env telemetry existed; the chart simply shows
+	# nothing for those.
+	"env_alt_mean":         { "label": "Env altitude (m)",       "color": Color(0.45, 0.70, 0.95) },
+	"env_airspeed_mean":    { "label": "Env airspeed (m/s)",     "color": Color(0.30, 0.85, 0.85) },
+	"env_climb_mean":       { "label": "Env climb (m/s)",        "color": Color(0.85, 0.70, 0.30) },
+	"env_roll_abs_mean":    { "label": "Env |roll| (rad)",       "color": Color(0.95, 0.45, 0.40) },
+	"env_pitch_abs_mean":   { "label": "Env |pitch| (rad)",      "color": Color(0.75, 0.45, 0.95) },
+	"env_wind_mean":        { "label": "Env wind (m/s)",         "color": Color(0.55, 0.65, 0.95) },
+	"env_throttle_mean":    { "label": "Env throttle",           "color": Color(0.60, 0.85, 0.45) },
+	"env_surface_effort_mean": { "label": "Env surface effort (deg)", "color": Color(0.90, 0.55, 0.75) },
+	"env_baro_err_abs_mean":{ "label": "Env baro err (m)",       "color": Color(0.70, 0.75, 0.85) },
+	"env_battery_pct_min":  { "label": "Env battery min (%)",    "color": Color(0.95, 0.80, 0.30) },
+	# Weather (`env.weather`, only when the run has a weather system).
+	"weather_gust_rms_max": { "label": "Weather gust max (m/s)", "color": Color(0.40, 0.60, 0.80) },
+	"weather_visibility_min": { "label": "Weather visibility (m)", "color": Color(0.65, 0.85, 0.70) },
 }
 
 ## Raw series: Array of {"x": int iteration, "y": float value}.

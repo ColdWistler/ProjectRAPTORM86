@@ -55,11 +55,14 @@ pub mod gae;
 pub mod net;
 pub mod normalize;
 pub mod ppo;
+pub mod a2c;
 pub mod stream;
 pub mod telemetry;
 pub mod contracts;
 pub mod trainer;
 pub mod mission_env;
+pub mod policy;
+pub mod eval;
 
 pub use algo::{Algorithm, AlgoSpec};
 

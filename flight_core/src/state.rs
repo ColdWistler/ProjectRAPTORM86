@@ -306,4 +306,12 @@ impl AircraftState {
         let down = rot_body_to_earth.transform_vector(&Vector3::new(0.0, 0.0, 1.0));
         (fwd, right, down)
     }
+
+    /// Velocity in NED frame (Earth frame)
+    pub fn velocity_ned(&self) -> Vector3<f64> {
+        let rot = self.rotation_earth_to_body();
+        let rot_inv = rot.inverse();
+        let vel_body = Vector3::new(self.u, self.v, self.w);
+        rot_inv.transform_vector(&vel_body)
+    }
 }

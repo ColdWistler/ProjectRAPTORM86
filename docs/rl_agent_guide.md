@@ -337,7 +337,8 @@ run, keyed by a UTC timestamp so runs sort chronologically and never collide:
 runs/
 └── 20260923_143512_123_ppo_seed42_smoke/
     ├── run.json        # manifest: status, timestamps, git commit, argv, all configs
-    └── metrics.jsonl   # one JSON object per PPO iteration (flush per write)
+    ├── metrics.jsonl   # one JSON object per PPO iteration (flush per write)
+    └── episodes.jsonl  # one JSON object per finished rollout episode
 ```
 
 - `--name LABEL` appends a slugified label to the run id
@@ -361,6 +362,9 @@ Each line of `metrics.jsonl`:
  "crash_rate":0.25,"episodes_completed":4,
  "eval":{"alt_err":88.2,"spd_err":9.1,"total_reward":12.4,
          "crashes":0,"episodes":3,"mean_steps":1888.0},
+ "env":{"samples":2048,"alt_mean":1200.5,"alt_min":1100.0,
+        "alt_max":1300.0,"airspeed_mean":60.2,"climb_mean":0.4,
+        "throttle_mean":0.55,"battery_pct_min":91.0},
  "checkpoint":true}
 ```
 
@@ -369,12 +373,60 @@ The rollout-derived fields (`mean_reward_per_step`, `mean_episode_steps`,
 stream — they were previously only visible as a console line. Flatten it to a
 table with any JSONL tool, or press **Download CSV** in the dashboard.
 
+### Environment telemetry
+
+The `env` object (abridged in the example above) summarises the
+**ground-truth** flight state over that rollout: the observation vector only
+carries the noisy sensor bus the agent is allowed to see, so this is how you
+find out what the aircraft actually did. It is written whenever telemetry is
+on and the environment can report a `FlightFrame` — including with
+`--stream off` — because it is training data, not a live-view side effect.
+
+| Field | Meaning |
+| --- | --- |
+| `samples` | Rollout steps accumulated (0 means "no data") |
+| `alt_mean/min/max` | True altitude (m) |
+| `airspeed_mean/min/max` | True airspeed (m/s) |
+| `climb_mean/min/max` | Climb rate (m/s, positive up) |
+| `ground_speed_mean` | Ground-track speed (m/s) |
+| `roll_abs_mean`, `pitch_abs_mean` | Mean absolute attitude (rad) |
+| `aoa_mean`, `sideslip_abs_mean` | Angle of attack / sideslip (rad) |
+| `wind_mean`, `wind_max` | Wind magnitude (m/s) |
+| `throttle_mean` | Commanded throttle `[0, 1]` |
+| `surface_effort_mean` | Mean absolute elevator/aileron/rudder deflection (deg) |
+| `baro_err_abs_mean`, `airspeed_err_abs_mean` | Perceived vs true sensor error |
+| `battery_pct_min` | Lowest battery charge seen (%) |
+| `weather` | Optional block, only when the env has a weather system |
+
+The optional `weather` block carries `wind_speed_mean`, `gust_rms_mean/max`,
+`turbulence_mean`, `severity_mean`, `rain_mean`, `visibility_min`,
+`updraft_abs_mean` and `shear_abs_mean`.
+
+`episodes.jsonl` gets one row per episode that **ends during the rollout**
+(eval episodes are deliberately excluded):
+
+```json
+{"episode":7,"iteration":12,"steps":482,"duration_s":24.1,"reward_sum":42.5,
+ "terminated":false,"truncated":true,"termination":"step_budget",
+ "env":{"samples":482,"alt_mean":1198.0,"...":"..."}}
+```
+
+`termination` is `ground_impact`, `gust_limit`, `visibility_limit`,
+`severe_exposure` or `step_budget`. Episode length and reward total span
+iteration boundaries, so a row's `steps` is the true episode length even when
+it finished partway through an iteration.
+
+Both dashboards expose the series as `env_*` / `weather_*` keys (for example
+`env_alt_mean`, `env_throttle_mean`, `weather_gust_rms_max`), so altitude,
+airspeed and control effort can be plotted against the training reward.
+
 ### Live chart (Godot RL tab)
 
 The main-menu RL tab now shows a **Live metrics** card that streams the run's
 `metrics.jsonl` while the subprocess trains: pick a series
-(Reward/step, Policy/Value loss, Entropy, Advantage mean, or the eval
-metrics), hover for values, and read the latest value in the chart title. The
+(Reward/step, Policy/Value loss, Entropy, Advantage mean, the eval metrics, or
+the `env_*` flight-state / `weather_*` series), hover for values, and read the
+latest value in the chart title. The
 raw console log stays below it (Clear log resets the chart for the next run).
 Only the resolved run dir is read — the chart survives after the process
 exits so you can inspect the finished run in-engine.

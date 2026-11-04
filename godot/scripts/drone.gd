@@ -26,6 +26,13 @@ static func build(parent: Node3D) -> Dictionary:
 
 	# --- Fuselage & nose ---
 	_add(parent, _box(Vector3(4.2, 0.75, 0.75)), BODY)
+	# Nose cone pointing forward (+X) - make sure it's attached to body
+	var nose := _add(parent, _cyl(0.0, 0.8), BODY, Vector3(2.6, 0, 0), Vector3(0, 0, -PI / 2))
+	var nose_mesh = nose.mesh
+	if nose_mesh is CylinderMesh:
+		nose_mesh.top_radius = 0.0
+		nose_mesh.bottom_radius = 0.375
+		nose_mesh.height = 0.8
 	var dome := _add(parent, _sphere(0.48), GLASS, Vector3(2.1, 0.12, 0))
 	dome.scale = Vector3(1.3, 1.05, 1.0)
 	_add(parent, _box(Vector3(1.8, 0.42, 0.62)), GLASS, Vector3(0.9, 0.42, 0))
@@ -34,9 +41,11 @@ static func build(parent: Node3D) -> Dictionary:
 	_add(parent, _cyl(0.015, 0.60), DARK, Vector3(2.85, 0, 0), Vector3(0, 0, PI / 2))
 	_add(parent, _box(Vector3(0.8, 0.25, 0.35)), DARK, Vector3(-1.1, 0.46, 0))
 
-	# --- Main wing & leading-edge spar ---
+	# --- Main wing & leading-edge spar (attached to fuselage) ---
 	_add(parent, _box(Vector3(0.85, 0.09, 10.6)), BODY, Vector3(0.25, 0.15, 0))
 	_add(parent, _box(Vector3(0.20, 0.07, 10.6)), DARK, Vector3(0.68, 0.15, 0))
+	# Wing root fairing for better connection
+	_add(parent, _box(Vector3(1.2, 0.12, 1.8)), BODY, Vector3(0.25, 0.12, 0))
 
 	# --- Winglets (angled tips) + nave lights (red +Z, green -Z) ---
 	var winglet := _box(Vector3(0.40, 0.35, 0.06))
@@ -50,13 +59,13 @@ static func build(parent: Node3D) -> Dictionary:
 	# so left/right mirror in Z. The child mesh sits slightly aft of the pivot
 	# so rotating the pivot about Z bends the surface down/up.
 	var flap_mesh := _box(Vector3(0.32, 0.06, 2.0))
-	var flap_left := _pivot(parent, Vector3(-0.10, 0.14, 1.8), flap_mesh)
-	var flap_right := _pivot(parent, Vector3(-0.10, 0.14, -1.8), flap_mesh.duplicate())
+	var flap_left := _pivot(parent, Vector3(-0.10, 0.14, 2.5), flap_mesh)
+	var flap_right := _pivot(parent, Vector3(-0.10, 0.14, -2.5), flap_mesh.duplicate())
 	result["flaps"] = [flap_left, flap_right]
 
 	var aileron_mesh := _box(Vector3(0.32, 0.06, 2.4))
-	var ail_left := _pivot(parent, Vector3(-0.10, 0.14, 4.0), aileron_mesh)
-	var ail_right := _pivot(parent, Vector3(-0.10, 0.14, -4.0), aileron_mesh.duplicate())
+	var ail_left := _pivot(parent, Vector3(-0.10, 0.14, 4.5), aileron_mesh)
+	var ail_right := _pivot(parent, Vector3(-0.10, 0.14, -4.5), aileron_mesh.duplicate())
 	result["ailerons"] = [ail_left, ail_right]
 
 	# --- V-tail empennage (canted ~38°) ---
@@ -116,6 +125,13 @@ static func _sphere(radius: float) -> SphereMesh:
 static func _cyl(radius: float, height: float) -> CylinderMesh:
 	var c := CylinderMesh.new()
 	c.top_radius = radius
+	c.bottom_radius = radius
+	c.height = height
+	return c
+
+static func _cone(radius: float, height: float) -> CylinderMesh:
+	var c := CylinderMesh.new()
+	c.top_radius = 0.0
 	c.bottom_radius = radius
 	c.height = height
 	return c

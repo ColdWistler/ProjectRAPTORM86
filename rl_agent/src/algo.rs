@@ -19,16 +19,18 @@
 
 use crate::net::NetConfig;
 use crate::ppo::{PpoAgent, PpoConfig};
+use crate::a2c::{A2cAgent, A2cConfig};
 use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Algorithm id used by `--algo ppo` and the menu dropdown.
 pub const ALGO_PPO: &str = "ppo";
+pub const ALGO_A2C: &str = "a2c";
 
 /// Every registered algorithm id. Selections (CLI helpers, menu dropdowns)
 /// are drawn from this list.
-pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO];
+pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C];
 
 /// Serializable selection of *which* algorithm + hyper-parameters to run.
 /// Persisted into every checkpoint as `algo.json`.
@@ -43,6 +45,11 @@ pub enum AlgoSpec {
         /// PPO hyper-parameters.
         config: PpoConfig,
     },
+    /// Advantage Actor-Critic (simpler actor-critic, no clipping).
+    A2c {
+        /// A2C hyper-parameters.
+        config: A2cConfig,
+    },
 }
 
 impl AlgoSpec {
@@ -50,6 +57,7 @@ impl AlgoSpec {
     pub fn id(&self) -> &'static str {
         match self {
             AlgoSpec::Ppo { .. } => ALGO_PPO,
+            AlgoSpec::A2c { .. } => ALGO_A2C,
         }
     }
 
@@ -59,6 +67,7 @@ impl AlgoSpec {
             ALGO_PPO => Ok(AlgoSpec::Ppo {
                 config: PpoConfig::default(),
             }),
+            ALGO_A2C => Ok(AlgoSpec::A2c { config: A2cConfig::default() }),
             other => Err(format!(
                 "unknown algorithm `{other}` (registered: {})",
                 ALGORITHM_IDS.join(", ")
@@ -167,6 +176,7 @@ pub fn make_algorithm<B: AutodiffBackend<FloatElem = f32>>(
 ) -> Box<dyn Algorithm<B>> {
     match *spec {
         AlgoSpec::Ppo { config } => Box::new(PpoAgent::<B>::new(device, net_cfg, &config, seed)),
+        AlgoSpec::A2c { config } => Box::new(A2cAgent::<B>::new(device, net_cfg, &config, seed)),
     }
 }
 
@@ -185,6 +195,7 @@ mod tests {
         assert_eq!(back.id(), ALGO_PPO);
         match back {
             AlgoSpec::Ppo { config } => assert_eq!(config.lr, PpoConfig::default().lr),
+            _ => (),
         }
     }
 
@@ -194,7 +205,52 @@ mod tests {
             AlgoSpec::from_id(ALGO_PPO).expect("ppo").id(),
             ALGO_PPO
         );
+        assert_eq!(
+            AlgoSpec::from_id(ALGO_A2C).expect("a2c").id(),
+            ALGO_A2C
+        );
         assert!(AlgoSpec::from_id("dqn").is_err());
+        assert!(AlgoSpec::from_id("a2c_beta").is_err());
+    }
+
+    #[test]
+    fn algo_spec_serde_round_trip_a2c() {
+        use crate::a2c::A2cConfig;
+        let spec = AlgoSpec::A2c {
+            config: A2cConfig::default(),
+        };
+        let json = spec.to_json().expect("serialize");
+        let back = AlgoSpec::from_json(&json).expect("deserialize");
+        assert_eq!(back.id(), ALGO_A2C);
+        match back {
+            AlgoSpec::A2c { config } => assert_eq!(config, A2cConfig::default()),
+            _ => panic!("expected A2c spec"),
+        }
+    }
+
+    #[test]
+    fn factory_builds_a2c_and_acts() {
+        use crate::a2c::A2cConfig;
+        let device = crate::backend::cpu_device();
+        let ncfg = NetConfig {
+            obs_dim: 6,
+            hidden: 16,
+            action_dim: 2,
+            log_std_init: -0.5,
+        };
+        let mut algo: Box<dyn Algorithm<Cpu>> = make_algorithm(
+            &AlgoSpec::A2c {
+                config: A2cConfig::default(),
+            },
+            &ncfg,
+            2,
+            &device,
+        );
+        assert_eq!(algo.id(), ALGO_A2C);
+        let (action, logp) = algo.act(&[0.0f32; 6]);
+        assert_eq!(action.len(), 2);
+        assert!(logp.is_finite());
+        assert!(action.iter().all(|a| a.abs() < 1.0));
     }
 
     #[test]

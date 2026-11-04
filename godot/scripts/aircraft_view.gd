@@ -8,6 +8,7 @@ extends Node3D
 
 const MODEL_PATH := "res://assets/aircraft/"
 const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
+const _MSweepFactoryScript := preload("res://scripts/m_sweep_factory.gd")
 
 ## Per-aircraft visual alignment. `rotation_deg` is applied to the model to
 ## bring its nose onto +X; `scale` normalizes its size to the physics scale.
@@ -32,6 +33,9 @@ const ALIGN := {
 		"flaps": [],
 	},
 	"Engine": {
+		"procedural": true,
+	},
+	"m_sweep_mini": {
 		"procedural": true,
 	},
 }
@@ -88,7 +92,7 @@ func set_model(name: String) -> bool:
 	_instance = null
 	_procedural = false
 
-	if align.get("procedural", false):
+	if align.has("procedural") and align["procedural"]:
 		return _build_procedural(name)
 
 	var scene_path := MODEL_PATH + str(align["scene"])
@@ -109,18 +113,26 @@ func set_model(name: String) -> bool:
 	_current_name = name
 
 	# Re-discover the animated sub-parts (propellers / ailerons / flaps).
-	propellers = _find_nodes(_instance, align.get("propellers", []))
-	ailerons = _find_nodes(_instance, align.get("ailerons", []))
-	flaps = _find_nodes(_instance, align.get("flaps", []))
+	propellers = _find_nodes(_instance, align.get("propellers") if align.has("propellers") else [])
+	ailerons = _find_nodes(_instance, align.get("ailerons") if align.has("ailerons") else [])
+	flaps = _find_nodes(_instance, align.get("flaps") if align.has("flaps") else [])
+	# Clear wing sweep pivots for non-procedural models
+	set("wing_sweep_pivots", [])
 	return true
 
 ## Build the ENGINE MODE jet from primitives under the alignment root and wire
 ## up its animated control surfaces. Returns `true` on success.
 func _build_procedural(name: String) -> bool:
-	var parts: Dictionary = _EngineFactoryScript.build(_align_root)
-	propellers = parts.get("propellers", [])
-	ailerons = parts.get("ailerons", [])
-	flaps = parts.get("flaps", [])
+	var parts: Dictionary = {}
+	if name == "m_sweep_mini":
+		parts = _MSweepFactoryScript.build(_align_root)
+	else:
+		parts = _EngineFactoryScript.build(_align_root)
+	propellers = parts.get("propellers") if parts.has("propellers") else []
+	ailerons = parts.get("ailerons") if parts.has("ailerons") else []
+	flaps = parts.get("flaps") if parts.has("flaps") else []
+	# Store wing sweep pivots for variable-sweep aircraft (m_sweep_mini)
+	set("wing_sweep_pivots", parts.get("wing_sweep_pivots") if parts.has("wing_sweep_pivots") else [])
 	_instance = null
 	_procedural = true
 	_current_name = name
@@ -164,4 +176,5 @@ func show_imported(path: String) -> bool:
 	propellers = []
 	ailerons = []
 	flaps = []
+	set("wing_sweep_pivots", [])
 	return true

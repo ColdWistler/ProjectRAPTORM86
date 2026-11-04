@@ -281,7 +281,7 @@ mod tests {
     use crate::state::AircraftState;
 
     fn panel(area: f64, n: [f64; 3], cp: [f64; 3], cd: f64) -> CollisionPanel {
-        CollisionPanel { area, normal: n, cp, cd }
+        CollisionPanel { area, normal: n, cp, cd, id: String::new() }
     }
 
     /// In still air the collision shape must produce zero force/moment so the

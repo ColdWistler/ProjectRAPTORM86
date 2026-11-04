@@ -17,9 +17,12 @@ use rl_agent::backend::{cpu_device, probe_gpu_train, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
 use rl_agent::telemetry::TelemetryConfig;
 use rl_agent::trainer::{
-    evaluate, load_checkpoint, run, AvionicsEnv, TrainerConfig,
+    evaluate, load_checkpoint, run_with_observer, AvionicsEnv, TrainObserver, TrainerConfig,
 };
 use rl_agent::{ACTION_DIM, AVIONICS_OBS_DIM};
+use rl_agent::mission_env::{MissionEnv, RewardProfile};
+use rl_agent::policy::{HeuristicPolicy, Policy};
+use flight_core::{MissionConfig, MissionEnvironment, MissionPhase};
 
 const USAGE: &str = "\
 rl_agent — burn/PPO trainer for the flight_core AvionicsEnvironment
@@ -54,23 +57,62 @@ TRAIN MODE (default):
   --print-every N       log stats every N iterations             (default 1)
   --eval-every N        deterministic eval every N iterations    (default 100)
   --eval-episodes N     episodes per eval run                    (default 3)
-  --config PATH         aircraft.toml for flight_core            (default aircraft.toml)
+  --config PATH         aircraft.toml / m_sweep_mini.toml (default avionics)
+  --mission avionics|mission  training mode (default avionics)
+  --model ppo|heuristic   alias for --algo; heuristic is eval-only
+  --reward-profile NAME|PATH  balanced|aggressive|cautious|capture_focus|file
   --checkpoint DIR      checkpoint directory                     (default checkpoints)
 
 TELEMETRY (train mode):
-  Every iteration is appended to runs/<run_id>/metrics.jsonl and the run
-  manifest lives in runs/<run_id>/run.json (see docs/rl_agent_guide.md §12).
+  Every iteration is appended to runs/<run_id>/metrics.jsonl, each finished
+  rollout episode to runs/<run_id>/episodes.jsonl, and the run manifest lives
+  in runs/<run_id>/run.json (see docs/rl_agent_guide.md §12).
 
   --telemetry on|off    write structured telemetry               (default on)
   --run-dir DIR         root dir for per-run subdirectories      (default runs)
   --name LABEL          optional human label for this run        (default none)
                         (embedded in the run id, e.g. ..._ppo_seed42_smoke)
 
+LIVE OBSERVATION (train mode):
+  While training, the run directory is also a live observation surface. Frames
+  are published through a bounded, lossy channel to a writer thread, so
+  training throughput never waits on a consumer (see rl_agent::stream).
+
+  --stream on|off        per-step flight frames for a live viewer
+                                                    (default on, needs telemetry)
+  --control on|off       accept pause/resume/save/eval/stop from a GUI
+                                                      (default on, needs telemetry)
+
+  Artifacts written into runs/<run_id>/:
+    frames.bin           fixed-size ring of recent steps (~7.8 MiB, overwritten)
+    episodes/ep_N.f32    one file per completed episode, for replay
+    control/inbox/       drop cmd_<seq>.json here to steer the run
+    control/outbox/      trainer writes ack_<seq>.json for each command
+
+  Control commands are JSON with a seq number and an op of pause, resume,
+  save_checkpoint, evaluate_now or stop. They are applied at iteration
+  boundaries, never inside the step loop.
+
 EVAL MODE:
   rl_agent --mode eval --checkpoint DIR [--backend cpu|gpu] [--eval-episodes N]
 
   Loads the policy from DIR, then runs `eval-episodes` deterministic
   episodes and reports altitude/airspeed error and crash rate.
+
+EVAL-SUITE MODE:
+  rl_agent --mode eval-suite [--checkpoint DIR] [--scenarios FILE] [--out DIR]
+      runs the 30-scenario mission exam through any policy loaded from DIR
+      and writes `eval.json` + `eval.csv` into the chosen output directory.
+  The heuristic policy (`--model heuristic`) skips the checkpoint entirely
+  and evaluates that way; learned policies need `--checkpoint`.
+
+MISSION MODE:
+  --mission avionics|mission    training target (default avionics)
+  --model ppo|heuristic         alias for --algo; heuristic is eval-only
+  --reward-profile NAME|PATH    balanced|aggressive|cautious|capture_focus|file
+
+  Mission mode defaults to m_sweep_mini.toml and the 32-channel mission.v1
+  contract. Avionics mode defaults to aircraft.toml and the 19-channel bus.
 
 BACKENDS:
   --backend cpu   ndarray backend (no GPU required)
@@ -191,12 +233,13 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcfg = build_trainer_config(args)?;
     let ncfg = build_net_config(args)?;
-    let spec = build_algo_config(args)?;
-    let config_path = args
-        .get("config")
-        .cloned()
-        .unwrap_or_else(|| "aircraft.toml".to_string());
+    let config_path = config_path(args);
     let mode = args.get("mode").map(String::as_str).unwrap_or("train");
+    let spec = if mode == "eval-suite" && model_id(args) == "heuristic" {
+        AlgoSpec::from_id(ALGO_PPO)? // dummy, never used in heuristic branch
+    } else {
+        build_algo_config(args)?
+    };
 
     match mode {
         "eval" => {
@@ -225,7 +268,25 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
         }
         "train" => {
             let telemetry = build_telemetry_config(args)?;
-            let outcome = run::<B>(&tcfg, &telemetry, &ncfg, &spec, &device, &config_path)?;
+            let mut observer = build_observer(args, &telemetry)?;
+            let outcome = run_with_observer::<B>(
+                &tcfg,
+                &telemetry,
+                &ncfg,
+                &spec,
+                &device,
+                &config_path,
+                &mut observer,
+            )?;
+            // The stream handle must outlive the run: dropping it signals the
+            // writer thread and joins it, flushing the ring and any in-flight
+            // episode. Report what it achieved so a silent stream is visible.
+            if let Some(stream) = observer.stream {
+                let (frames, dropped, episodes) = stream.counters();
+                println!(
+                    "[rl_agent] stream      {frames} frames, {dropped} dropped, {episodes} episodes"
+                );
+            }
             println!(
                 "[rl_agent] training complete (algo {}) on bootstrap from {}",
                 outcome.algorithm.id(),
@@ -234,7 +295,54 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
             let _ = outcome;
             Ok(())
         }
-        other => Err(format!("unknown --mode `{other}` (expected train or eval)").into()),
+        "eval-suite" => {
+            let mission_cfg = build_mission_config(args, tcfg.env_max_steps)?;
+            let profile = build_reward_profile(args)?;
+            let mut env = MissionEnvironment::new(&config_path, mission_cfg.clone(), tcfg.seed)?;
+            let mut policy: Box<dyn Policy> = if model_id(args) == "heuristic" {
+                let v_stall = flight_core::stall_speed(env.aircraft_config(), mission_cfg.cruise_altitude);
+                Box::new(HeuristicPolicy::new(
+                    mission_cfg.cruise_airspeed,
+                    mission_cfg.resolve_capture_speed(env.aircraft_config()),
+                    v_stall,
+                ))
+            } else {
+                let cp = load_checkpoint::<B>(&tcfg.checkpoint_dir, &device, tcfg.seed)?;
+                let card = rl_agent::policy::ExpertCard::from_checkpoint(&tcfg.checkpoint_dir, cp.algorithm.id());
+                Box::new(rl_agent::policy::RlPolicy::new(cp.algorithm, cp.normalizer, card))
+            };
+            let scenarios = match args.get("scenarios") {
+                Some(path) => rl_agent::eval::load_scenarios(path)?,
+                None => rl_agent::eval::default_scenarios(),
+            };
+            let suite = rl_agent::eval::run_eval_suite(
+                &mut *policy,
+                &mut env,
+                &scenarios,
+                mission_cfg.max_steps,
+                &profile,
+            );
+            let out = args.get("out").cloned().unwrap_or_else(|| tcfg.checkpoint_dir.clone());
+            let dir = std::path::Path::new(&out);
+            std::fs::create_dir_all(dir)?;
+            // Set expert / contract correctly on returned suite
+            let mut final_suite = suite;
+            final_suite.expert = policy.card().id.clone();
+            final_suite.contract = rl_agent::contracts::MISSION_CONTRACT.into();
+            rl_agent::eval::write_eval_json(&dir.join("eval.json"), &final_suite)?;
+            rl_agent::eval::write_eval_csv(&dir.join("eval.csv"), &final_suite)?;
+            println!(
+                "[rl_agent] eval-suite: {} scenarios, success {:.1}% [{:.1}, {:.1}], capture {:.1}%, crash {:.1}%",
+                final_suite.summary.n,
+                final_suite.summary.success_rate * 100.0,
+                final_suite.summary.success_ci_low * 100.0,
+                final_suite.summary.success_ci_high * 100.0,
+                final_suite.summary.capture_rate * 100.0,
+                final_suite.summary.crash_rate * 100.0,
+            );
+            Ok(())
+        }
+        other => Err(format!("unknown --mode `{other}` (expected train, eval, or eval-suite)").into()),
     }
 }
 
@@ -268,6 +376,30 @@ fn build_trainer_config(args: &HashMap<String, String>) -> Result<TrainerConfig,
     Ok(cfg)
 }
 
+/// Build the live-observation observer (frame streaming + control channel).
+///
+/// The run directory is *not* resolved here: the trainer creates it when it
+/// opens telemetry, and only then is the path known for certain. So this only
+/// parses the two feature flags, and [`TrainObserver::bind`] does the wiring
+/// once the trainer can supply the real directory.
+fn build_observer(
+    args: &HashMap<String, String>,
+    telemetry: &TelemetryConfig,
+) -> Result<TrainObserver, Box<dyn std::error::Error>> {
+    if telemetry.run_root.is_empty() {
+        // Telemetry off means no run dir exists to observe.
+        return Ok(TrainObserver::disabled());
+    }
+    let flag = |key: &str| -> Result<bool, Box<dyn std::error::Error>> {
+        match args.get(key).map(String::as_str) {
+            None | Some("on") => Ok(true),
+            Some("off") => Ok(false),
+            Some(other) => Err(format!("--{key} must be `on` or `off`, got `{other}`").into()),
+        }
+    };
+    Ok(TrainObserver::pending(flag("stream")?, flag("control")?))
+}
+
 fn build_telemetry_config(args: &HashMap<String, String>) -> Result<TelemetryConfig, Box<dyn std::error::Error>> {
     let enabled = args
         .get("telemetry")
@@ -289,15 +421,52 @@ fn build_telemetry_config(args: &HashMap<String, String>) -> Result<TelemetryCon
 
 fn build_net_config(args: &HashMap<String, String>) -> Result<NetConfig, Box<dyn std::error::Error>> {
     Ok(NetConfig {
-        obs_dim: AVIONICS_OBS_DIM,
+        obs_dim: if is_mission_mode(args) {
+            rl_agent::contracts::MISSION_OBS_DIM
+        } else {
+            AVIONICS_OBS_DIM
+        },
         action_dim: ACTION_DIM,
         hidden: get_num(args, "hidden", 128)?,
         log_std_init: get_num(args, "log-std-init", -0.5f32)?,
     })
 }
 
+fn mission_mode(args: &HashMap<String, String>) -> &str {
+    match args.get("mission").map(String::as_str) {
+        Some("mission") => "mission",
+        Some("avionics") => "avionics",
+        Some(other) => {
+            eprintln!("rl_agent: --mission must be `avionics` or `mission`, got `{other}`");
+            std::process::exit(2);
+        }
+        None => "avionics",
+    }
+}
+
+fn is_mission_mode(args: &HashMap<String, String>) -> bool {
+    mission_mode(args) == "mission"
+}
+
+fn config_path(args: &HashMap<String, String>) -> String {
+    if let Some(p) = args.get("config") {
+        return p.clone();
+    }
+    if is_mission_mode(args) {
+        "m_sweep_mini.toml".into()
+    } else {
+        "aircraft.toml".into()
+    }
+}
+
+fn model_id(args: &HashMap<String, String>) -> &str {
+    args.get("model").map(String::as_str)
+        .or_else(|| args.get("algo").map(String::as_str))
+        .unwrap_or("ppo")
+}
+
 fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn std::error::Error>> {
-    let id = args.get("algo").map(String::as_str).unwrap_or(ALGO_PPO);
+    let id = model_id(args);
     let mut spec = AlgoSpec::from_id(id)?;
     match &mut spec {
         AlgoSpec::Ppo { config } => {
@@ -311,6 +480,34 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
             config.epochs = get_num(args, "epochs", config.epochs)?;
             config.minibatch_size = get_num(args, "minibatch", config.minibatch_size)?;
         }
+        AlgoSpec::A2c { config } => {
+            config.lr = get_num(args, "lr", config.lr)?;
+            config.gamma = get_num(args, "gamma", config.gamma)?;
+            config.value_coef = get_num(args, "value-coef", config.value_coef)?;
+            config.entropy_coef = get_num(args, "entropy-coef", config.entropy_coef)?;
+            config.max_grad_norm = get_num(args, "max-grad-norm", config.max_grad_norm)?;
+            config.epochs = get_num(args, "epochs", config.epochs)?;
+            config.minibatch_size = get_num(args, "minibatch", config.minibatch_size)?;
+        }
     }
     Ok(spec)
+}
+
+fn build_reward_profile(args: &HashMap<String, String>) -> Result<rl_agent::mission_env::RewardProfile, Box<dyn std::error::Error>> {
+    let name = args.get("reward-profile").map(String::as_str).unwrap_or("balanced");
+    if name.contains("/") || name.ends_with(".toml") {
+        Ok(rl_agent::mission_env::RewardProfile::from_toml_file(name)?)
+    } else {
+        rl_agent::mission_env::RewardProfile::from_name(name).map_err(|e| format!("{}", e).into())
+    }
+}
+
+fn build_mission_config(args: &HashMap<String, String>, default_max_steps: usize) -> Result<flight_core::MissionConfig, Box<dyn std::error::Error>> {
+    let mut cfg = flight_core::MissionConfig::default();
+    if let Some(v) = args.get("env-max-steps") {
+        cfg.max_steps = v.parse()?;
+    } else {
+        cfg.max_steps = default_max_steps;
+    }
+    Ok(cfg)
 }

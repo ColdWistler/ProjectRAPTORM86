@@ -41,6 +41,25 @@ const METRICS: &[(&str, &str)] = &[
     ("alt_err", "Eval alt err (m)"),
     ("spd_err", "Eval spd err (m/s)"),
     ("eval_reward", "Eval mean reward"),
+    // Ground-truth flight state (`env` block, `rl_agent.telemetry` schema).
+    ("env_alt_mean", "Env altitude (m)"),
+    ("env_airspeed_mean", "Env airspeed (m/s)"),
+    ("env_climb_mean", "Env climb (m/s)"),
+    ("env_ground_speed_mean", "Env ground speed (m/s)"),
+    ("env_roll_abs_mean", "Env |roll| (rad)"),
+    ("env_pitch_abs_mean", "Env |pitch| (rad)"),
+    ("env_aoa_mean", "Env AoA (rad)"),
+    ("env_wind_mean", "Env wind (m/s)"),
+    ("env_throttle_mean", "Env throttle"),
+    ("env_surface_effort_mean", "Env surface effort (deg)"),
+    ("env_baro_err_abs_mean", "Env baro err (m)"),
+    ("env_battery_pct_min", "Env battery min (%)"),
+    // Weather (`env.weather`, only present on runs with a weather system).
+    ("weather_wind_speed_mean", "Weather wind (m/s)"),
+    ("weather_gust_rms_max", "Weather gust max (m/s)"),
+    ("weather_turbulence_mean", "Weather turbulence"),
+    ("weather_severity_mean", "Weather severity"),
+    ("weather_visibility_min", "Weather visibility (m)"),
 ];
 
 /// Colors for vertical guide lines (eval / checkpoint markers) on the chart.
@@ -92,6 +111,10 @@ struct RunManifest {
     backend: Option<String>,
     #[serde(default)]
     git_commit: Option<String>,
+    /// Original argv. The optional `--name` value is the human model label
+    /// shown on the dashboard's model tabs.
+    #[serde(default)]
+    command_line: Vec<String>,
     /// Raw hyper-parameter blocks, retained so runs that share a config
     /// (same algo/backend/network/algorithm/trainer — seed excluded) can be
     /// grouped into mean±std seed-replication bands.
@@ -150,6 +173,73 @@ struct MetricsRecord {
     checkpoint: bool,
     #[serde(default)]
     eval: Option<EvalMetrics>,
+    /// Ground-truth flight-state summary over the rollout (`env` key in
+    /// `metrics.jsonl`). Absent on runs recorded before env telemetry existed.
+    #[serde(default)]
+    env: Option<EnvSummary>,
+}
+
+/// The `env` block of an iteration record. Every field is optional so older
+/// runs (or a schema change) degrade to "no data" instead of failing to parse.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EnvSummary {
+    #[serde(default)]
+    alt_mean: Option<f64>,
+    #[serde(default)]
+    alt_min: Option<f64>,
+    #[serde(default)]
+    alt_max: Option<f64>,
+    #[serde(default)]
+    airspeed_mean: Option<f64>,
+    #[serde(default)]
+    climb_mean: Option<f64>,
+    #[serde(default)]
+    ground_speed_mean: Option<f64>,
+    #[serde(default)]
+    roll_abs_mean: Option<f64>,
+    #[serde(default)]
+    pitch_abs_mean: Option<f64>,
+    #[serde(default)]
+    aoa_mean: Option<f64>,
+    #[serde(default)]
+    wind_mean: Option<f64>,
+    #[serde(default)]
+    throttle_mean: Option<f64>,
+    #[serde(default)]
+    surface_effort_mean: Option<f64>,
+    #[serde(default)]
+    baro_err_abs_mean: Option<f64>,
+    #[serde(default)]
+    airspeed_err_abs_mean: Option<f64>,
+    #[serde(default)]
+    battery_pct_min: Option<f64>,
+    #[serde(default)]
+    weather: Option<WeatherSummary>,
+}
+
+/// The nested `env.weather` block, when the run had a weather system.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WeatherSummary {
+    #[serde(default)]
+    wind_speed_mean: Option<f64>,
+    #[serde(default)]
+    gust_rms_mean: Option<f64>,
+    #[serde(default)]
+    gust_rms_max: Option<f64>,
+    #[serde(default)]
+    turbulence_mean: Option<f64>,
+    #[serde(default)]
+    severity_mean: Option<f64>,
+    #[serde(default)]
+    rain_mean: Option<f64>,
+    #[serde(default)]
+    visibility_min: Option<f64>,
+    #[serde(default)]
+    updraft_abs_mean: Option<f64>,
+    #[serde(default)]
+    shear_abs_mean: Option<f64>,
 }
 
 impl MetricsRecord {
@@ -169,6 +259,45 @@ impl MetricsRecord {
             "alt_err" => self.eval.as_ref().and_then(|e| e.alt_err),
             "spd_err" => self.eval.as_ref().and_then(|e| e.spd_err),
             "eval_reward" => self.eval.as_ref().and_then(|e| e.total_reward),
+            // Ground-truth flight state (`env` block).
+            "env_alt_mean" => self.env.as_ref().and_then(|e| e.alt_mean),
+            "env_airspeed_mean" => self.env.as_ref().and_then(|e| e.airspeed_mean),
+            "env_climb_mean" => self.env.as_ref().and_then(|e| e.climb_mean),
+            "env_ground_speed_mean" => self.env.as_ref().and_then(|e| e.ground_speed_mean),
+            "env_roll_abs_mean" => self.env.as_ref().and_then(|e| e.roll_abs_mean),
+            "env_pitch_abs_mean" => self.env.as_ref().and_then(|e| e.pitch_abs_mean),
+            "env_aoa_mean" => self.env.as_ref().and_then(|e| e.aoa_mean),
+            "env_wind_mean" => self.env.as_ref().and_then(|e| e.wind_mean),
+            "env_throttle_mean" => self.env.as_ref().and_then(|e| e.throttle_mean),
+            "env_surface_effort_mean" => self.env.as_ref().and_then(|e| e.surface_effort_mean),
+            "env_baro_err_abs_mean" => self.env.as_ref().and_then(|e| e.baro_err_abs_mean),
+            "env_battery_pct_min" => self.env.as_ref().and_then(|e| e.battery_pct_min),
+            // Weather (`env.weather` block, only when the run had a weather system).
+            "weather_wind_speed_mean" => self
+                .env
+                .as_ref()
+                .and_then(|e| e.weather.as_ref())
+                .and_then(|w| w.wind_speed_mean),
+            "weather_gust_rms_max" => self
+                .env
+                .as_ref()
+                .and_then(|e| e.weather.as_ref())
+                .and_then(|w| w.gust_rms_max),
+            "weather_turbulence_mean" => self
+                .env
+                .as_ref()
+                .and_then(|e| e.weather.as_ref())
+                .and_then(|w| w.turbulence_mean),
+            "weather_severity_mean" => self
+                .env
+                .as_ref()
+                .and_then(|e| e.weather.as_ref())
+                .and_then(|w| w.severity_mean),
+            "weather_visibility_min" => self
+                .env
+                .as_ref()
+                .and_then(|e| e.weather.as_ref())
+                .and_then(|w| w.visibility_min),
             _ => None,
         }
     }
@@ -197,11 +326,61 @@ impl XMode {
     }
 }
 
-/// Top-level layout: the line chart or the run×iteration heatmap.
+/// Top-level layout: main dashboard or detailed views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ViewMode {
+    Main,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetailTab {
     Chart,
     Heatmap,
+    Table,
+    Bar,
+    Scatter,
+}
+
+/// How runs are grouped into the dashboard's tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupMode {
+    /// Human model name (`--name`), falling back to the architecture signature
+    /// for runs trained before names were used.
+    Model,
+    /// One tab per `runs/<run_id>` directory.
+    Run,
+    /// Algorithm + network shape + backend.
+    Architecture,
+}
+
+impl GroupMode {
+    const ALL: [GroupMode; 3] = [GroupMode::Model, GroupMode::Run, GroupMode::Architecture];
+
+    fn label(self) -> &'static str {
+        match self {
+            GroupMode::Model => "Model",
+            GroupMode::Run => "Run",
+            GroupMode::Architecture => "Architecture",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            GroupMode::Model => "One tab per --name label (unnamed runs group by architecture)",
+            GroupMode::Run => "One tab per training run",
+            GroupMode::Architecture => "One tab per algorithm + network shape + backend",
+        }
+    }
+}
+
+/// One selectable tab in the dashboard header.
+#[derive(Clone, Debug)]
+struct GroupTab {
+    key: String,
+    label: String,
+    count: usize,
+    live: bool,
 }
 
 struct RunModel {
@@ -252,7 +431,10 @@ impl RunModel {
                 return;
             }
             Err(_) => {
-                self.error = Some("metrics.jsonl not found or unreadable".into());
+                // If we have records already, don't clear them on transient errors
+                if self.records.is_empty() {
+                    self.error = Some("metrics.jsonl not found or unreadable".into());
+                }
                 return;
             }
         };
@@ -271,7 +453,9 @@ impl RunModel {
         }
         let mut buf = String::new();
         if f.read_to_string(&mut buf).is_err() {
-            self.error = Some("failed to read metrics.jsonl".into());
+            if self.records.is_empty() {
+                self.error = Some("failed to read metrics.jsonl".into());
+            }
             return;
         }
         // Only consume *complete* lines: a read can race a partially-flushed
@@ -284,7 +468,9 @@ impl RunModel {
                 None => ("", 0), // only a partial line so far — retry next poll
             }
         };
-        self.file_len += consumed as u64;
+        if consumed > 0 {
+            self.file_len += consumed as u64;
+        }
         self.error = None;
         for line in complete.lines() {
             let line = line.trim();
@@ -298,6 +484,28 @@ impl RunModel {
         if self.records.len() > MAX_RECORDS {
             let drop = self.records.len() - MAX_RECORDS / 2;
             self.records.drain(..drop);
+        }
+    }
+
+        /// Quick sparkline (last n points) for a metric in iteration mode
+    fn sparkline(&self, key: &str, n: usize) -> Vec<f64> {
+        let s = self.series_for(key, XMode::Iteration);
+        let start = if s.len() > n { s.len() - n } else { 0 };
+        s[start..].iter().map(|p| p[1]).collect()
+    }
+
+    /// Latest value for a metric
+    fn latest(&self, key: &str) -> Option<f64> {
+        self.series_for(key, XMode::Iteration).last().map(|p| p[1])
+    }
+
+    /// Best (max) value for a metric
+    fn best(&self, key: &str) -> Option<f64> {
+        let s = self.series_for(key, XMode::Iteration);
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max))
         }
     }
 
@@ -399,6 +607,76 @@ impl RunModel {
         let network = m.network.as_ref().map(|v| v.to_string()).unwrap_or_default();
         let algorithm = m.algorithm.as_ref().map(|v| v.to_string()).unwrap_or_default();
         Some(format!("{algo}|{backend}|{network}|{algorithm}|{trainer}"))
+    }
+
+    /// Directory name (`runs/<run_id>`), the dashboard's stable run identity.
+    fn run_id(&self) -> String {
+        self.dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.dir.to_string_lossy().into_owned())
+    }
+
+    /// Human model label passed to `rl_agent --name`, if the manifest kept it.
+    fn explicit_model_name(&self) -> Option<String> {
+        let args = &self.manifest.as_ref()?.command_line;
+        for (i, arg) in args.iter().enumerate() {
+            let value = if arg == "--name" {
+                args.get(i + 1).map(String::as_str)
+            } else {
+                arg.strip_prefix("--name=")
+            };
+            if let Some(v) = value {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Older manifests may not expose `--name` cleanly; the label is also the
+    /// suffix of `..._<algo>_seed<digits>_<label>`.
+    fn run_id_label(&self) -> Option<String> {
+        let id = self.run_id();
+        let after = &id[id.rfind("_seed")? + 5..];
+        let digits = after.find(|c: char| !c.is_ascii_digit())?;
+        let label = after[digits..].strip_prefix('_')?;
+        (!label.is_empty()).then(|| label.to_string())
+    }
+
+    fn hidden_label(&self) -> Option<String> {
+        match self.manifest.as_ref()?.network.as_ref()?.get("hidden")? {
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Array(layers) => {
+                Some(layers.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("×"))
+            }
+            _ => None,
+        }
+    }
+
+    /// Compact config signature used when a run has no explicit name.
+    fn architecture_label(&self) -> String {
+        let m = self.manifest.as_ref();
+        let algo = m.and_then(|m| m.algo.as_deref()).unwrap_or("unknown");
+        let backend = short_backend(m.and_then(|m| m.backend.as_deref()));
+        match self.hidden_label() {
+            Some(h) => format!("{algo} · h{h} · {backend}"),
+            None => format!("{algo} · {backend}"),
+        }
+    }
+
+    /// Tab key for the selected grouping mode.
+    fn tab_key(&self, mode: GroupMode) -> String {
+        match mode {
+            GroupMode::Model => self
+                .explicit_model_name()
+                .or_else(|| self.run_id_label())
+                .unwrap_or_else(|| self.architecture_label()),
+            GroupMode::Run => self.run_id(),
+            GroupMode::Architecture => self.architecture_label(),
+        }
     }
 
     /// Total wall-clock seconds at the last record (`None` when unlogged).
@@ -527,6 +805,22 @@ fn short_backend(backend: Option<&str>) -> &str {
         .unwrap_or("?")
 }
 
+/// Compact tab label for a run id:
+/// `20260923_104623_870_ppo_seed42_smoke` → `10:46:23 · ppo_seed42_smoke`.
+fn short_run_label(id: &str) -> String {
+    let mut parts = id.splitn(4, '_');
+    let (Some(date), Some(time), Some(_millis), Some(rest)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return id.to_string();
+    };
+    if date.len() == 8 && time.len() == 6 && time.chars().all(|c| c.is_ascii_digit()) {
+        format!("{}:{}:{} · {rest}", &time[0..2], &time[2..4], &time[4..6])
+    } else {
+        id.to_string()
+    }
+}
+
 /// `seconds` → `3m 24s` / `1h 05m`, `—` when unknown.
 fn fmt_duration(secs: Option<f64>) -> String {
     let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) else {
@@ -561,6 +855,8 @@ fn fmt(v: f64) -> String {
 
 // ── The app ──────────────────────────────────────────────────────────
 
+use std::time::Instant;
+
 struct DashApp {
     runs_root: PathBuf,
     /// keyed by run id, kept sorted (BTreeMap iterates in run-id/time order)
@@ -574,6 +870,10 @@ struct DashApp {
     polls_since_rescan: u8,
     /// Layout + chart switches (see the side panel).
     view: ViewMode,
+    detail_tab: DetailTab,
+    /// Tab grouping mode and selected group (`None` = the All tab).
+    group_mode: GroupMode,
+    active_group: Option<String>,
     x_mode: XMode,
     log_y: bool,
     show_best: bool,
@@ -581,6 +881,29 @@ struct DashApp {
     show_checkpoints: bool,
     seed_bands: bool,
     show_summary: bool,
+    /// Last time we polled (for status bar)
+    last_poll: Instant,
+    /// Track last modification time per run for staleness detection
+    last_update: BTreeMap<String, Instant>,
+    /// Run list sorting
+    sort_by: SortKey,
+    sort_desc: bool,
+    /// Filters
+    filter_text: String,
+    hide_completed: bool,
+    hide_interrupted: bool,
+    /// KPI strip
+    show_kpi: bool,
+    kpi_expanded: Option<String>,
+}
+
+/// Sort key for run list
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Iters,
+    LatestReward,
+    Status,
 }
 
 impl DashApp {
@@ -594,7 +917,10 @@ impl DashApp {
             follow_live: true,
             banner: None,
             polls_since_rescan: 0,
-            view: ViewMode::Chart,
+            view: ViewMode::Main,
+            detail_tab: DetailTab::Chart,
+            group_mode: GroupMode::Model,
+            active_group: None,
             x_mode: XMode::Iteration,
             log_y: false,
             show_best: false,
@@ -602,6 +928,15 @@ impl DashApp {
             show_checkpoints: false,
             seed_bands: false,
             show_summary: true,
+            last_poll: Instant::now(),
+            last_update: BTreeMap::new(),
+            sort_by: SortKey::Name,
+            sort_desc: false,
+            filter_text: String::new(),
+            hide_completed: false,
+            hide_interrupted: false,
+            show_kpi: true,
+            kpi_expanded: None,
         };
         app.rescan();
         app
@@ -652,8 +987,12 @@ impl DashApp {
     }
 
     fn poll_all(&mut self) {
-        for run in self.runs.values_mut() {
+        for (id, run) in self.runs.iter_mut() {
+            let before = run.records.len();
             run.poll();
+            if run.records.len() != before {
+                self.last_update.insert(id.clone(), Instant::now());
+            }
         }
         // Discover runs that landed after launch (the RL tab's trainer spawns
         // its run dir within the first second or two) without a manual click.
@@ -663,14 +1002,72 @@ impl DashApp {
             self.rescan();
         }
         if self.follow_live {
-            if let Some(newest) = self.runs.keys().next_back().cloned() {
+            if let Some(newest) = self.active_run_ids().last().cloned() {
                 self.visible.insert(newest, true);
             }
         }
+        self.last_poll = Instant::now();
     }
 
     fn newest_id(&self) -> Option<String> {
-        self.runs.keys().next_back().cloned()
+        self.active_run_ids().last().cloned()
+    }
+
+    /// True when a run belongs to the active tab (checkboxes are applied too).
+    fn run_in_active_group(&self, run: &RunModel) -> bool {
+        self.active_group
+            .as_deref()
+            .is_none_or(|group| run.tab_key(self.group_mode) == group)
+    }
+
+    /// Checked *and* inside the active tab — the filter every view uses.
+    fn run_is_selected(&self, id: &str, run: &RunModel) -> bool {
+        self.visible.get(id).copied().unwrap_or(false) && self.run_in_active_group(run)
+    }
+
+    /// Run ids inside the active tab, in chronological (BTreeMap) order.
+    fn active_run_ids(&self) -> Vec<String> {
+        self.runs
+            .iter()
+            .filter(|(_, run)| self.run_in_active_group(run))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Tabs for the current grouping mode, ordered by each group's first run.
+    fn group_tabs(&self) -> Vec<GroupTab> {
+        let mut tabs: Vec<GroupTab> = Vec::new();
+        let mut index: BTreeMap<String, usize> = BTreeMap::new();
+        for (id, run) in self.runs.iter() {
+            let key = run.tab_key(self.group_mode);
+            let label = match self.group_mode {
+                GroupMode::Run => short_run_label(id),
+                _ => key.clone(),
+            };
+            if let Some(&i) = index.get(&key) {
+                tabs[i].count += 1;
+                tabs[i].live |= run.is_live();
+            } else {
+                index.insert(key.clone(), tabs.len());
+                tabs.push(GroupTab {
+                    key,
+                    label,
+                    count: 1,
+                    live: run.is_live(),
+                });
+            }
+        }
+        tabs
+    }
+
+    /// Fall back to the All tab when a rescan removes the selected group.
+    fn ensure_active_group(&mut self) {
+        let Some(group) = self.active_group.clone() else {
+            return;
+        };
+        if !self.runs.values().any(|run| run.tab_key(self.group_mode) == group) {
+            self.active_group = None;
+        }
     }
 
     fn metric_key(&self) -> &'static str {
@@ -687,21 +1084,172 @@ impl eframe::App for DashApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_all();
+        self.ensure_active_group();
         ctx.request_repaint_after(Duration::from_millis(POLL_MS));
+
+        // Keyboard shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.follow_live = !self.follow_live;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            self.rescan();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            self.view = match self.view {
+                ViewMode::Main => ViewMode::Detail,
+                ViewMode::Detail => ViewMode::Main,
+            };
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            if self.metric == 0 {
+                self.metric = METRICS.len() - 1;
+            } else {
+                self.metric -= 1;
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            self.metric = (self.metric + 1) % METRICS.len();
+        }
 
         egui::Panel::left("runs")
             .resizable(true)
             .default_size(320.0)
             .show(ui, |ui| self.side_panel(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| match self.view {
-            ViewMode::Chart => self.plot_panel(ui),
-            ViewMode::Heatmap => self.heatmap_panel(ui),
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let tab_ids = self.active_run_ids();
+                let tab_total = tab_ids.len();
+                let tab_checked = tab_ids
+                    .iter()
+                    .filter(|id| self.visible.get(*id).copied().unwrap_or(false))
+                    .count();
+                let checked_total = self.visible.values().filter(|&&v| v).count();
+                let total = self.runs.len();
+                let scope = self.active_group.as_deref().unwrap_or("All");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Runs: {tab_checked}/{tab_total} in tab • {checked_total} checked / {total} total • Tab: {scope} • Last poll: {}ms ago",
+                        self.last_poll.elapsed().as_millis()
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("Space=follow • R=rescan • H=Main/Detail • ←/→=metric")
+                            .small()
+                            .weak(),
+                    );
+                });
+            });
+        });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            self.group_tab_bar(ui);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.view, ViewMode::Main, "Main Dashboard");
+                ui.selectable_value(&mut self.view, ViewMode::Detail, "Detailed Analysis");
+            });
+            ui.separator();
+            if self.show_kpi && self.view == ViewMode::Main {
+                self.kpi_strip(ui);
+                ui.separator();
+            }
+            if self.view == ViewMode::Main {
+                // Main screen: compact overview - show chart + quick summaries
+                ui.horizontal(|ui| {
+                    ui.heading("Overview");
+                    ui.label(egui::RichText::new("Click 'Detailed Analysis' for Heatmap/Table/Bar/Scatter").small().weak());
+                });
+                self.plot_panel(ui);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(&mut self.detail_tab, DetailTab::Chart, "Chart");
+                    ui.selectable_value(&mut self.detail_tab, DetailTab::Heatmap, "Heatmap");
+                    ui.selectable_value(&mut self.detail_tab, DetailTab::Table, "Table");
+                    ui.selectable_value(&mut self.detail_tab, DetailTab::Bar, "Bar");
+                    ui.selectable_value(&mut self.detail_tab, DetailTab::Scatter, "Scatter");
+                });
+                ui.separator();
+                match self.detail_tab {
+                    DetailTab::Chart => self.plot_panel(ui),
+                    DetailTab::Heatmap => self.heatmap_panel(ui),
+                    DetailTab::Table => self.table_panel(ui),
+                    DetailTab::Bar => self.bar_panel(ui),
+                    DetailTab::Scatter => self.scatter_panel(ui),
+                }
+            }
         });
     }
 }
 
 impl DashApp {
+    /// Horizontal tab bar: All + one tab per group in the selected mode.
+    fn group_tab_bar(&mut self, ui: &mut egui::Ui) {
+        let tabs = self.group_tabs();
+        let active = self.active_group.clone();
+        let total = self.runs.len();
+        let mut pick: Option<Option<String>> = None;
+        let mut mode = self.group_mode;
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Tabs").small().weak());
+            egui::ComboBox::from_id_salt("group_mode")
+                .selected_text(mode.label())
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for m in GroupMode::ALL {
+                        ui.selectable_value(&mut mode, m, m.label())
+                            .on_hover_text(m.hint());
+                    }
+                });
+            ui.separator();
+            if ui
+                .selectable_label(active.is_none(), format!("All ({total})"))
+                .on_hover_text("Show every checked run")
+                .clicked()
+            {
+                pick = Some(None);
+            }
+            egui::ScrollArea::horizontal()
+                .id_salt("group_tabs")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for tab in &tabs {
+                            let selected = active.as_deref() == Some(tab.key.as_str());
+                            let text = if tab.live {
+                                format!("● {} ({})", tab.label, tab.count)
+                            } else {
+                                format!("{} ({})", tab.label, tab.count)
+                            };
+                            if ui
+                                .selectable_label(selected, text)
+                                .on_hover_text(format!(
+                                    "{} · {} run(s) · grouped by {}",
+                                    tab.label,
+                                    tab.count,
+                                    mode.label().to_lowercase()
+                                ))
+                                .clicked()
+                            {
+                                pick = Some(Some(tab.key.clone()));
+                            }
+                        }
+                    });
+                });
+        });
+
+        if mode != self.group_mode {
+            self.group_mode = mode;
+            self.active_group = None;
+        } else if let Some(sel) = pick {
+            self.active_group = sel;
+        }
+    }
+
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.heading("rl_dash");
@@ -722,8 +1270,9 @@ impl DashApp {
             });
 
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.view, ViewMode::Chart, "Chart");
-            ui.selectable_value(&mut self.view, ViewMode::Heatmap, "Heatmap");
+            ui.label("View:");
+            ui.selectable_value(&mut self.view, ViewMode::Main, "Main");
+            ui.selectable_value(&mut self.view, ViewMode::Detail, "Detail");
         });
 
         egui::ComboBox::from_label("X-axis")
@@ -757,11 +1306,29 @@ impl DashApp {
             ui.checkbox(&mut self.show_summary, "Run summary");
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let follow = &mut self.follow_live;
             ui.checkbox(follow, "Follow live run");
+            ui.checkbox(&mut self.show_kpi, "KPIs");
             if ui.button("Rescan").clicked() {
                 self.rescan();
+            }
+            if ui.button("Clear data").clicked() {
+                self.runs.clear();
+                self.visible.clear();
+                self.last_update.clear();
+                self.active_group = None;
+                self.banner = Some("Data cleared. Click Rescan to reload runs from disk.".to_string());
+            }
+            if ui.button("Select all").clicked() {
+                for id in self.active_run_ids() {
+                    self.visible.insert(id, true);
+                }
+            }
+            if ui.button("Uncheck all").clicked() {
+                for id in self.active_run_ids() {
+                    self.visible.insert(id, false);
+                }
             }
         });
 
@@ -770,16 +1337,109 @@ impl DashApp {
         }
 
         ui.separator();
+        ui.collapsing("Sort & Filter", |ui| {
+            egui::ComboBox::from_label("Sort by")
+                .selected_text(match self.sort_by {
+                    SortKey::Name => "Name",
+                    SortKey::Iters => "Iterations",
+                    SortKey::LatestReward => "Latest reward",
+                    SortKey::Status => "Status",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.sort_by, SortKey::Name, "Name");
+                    ui.selectable_value(&mut self.sort_by, SortKey::Iters, "Iterations");
+                    ui.selectable_value(&mut self.sort_by, SortKey::LatestReward, "Latest reward");
+                    ui.selectable_value(&mut self.sort_by, SortKey::Status, "Status");
+                });
+            ui.checkbox(&mut self.sort_desc, "Descending");
+            ui.text_edit_singleline(&mut self.filter_text);
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.hide_completed, "Hide completed");
+                ui.checkbox(&mut self.hide_interrupted, "Hide interrupted");
+            });
+        });
+        ui.separator();
         ui.label(egui::RichText::new("Runs").strong());
+        if let Some(group) = &self.active_group {
+            ui.label(
+                egui::RichText::new(format!("tab: {group}"))
+                    .small()
+                    .weak(),
+            );
+        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.runs.is_empty() {
+                ui.label(
+                    egui::RichText::new("No runs found.\n\nStart training with rl_agent or click Rescan.\nCheck the runs path above.")
+                        .weak()
+                        .small(),
+                );
+                return;
+            }
             let newest = self.newest_id();
-            let ids: Vec<String> = self.runs.keys().cloned().collect();
+            let filter_lower = self.filter_text.to_lowercase();
+            let mut ids: Vec<String> = self.runs.keys().cloned().collect();
+            ids.retain(|id| {
+                let Some(run) = self.runs.get(id) else {
+                    return false;
+                };
+                if !self.run_in_active_group(run) {
+                    return false;
+                }
+                if !self.filter_text.is_empty() && !id.to_lowercase().contains(&filter_lower) {
+                    return false;
+                }
+                let status = run.status();
+                if self.hide_completed && status == "completed" {
+                    return false;
+                }
+                if self.hide_interrupted && status == "interrupted" {
+                    return false;
+                }
+                true
+            });
+            ids.sort_by(|a, b| {
+                let ord = match self.sort_by {
+                    SortKey::Name => a.cmp(b),
+                    SortKey::Iters => {
+                        let la = self.runs.get(a).map(|r| r.records.len()).unwrap_or(0);
+                        let lb = self.runs.get(b).map(|r| r.records.len()).unwrap_or(0);
+                        la.cmp(&lb)
+                    }
+                    SortKey::LatestReward => {
+                        let fa = self
+                            .runs
+                            .get(a)
+                            .and_then(|r| r.series_for("mean_reward_per_step", XMode::Iteration).last().map(|p| p[1]))
+                            .unwrap_or(f64::NEG_INFINITY);
+                        let fb = self
+                            .runs
+                            .get(b)
+                            .and_then(|r| r.series_for("mean_reward_per_step", XMode::Iteration).last().map(|p| p[1]))
+                            .unwrap_or(f64::NEG_INFINITY);
+                        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    SortKey::Status => {
+                        let sa = self.runs.get(a).map(|r| r.status()).unwrap_or("");
+                        let sb = self.runs.get(b).map(|r| r.status()).unwrap_or("");
+                        sa.cmp(sb)
+                    }
+                };
+                if self.sort_desc { ord.reverse() } else { ord }
+            });
             for id in ids {
                 let run = &self.runs[&id];
                 let status = run.status().to_string();
                 let live = run.is_live();
-                let color = if live {
+                let stale_secs = self
+                    .last_update
+                    .get(&id)
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(u64::MAX);
+                let color = if live && stale_secs > 30 {
+                    egui::Color32::from_rgb(242, 204, 77) // stale live
+                } else if live {
                     egui::Color32::from_rgb(115, 217, 134)
                 } else if status == "completed" {
                     egui::Color32::from_rgb(150, 170, 200)
@@ -798,13 +1458,19 @@ impl DashApp {
                         id.clone()
                     };
                     ui.label(egui::RichText::new(label).monospace());
-                    let status_text = if live { "● live" } else { status.as_str() };
+                    let status_text = if live && stale_secs > 30 {
+                        "● stale"
+                    } else if live {
+                        "● live"
+                    } else {
+                        status.as_str()
+                    };
                     ui.colored_label(color, status_text);
                 });
                 if run.error.is_none() {
                     ui.label(
                         egui::RichText::new(format!(
-                            "    {} · {} points{}",
+                            "    {} · {} pts{}{}",
                             run.manifest
                                 .as_ref()
                                 .and_then(|m| m.algo.clone())
@@ -814,7 +1480,12 @@ impl DashApp {
                                 .as_ref()
                                 .and_then(|m| m.git_commit.clone())
                                 .map(|c| format!(" · {c}"))
-                                .unwrap_or_default()
+                                .unwrap_or_default(),
+                            if live && stale_secs < u64::MAX {
+                                format!(" · {}s ago", stale_secs)
+                            } else {
+                                String::new()
+                            }
                         ))
                         .weak()
                         .small(),
@@ -864,7 +1535,7 @@ impl DashApp {
         let mut palette_i = 0usize;
 
         for (id, run) in self.runs.iter() {
-            if !self.visible.get(id).copied().unwrap_or(false) {
+            if !self.run_is_selected(id, run) {
                 continue;
             }
             let raw = run.series_for(key, mode);
@@ -1005,16 +1676,28 @@ impl DashApp {
         } else {
             label.to_string()
         };
+        // Keep all series for crosshair lookup
+        let mut all_series_for_hover: Vec<(String, egui::Color32, Vec<[f64; 2]>)> = Vec::new();
+        for band in &bands {
+            let mean = if log_y { log10_pts(&band.mean) } else { band.mean.clone() };
+            if !mean.is_empty() {
+                all_series_for_hover.push((band.name.clone(), band.color, mean));
+            }
+        }
+        for item in &items {
+            let pts = if log_y { log10_pts(&item.pts) } else { item.pts.clone() };
+            if !pts.is_empty() {
+                all_series_for_hover.push((item.name.clone(), item.color, pts));
+            }
+        }
+
         let mut hover: Option<egui_plot::PlotPoint> = None;
         let _plot_resp = Plot::new("metrics")
             .legend(Legend::default())
             .x_axis_label(mode.label())
             .y_axis_label(y_axis_label)
             .show(ui, |plot_ui| {
-                // Vertical guides first so data draws on top of them. VLine
-                // contributes no bounds (`PlotBounds::NOTHING`), so autoscaling
-                // stays driven by the real series. Empty names keep them out
-                // of the legend.
+                // Vertical guides first so data draws on top of them.
                 for (i, &x) in eval_xs.iter().enumerate() {
                     plot_ui.vline(
                         VLine::new("", x)
@@ -1033,7 +1716,7 @@ impl DashApp {
                             .style(LineStyle::dashed_loose()),
                     );
                 }
-                // Seed-replication bands: mean line + mean±std polygon.
+                // Seed-replication bands
                 for band in &bands {
                     let upper = if log_y { log10_pts(&band.upper) } else { band.upper.clone() };
                     let lower = if log_y { log10_pts(&band.lower) } else { band.lower.clone() };
@@ -1057,7 +1740,7 @@ impl DashApp {
                         );
                     }
                 }
-                // Per-run series (plain + best-so-far dashed).
+                // Per-run series
                 for item in &items {
                     let pts = if log_y { log10_pts(&item.pts) } else { item.pts.clone() };
                     if pts.is_empty() {
@@ -1075,7 +1758,7 @@ impl DashApp {
                             .style(style),
                     );
                 }
-                // Sparse eval dots overlaid on the reward curve.
+                // Sparse eval dots
                 for (id, color, dots) in &eval_dots {
                     let pts = if log_y { log10_pts(dots) } else { dots.clone() };
                     if pts.is_empty() {
@@ -1093,17 +1776,37 @@ impl DashApp {
 
         if let Some(p) = hover {
             ui.label(
-                egui::RichText::new(format!(
-                    "cursor → {} · {}",
-                    fmt(p.x),
-                    fmt(p.y)
-                ))
-                .monospace()
-                .weak(),
+                egui::RichText::new(format!("Crosshair @ {} × {}", fmt(p.x), fmt(p.y)))
+                    .monospace()
+                    .weak(),
             );
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("crosshair_values")
+                        .striped(true)
+                        .spacing([12.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.strong("Series");
+                            ui.strong("Value");
+                            ui.end_row();
+                            for (name, color, pts) in &all_series_for_hover {
+                                // Find nearest point by x
+                                if let Some(best) = pts.iter().min_by(|a, b| {
+                                    ((a[0] - p.x).abs())
+                                        .partial_cmp(&((b[0] - p.x).abs()))
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                }) {
+                                    ui.colored_label(*color, name);
+                                    ui.label(fmt(best[1]));
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
         } else {
             ui.label(
-                egui::RichText::new("hover the plot for values · drag to pan · scroll to zoom")
+                egui::RichText::new("Hover for crosshair values across all series • drag to pan • scroll to zoom")
                     .weak()
                     .small(),
             );
@@ -1148,7 +1851,7 @@ impl DashApp {
             .runs
             .iter()
             .rev() // newest (lexicographically last) first
-            .filter(|(id, _)| self.visible.get(*id).copied().unwrap_or(false))
+            .filter(|(id, run)| self.run_is_selected(id.as_str(), run))
             .map(|(id, run)| (id.clone(), run))
             .collect();
         if rows.is_empty() {
@@ -1226,13 +1929,20 @@ impl DashApp {
     /// normalizes over its own value range so per-run trends stay readable;
     /// each column buckets a span of iterations into the mean value.
     fn heatmap_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(format!("Heatmap — {}", self.metric_label()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("Rows normalized • Buckets by iteration").small().weak());
+            });
+        });
+        ui.separator();
         let label = self.metric_label();
         let rows: Vec<(String, Vec<[f64; 2]>)> = self
             .runs
             .iter()
             .rev() // newest run on top
             .filter(|(id, run)| {
-                self.visible.get(*id).copied().unwrap_or(false)
+                self.run_is_selected(id.as_str(), run)
                     && !run.series_for(self.metric_key(), XMode::Iteration).is_empty()
             })
             .map(|(id, run)| (id.clone(), run.series_for(self.metric_key(), XMode::Iteration)))
@@ -1331,10 +2041,10 @@ impl DashApp {
 
             // Legend: value scale + "per-row normalized" note.
             let leg_y = origin.y + rows.len() as f32 * row_h + 8.0;
-            let leg_w = 140.0f32;
+            let leg_w = 200.0f32;
             let leg = egui::Rect::from_min_size(
                 egui::pos2(origin.x + label_w, leg_y),
-                egui::vec2(leg_w, 8.0),
+                egui::vec2(leg_w, 10.0),
             );
             for i in 0..leg_w as usize {
                 let t = i as f64 / leg_w as f64;
@@ -1350,7 +2060,7 @@ impl DashApp {
             painter.text(
                 egui::pos2(leg.left(), leg.bottom() + 4.0),
                 egui::Align2::LEFT_TOP,
-                "low → high · rows normalized to their own range",
+                "Low → High (per-run normalized)  •  darker = missing",
                 egui::FontId::proportional(11.0),
                 weak,
             );
@@ -1376,6 +2086,247 @@ impl DashApp {
                 }
             }
         });
+    }
+
+    fn kpi_strip(&mut self, ui: &mut egui::Ui) {
+        // Find primary run (newest selected run inside the active tab)
+        let mut primary_id: Option<String> = None;
+        for (id, run) in self.runs.iter().rev() {
+            if self.run_is_selected(id, run) {
+                primary_id = Some(id.clone());
+                break;
+            }
+        }
+        let Some(pid) = primary_id else {
+            ui.label(egui::RichText::new("No visible runs for KPIs").weak());
+            return;
+        };
+        let Some(run) = self.runs.get(&pid) else { return; };
+        let stale_secs = self.last_update.get(&pid).map(|t| t.elapsed().as_secs()).unwrap_or(u64::MAX);
+        let is_stale = run.is_live() && stale_secs > 30;
+
+        ui.horizontal_wrapped(|ui| {
+            let kpis = vec![
+                ("Reward/step", "mean_reward_per_step", ""),
+                ("Best Reward", "mean_reward_per_step", "best"),
+                ("Iterations", "", "iters"),
+                ("Env Steps", "", "steps"),
+                ("Avg SPS", "", "sps"),
+                ("Crash Rate", "crash_rate", ""),
+                ("Eval Reward", "eval_reward", ""),
+                ("Entropy", "entropy", ""),
+                ("Wall Time", "", "wall"),
+                ("Policy Loss", "policy_loss", ""),
+                ("Env Alt", "env_alt_mean", ""),
+                ("Env Airspeed", "env_airspeed_mean", ""),
+                ("Env Throttle", "env_throttle_mean", ""),
+            ];
+            for (label, key, mode) in kpis {
+                let (val_str, color) = match mode {
+                    "iters" => (run.records.len().to_string(), egui::Color32::from_gray(200)),
+                    "steps" => (run.total_env_steps().map(|v| format!("{:.1}M", v/1e6)).or_else(|| run.total_env_steps().map(|v| format!("{:.0}k", v/1e3))).unwrap_or_else(|| "—".into()), egui::Color32::from_gray(200)),
+                    "sps" => (run.mean_sps().map(fmt).unwrap_or_else(|| "—".into()), egui::Color32::from_gray(200)),
+                    "wall" => (fmt_duration(run.last_elapsed()), egui::Color32::from_gray(200)),
+                    "best" => {
+                        if let Some(v) = run.best(key) {
+                            (fmt(v), if v >= 0.0 { egui::Color32::from_rgb(115, 217, 134) } else { egui::Color32::from_rgb(242, 154, 51) })
+                        } else { ("—".into(), egui::Color32::GRAY) }
+                    }
+                    _ => {
+                        if let Some(v) = run.latest(key) {
+                            let c = if key == "crash_rate" {
+                                if v > 0.1 { egui::Color32::from_rgb(242, 115, 102) } else if v > 0.05 { egui::Color32::from_rgb(242, 204, 77) } else { egui::Color32::from_rgb(115, 217, 134) }
+                            } else if key == "mean_reward_per_step" || key == "eval_reward" {
+                                if v >= 0.0 { egui::Color32::from_rgb(115, 217, 134) } else { egui::Color32::from_rgb(242, 154, 51) }
+                            } else {
+                                egui::Color32::from_gray(220)
+                            };
+                            if key == "crash_rate" { (format!("{:.1}%", v*100.0), c) } else { (fmt(v), c) }
+                        } else { ("—".into(), egui::Color32::GRAY) }
+                    }
+                };
+                let frame = egui::Frame::group(ui.style()).inner_margin(6.0);
+                frame.show(ui, |ui| {
+                    ui.set_min_width(110.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(label).small().weak());
+                            if is_stale && label.contains("Reward") {
+                                ui.label(egui::RichText::new("STALE").small().color(egui::Color32::YELLOW));
+                            }
+                        });
+                        ui.label(egui::RichText::new(&val_str).strong().monospace().color(color));
+                        // mini sparkline
+                        if !key.is_empty() && mode != "best" {
+                            let sp = run.sparkline(key, 20);
+                            if !sp.is_empty() {
+                                let minv = sp.iter().copied().fold(f64::INFINITY, f64::min);
+                                let maxv = sp.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                                let span = (maxv - minv).max(1e-9);
+                                let w = 90.0f32; let h = 16.0f32;
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+                                let painter = ui.painter();
+                                for i in 0..sp.len().saturating_sub(1) {
+                                    let x1 = rect.left() + (i as f32 / (sp.len()-1).max(1) as f32) * rect.width();
+                                    let x2 = rect.left() + ((i+1) as f32 / (sp.len()-1).max(1) as f32) * rect.width();
+                                    let y1 = rect.bottom() - ((sp[i]-minv)/span) as f32 * rect.height();
+                                    let y2 = rect.bottom() - ((sp[i+1]-minv)/span) as f32 * rect.height();
+                                    painter.line_segment([egui::pos2(x1,y1), egui::pos2(x2,y2)], egui::Stroke::new(1.0, color));
+                                }
+                            }
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+            }
+            ui.label(egui::RichText::new(format!("· {}", pid)).small().weak());
+        });
+        if let Some(exp) = &self.kpi_expanded.clone() {
+            ui.separator();
+            ui.collapsing(format!("KPI Detail: {}", exp), |ui| {
+                if let Some(r) = self.runs.get(&pid) {
+                    let series = r.series_for(exp, XMode::Iteration);
+                    if !series.is_empty() {
+                        ui.label(format!("Points: {} | Min: {} | Max: {} | Last: {}",
+                            series.len(), fmt(series.iter().map(|p|p[1]).fold(f64::INFINITY,f64::min)),
+                            fmt(series.iter().map(|p|p[1]).fold(f64::NEG_INFINITY,f64::max)),
+                            fmt(series.last().unwrap()[1])));
+                    } else {
+                        ui.label("No data");
+                    }
+                }
+            });
+        }
+    }
+
+    fn table_panel(&mut self, ui: &mut egui::Ui) {
+        let key = self.metric_key();
+        let label = self.metric_label();
+        ui.heading(format!("Metrics table — {}", label));
+        ui.separator();
+        egui::ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new("metrics_table")
+                .striped(true)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    for h in ["run", "status", "iters", "latest", "best", "final", "wall", "env steps", "avg SPS"] {
+                        ui.strong(h);
+                    }
+                    ui.end_row();
+                    let rows: Vec<String> = self.runs.keys().cloned().collect();
+                    for id in rows {
+                        let Some(run) = self.runs.get(&id) else {
+                            continue;
+                        };
+                        if !self.run_is_selected(&id, run) {
+                            continue;
+                        }
+                        let series = run.series_for(key, XMode::Iteration);
+                        let latest = series.last().map(|p| p[1]);
+                        let best = series.iter().map(|p| p[1]).fold(f64::NAN, f64::max);
+                        let best_v = if best.is_nan() { None } else { Some(best) };
+                        ui.monospace(&id);
+                        ui.label(run.status());
+                        ui.label(run.records.len().to_string());
+                        ui.label(latest.map(fmt).unwrap_or_else(|| "—".into()));
+                        ui.label(best_v.map(fmt).unwrap_or_else(|| "—".into()));
+                        ui.label(latest.map(fmt).unwrap_or_else(|| "—".into()));
+                        ui.label(fmt_duration(run.last_elapsed()));
+                        ui.label(run.total_env_steps().map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into()));
+                        ui.label(run.mean_sps().map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into()));
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn bar_panel(&mut self, ui: &mut egui::Ui) {
+        let key = self.metric_key();
+        let label = self.metric_label();
+        ui.heading(format!("Bar chart — {}", label));
+        ui.separator();
+        let mut bars: Vec<(String, f64, egui::Color32)> = Vec::new();
+        let mut i = 0;
+        for (id, run) in self.runs.iter() {
+            if !self.run_is_selected(id, run) {
+                continue;
+            }
+            let series = run.series_for(key, XMode::Iteration);
+            if let Some(last) = series.last() {
+                bars.push((id.clone(), last[1], PALETTE[i % PALETTE.len()]));
+                i += 1;
+            }
+        }
+        if bars.is_empty() {
+            ui.label(egui::RichText::new("No data").weak());
+            return;
+        }
+        let max_v = bars.iter().map(|(_, v, _)| v.abs()).fold(0.0f64, f64::max).max(1e-9);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (name, val, color) in &bars {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(name).monospace().small());
+                    let w = (ui.available_width() * 0.6) as f32;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 18.0), egui::Sense::hover());
+                    let painter = ui.painter();
+                    let pct = ((val.abs() / max_v) as f32).clamp(0.0, 1.0);
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * pct, rect.height())),
+                        4.0,
+                        *color,
+                    );
+                    painter.text(
+                        rect.right_center() + egui::vec2(4.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        fmt(*val),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_gray(200),
+                    );
+                });
+            }
+        });
+    }
+
+    fn scatter_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Scatter");
+            ui.label(egui::RichText::new("Latest Reward vs Env Steps").weak());
+        });
+        ui.separator();
+        let mut pts: Vec<(f64, f64, String, egui::Color32)> = Vec::new();
+        let mut i = 0;
+        for (id, run) in self.runs.iter() {
+            if !self.run_is_selected(id, run) {
+                continue;
+            }
+            let steps = run.total_env_steps().unwrap_or(0.0);
+            let reward = run.series_for("mean_reward_per_step", XMode::Iteration).last().map(|p| p[1]).unwrap_or(0.0);
+            pts.push((steps, reward, id.clone(), PALETTE[i % PALETTE.len()]));
+            i += 1;
+        }
+        if pts.is_empty() {
+            ui.label(egui::RichText::new("No data").weak());
+            return;
+        }
+        let mut hover: Option<egui_plot::PlotPoint> = None;
+        Plot::new("scatter")
+            .legend(Legend::default())
+            .x_axis_label("Env steps")
+            .y_axis_label("Reward / step")
+            .show(ui, |plot_ui| {
+                for (x, y, name, color) in &pts {
+                    plot_ui.points(
+                        Points::new(name.clone(), PlotPoints::new(vec![[*x, *y]]))
+                            .color(*color)
+                            .radius(7.0)
+                            .filled(true),
+                    );
+                }
+                hover = plot_ui.pointer_coordinate();
+            });
+        if let Some(p) = hover {
+            ui.label(egui::RichText::new(format!("cursor → steps {} · reward {}", fmt(p.x), fmt(p.y))).monospace().weak());
+        }
     }
 }
 
@@ -1440,7 +2391,7 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"{"iteration":2,"elapsed_s":16.4,"steps_per_s":180.7,"policy_loss":-0.032,"value_loss":8.58,"entropy":3.67,"advantage_mean":-0.46,"advantage_std":2.88,"mean_reward_per_step":0.059,"mean_episode_steps":0.0,"crash_rate":0.0,"episodes_completed":0,"eval":{"alt_err":99.4,"spd_err":11.1,"total_reward":-4.26,"crashes":0,"episodes":1,"mean_steps":2000.0},"checkpoint":true}"#;
+    const SAMPLE: &str = r#"{"iteration":2,"elapsed_s":16.4,"steps_per_s":180.7,"policy_loss":-0.032,"value_loss":8.58,"entropy":3.67,"advantage_mean":-0.46,"advantage_std":2.88,"mean_reward_per_step":0.059,"mean_episode_steps":0.0,"crash_rate":0.0,"episodes_completed":0,"eval":{"alt_err":99.4,"spd_err":11.1,"total_reward":-4.26,"crashes":0,"episodes":1,"mean_steps":2000.0},"checkpoint":true,"env":{"samples":2048,"alt_mean":1200.5,"alt_min":1100.0,"alt_max":1300.0,"airspeed_mean":60.2,"climb_mean":0.4,"ground_speed_mean":61.0,"roll_abs_mean":0.1,"pitch_abs_mean":0.05,"aoa_mean":0.02,"wind_mean":4.5,"wind_max":9.0,"throttle_mean":0.55,"surface_effort_mean":2.5,"baro_err_abs_mean":0.8,"airspeed_err_abs_mean":0.3,"battery_pct_min":91.0,"weather":{"samples":2048,"wind_speed_mean":5.0,"gust_rms_mean":1.2,"gust_rms_max":3.4,"turbulence_mean":1.0,"severity_mean":1.0,"rain_mean":0.2,"visibility_min":5000.0,"updraft_abs_mean":0.4,"shear_abs_mean":0.01}}}"#;
 
     #[test]
     fn parses_full_record_and_flattens_metrics() {
@@ -1450,12 +2401,29 @@ mod tests {
         assert!((rec.metric("mean_reward_per_step").unwrap() - 0.059).abs() < 1e-9);
         assert!((rec.metric("alt_err").unwrap() - 99.4).abs() < 1e-9);
         assert!((rec.metric("eval_reward").unwrap() + 4.26).abs() < 1e-9);
+        // Ground-truth env block flattens to `env_*` / `weather_*` keys.
+        assert!((rec.metric("env_alt_mean").unwrap() - 1200.5).abs() < 1e-9);
+        assert!((rec.metric("env_airspeed_mean").unwrap() - 60.2).abs() < 1e-9);
+        assert!((rec.metric("env_throttle_mean").unwrap() - 0.55).abs() < 1e-9);
+        assert!((rec.metric("env_battery_pct_min").unwrap() - 91.0).abs() < 1e-9);
+        assert!((rec.metric("weather_gust_rms_max").unwrap() - 3.4).abs() < 1e-9);
+        assert!((rec.metric("weather_visibility_min").unwrap() - 5000.0).abs() < 1e-9);
         // Non-eval iteration has no eval metric.
         let no_eval: MetricsRecord =
             serde_json::from_str(r#"{"iteration":3,"mean_reward_per_step":0.5}"#).unwrap();
         assert_eq!(no_eval.metric("alt_err"), None);
         assert_eq!(no_eval.metric("mean_reward_per_step"), Some(0.5));
         assert_eq!(no_eval.metric("entropy"), None);
+        // Pre-env-telemetry runs parse fine and report no env data.
+        assert_eq!(no_eval.metric("env_alt_mean"), None);
+        assert_eq!(no_eval.metric("weather_wind_speed_mean"), None);
+        // A run without a weather system still reports flight env metrics.
+        let no_weather: MetricsRecord = serde_json::from_str(
+            r#"{"iteration":4,"env":{"samples":10,"alt_mean":950.0,"throttle_mean":0.4}}"#,
+        )
+        .unwrap();
+        assert!((no_weather.metric("env_alt_mean").unwrap() - 950.0).abs() < 1e-9);
+        assert_eq!(no_weather.metric("weather_gust_rms_max"), None);
     }
 
     #[test]
@@ -1736,12 +2704,14 @@ mod tests {
                 app.show_checkpoints = true;
                 app.seed_bands = true;
                 app.x_mode = XMode::Steps;
+                app.view = ViewMode::Detail;
+                app.detail_tab = DetailTab::Chart;
                 let _ = egui::Context::default().run_ui(Default::default(), |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         app.plot_panel(ui);
                     });
                 });
-                app.view = ViewMode::Heatmap;
+                app.detail_tab = DetailTab::Heatmap;
                 let _ = egui::Context::default().run_ui(Default::default(), |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         app.heatmap_panel(ui);
@@ -1876,5 +2846,374 @@ mod tests {
         assert_eq!(fmt_duration(Some(125.0)), "2m 05s");
         assert_eq!(fmt_duration(None), "—");
         assert_eq!(short_backend(Some("burn_ndarray::backend::NdArrayDevice")), "NdArrayDevice");
+    }
+
+    // ---- Tab grouping -------------------------------------------------
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rl_dash_tabs_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Create `root/<id>` with the given manifest and one metric record.
+    fn make_run_at(root: &Path, id: &str, manifest: Option<&str>) -> RunModel {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(m) = manifest {
+            std::fs::write(dir.join("run.json"), m).unwrap();
+        }
+        std::fs::write(
+            dir.join("metrics.jsonl"),
+            "{\"iteration\":0,\"mean_reward_per_step\":0.1}\n",
+        )
+        .unwrap();
+        let mut run = RunModel::new(dir);
+        run.poll();
+        run
+    }
+
+    fn manifest(name: Option<&str>, hidden: u32, backend: &str) -> String {
+        let args = match name {
+            Some(n) => format!(r#"["rl_agent","--name","{n}"]"#),
+            None => r#"["rl_agent"]"#.to_string(),
+        };
+        format!(
+            r#"{{"status":"completed","algo":"ppo","backend":"{backend}",
+                "network":{{"obs_dim":19,"hidden":{hidden},"action_dim":4}},
+                "command_line":{args}}}"#
+        )
+    }
+
+    #[test]
+    fn model_name_reads_both_flag_forms() {
+        let root = temp_root("flagforms");
+        let spaced = make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        assert_eq!(spaced.explicit_model_name().as_deref(), Some("alpha"));
+
+        let eq = make_run_at(
+            &root,
+            "20260102_000000_000_ppo_seed42",
+            Some(
+                r#"{"command_line":["rl_agent","--name=beta"],"algo":"ppo",
+                    "backend":"burn_ndarray::backend::NdArrayDevice"}"#,
+            ),
+        );
+        assert_eq!(eq.explicit_model_name().as_deref(), Some("beta"));
+
+        let unnamed = make_run_at(&root, "20260103_000000_000_ppo_seed42", None);
+        assert_eq!(unnamed.explicit_model_name(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_id_label_recovers_the_optional_name_suffix() {
+        let root = temp_root("idlabel");
+        let labelled = make_run_at(
+            &root,
+            "20260923_104623_870_ppo_seed42_smoke",
+            Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        assert_eq!(labelled.run_id_label().as_deref(), Some("smoke"));
+
+        let plain = make_run_at(
+            &root,
+            "20260923_104623_870_ppo_seed42",
+            Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        assert_eq!(plain.run_id_label(), None, "no suffix → no label");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn model_tabs_prefer_explicit_names_then_fall_back() {
+        let root = temp_root("modeltabs");
+        make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42_old",
+            Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260102_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260103_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260104_000000_000_ppo_seed42",
+            Some(&manifest(Some("beta"), 256, "burn_ndarray::backend::NdArrayDevice")),
+        );
+
+        let app = DashApp::new(root.clone(), 0);
+        let tabs = app.group_tabs();
+        let keys: Vec<&str> = tabs.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["old", "alpha", "beta"], "one tab per model, in first-seen order");
+        assert_eq!(tabs[1].count, 2, "both alpha runs share one tab");
+        assert_eq!(tabs[0].label, "old", "run-id suffix becomes the model label");
+
+        // Unnamed runs with no suffix group by their architecture signature.
+        let root2 = temp_root("modelfallback");
+        make_run_at(
+            &root2,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        let fallback = DashApp::new(root2.clone(), 0);
+        assert_eq!(
+            fallback.group_tabs()[0].key,
+            "ppo · h128 · NdArrayDevice",
+            "no name → architecture label"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    #[test]
+    fn architecture_tabs_split_on_shape_and_backend() {
+        let root = temp_root("archtabs");
+        make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260102_000000_000_ppo_seed42",
+            Some(&manifest(Some("beta"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260103_000000_000_ppo_seed42",
+            Some(&manifest(Some("gamma"), 256, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260104_000000_000_ppo_seed42",
+            Some(&manifest(Some("delta"), 128, "cubecl_wgpu::device::WgpuDevice")),
+        );
+
+        let mut app = DashApp::new(root.clone(), 0);
+        app.group_mode = GroupMode::Architecture;
+        let tabs = app.group_tabs();
+        assert_eq!(tabs.len(), 3, "shape/backend variants get separate tabs");
+        assert_eq!(tabs[0].count, 2, "alpha + beta share PPO/h128/CPU");
+        assert_eq!(tabs[0].key, "ppo · h128 · NdArrayDevice");
+        assert_eq!(tabs[2].key, "ppo · h128 · WgpuDevice");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_mode_uses_compact_labels_and_one_tab_per_run() {
+        let root = temp_root("runtabs");
+        make_run_at(&root, "20260101_101112_000_ppo_seed42", Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")));
+        make_run_at(&root, "20260102_131415_000_ppo_seed42", Some(&manifest(None, 128, "burn_ndarray::backend::NdArrayDevice")));
+
+        let mut app = DashApp::new(root.clone(), 0);
+        app.group_mode = GroupMode::Run;
+        let tabs = app.group_tabs();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].label, "10:11:12 · ppo_seed42");
+        assert_eq!(tabs[1].label, "13:14:15 · ppo_seed42");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn active_tab_filters_selection_for_every_view() {
+        let root = temp_root("filter");
+        make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260102_000000_000_ppo_seed42",
+            Some(&manifest(Some("beta"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+
+        let mut app = DashApp::new(root.clone(), 0);
+        assert_eq!(app.active_run_ids().len(), 2, "All tab sees every run");
+
+        app.active_group = Some("beta".into());
+        let beta_id = "20260102_000000_000_ppo_seed42".to_string();
+        let alpha_id = "20260101_000000_000_ppo_seed42".to_string();
+        assert_eq!(app.active_run_ids(), vec![beta_id.clone()]);
+        assert!(app.run_is_selected(&beta_id, &app.runs[&beta_id]));
+        assert!(
+            !app.run_is_selected(&alpha_id, &app.runs[&alpha_id]),
+            "runs outside the active tab are filtered even when checked"
+        );
+
+        // Select all / Uncheck all only touch the active tab's runs.
+        for id in app.active_run_ids() {
+            app.visible.insert(id, true);
+        }
+        app.visible.insert(alpha_id.clone(), true);
+        for id in app.active_run_ids() {
+            app.visible.insert(id, false);
+        }
+        assert!(!app.visible[&beta_id]);
+        assert!(app.visible[&alpha_id], "other tabs keep their checkbox state");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn switching_group_mode_and_missing_group_fall_back_to_all() {
+        let root = temp_root("fallback");
+        make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+
+        let mut app = DashApp::new(root.clone(), 0);
+        app.active_group = Some("alpha".into());
+        app.ensure_active_group();
+        assert_eq!(app.active_group.as_deref(), Some("alpha"), "live group is kept");
+
+        app.active_group = Some("deleted-model".into());
+        app.ensure_active_group();
+        assert_eq!(app.active_group, None, "removed group falls back to All");
+
+        app.active_group = Some("alpha".into());
+        app.group_mode = GroupMode::Run;
+        app.ensure_active_group();
+        assert_eq!(app.active_group, None, "a key from another mode is not valid");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn short_run_label_handles_nonstandard_ids() {
+        assert_eq!(
+            short_run_label("20260923_104623_870_ppo_seed42_smoke"),
+            "10:46:23 · ppo_seed42_smoke"
+        );
+        assert_eq!(short_run_label("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    #[test]
+    fn tab_bar_and_all_filtered_views_render_for_the_active_tab() {
+        let root = temp_root("render");
+        make_run_at(
+            &root,
+            "20260101_000000_000_ppo_seed42",
+            Some(&manifest(Some("alpha"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+        make_run_at(
+            &root,
+            "20260102_000000_000_ppo_seed42",
+            Some(&manifest(Some("beta"), 128, "burn_ndarray::backend::NdArrayDevice")),
+        );
+
+        let mut app = DashApp::new(root.clone(), 0);
+        app.active_group = Some("alpha".into());
+        let alpha_id = "20260101_000000_000_ppo_seed42";
+        let beta_id = "20260102_000000_000_ppo_seed42";
+
+        let out = egui::Context::default().run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.group_tab_bar(ui);
+                app.kpi_strip(ui);
+                app.plot_panel(ui);
+                app.summary_table(ui);
+                app.heatmap_panel(ui);
+                app.table_panel(ui);
+                app.bar_panel(ui);
+                app.scatter_panel(ui);
+            });
+        });
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        let joined = texts.join("\n");
+        assert!(joined.contains("All (2)"), "All tab is always available");
+        assert!(joined.contains("alpha (1)") && joined.contains("beta (1)"));
+        assert!(
+            joined.contains(alpha_id),
+            "summary/table views list the active tab's run"
+        );
+        assert!(
+            !joined.contains(beta_id),
+            "views must not list runs from another tab"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn env_metrics_render_and_drive_the_kpi_strip() {
+        let root = temp_root("env");
+        let id = "20260101_000000_000_ppo_seed42_env";
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("metrics.jsonl"),
+            concat!(
+                r#"{"iteration":0,"mean_reward_per_step":0.1,"env":{"samples":10,"#,
+                r#""alt_mean":1200.5,"alt_min":1100.0,"alt_max":1300.0,"#,
+                r#""airspeed_mean":60.2,"climb_mean":0.4,"ground_speed_mean":61.0,"#,
+                r#""roll_abs_mean":0.1,"pitch_abs_mean":0.05,"aoa_mean":0.02,"#,
+                r#""wind_mean":4.5,"wind_max":9.0,"throttle_mean":0.55,"#,
+                r#""surface_effort_mean":2.5,"baro_err_abs_mean":0.8,"#,
+                r#""airspeed_err_abs_mean":0.3,"battery_pct_min":91.0,"#,
+                r#""weather":{"samples":10,"wind_speed_mean":5.0,"#,
+                r#""gust_rms_mean":1.2,"gust_rms_max":3.4,"turbulence_mean":1.0,"#,
+                r#""severity_mean":1.0,"rain_mean":0.2,"visibility_min":5000.0,"#,
+                r#""updraft_abs_mean":0.4,"shear_abs_mean":0.01}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let env_idx = METRICS
+            .iter()
+            .position(|(k, _)| *k == "env_alt_mean")
+            .expect("env altitude is registered");
+        let mut app = DashApp::new(root.clone(), env_idx);
+        let out = egui::Context::default().run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.kpi_strip(ui);
+                app.plot_panel(ui);
+            });
+        });
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        let joined = texts.join("\n");
+        assert!(
+            joined.contains("Env altitude (m)"),
+            "plot heading should name the env series, got: {joined}"
+        );
+        assert!(
+            joined.contains("Env Alt"),
+            "KPI strip should show the env altitude card, got: {joined}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

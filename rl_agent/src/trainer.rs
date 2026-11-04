@@ -606,12 +606,38 @@ pub fn run_with_observer<B: AutodiffBackend<FloatElem = f32>>(
     config_path: &str,
     obs: &mut TrainObserver,
 ) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
+    let mut env = AvionicsEnv::new(config_path, tcfg.env_dt, tcfg.env_max_steps)?;
+    run_with_env(
+        tcfg, telemetry, ncfg, spec, device, &mut env,
+        None, None, None, None, obs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
+    tcfg: &TrainerConfig,
+    telemetry: &TelemetryConfig,
+    ncfg: &NetConfig,
+    spec: &AlgoSpec,
+    device: &B::Device,
+    env: &mut dyn EnvSpec,
+    mission: Option<&crate::contracts::MissionSummary>,
+    expert: Option<&crate::policy::ExpertCard>,
+    reward_profile: Option<&str>,
+    specialization: Option<&str>,
+    obs: &mut TrainObserver,
+) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
     assert!(tcfg.rollout_steps > 0, "rollout_steps must be > 0");
 
-    let mut env = AvionicsEnv::new(config_path, tcfg.env_dt, tcfg.env_max_steps)?;
     let mut agent: Box<dyn Algorithm<B>> = make_algorithm(spec, ncfg, tcfg.seed, device);
     let mut normalizer = RunningNormalizer::new(ncfg.obs_dim);
     let (gamma, lambda) = agent.td_params();
+
+    let contract = if mission.is_some() {
+        crate::contracts::MISSION_CONTRACT
+    } else {
+        "avionics"
+    };
 
     let meta = RunMeta {
         algo: agent.id(),
@@ -619,6 +645,11 @@ pub fn run_with_observer<B: AutodiffBackend<FloatElem = f32>>(
         tcfg,
         ncfg,
         spec,
+        mission,
+        reward_profile,
+        specialization,
+        contract,
+        expert,
     };
     let mut tele = TelemetryWriter::start(telemetry, &meta)?;
     if let Some(w) = tele.as_ref() {
@@ -776,7 +807,7 @@ pub fn run_with_observer<B: AutodiffBackend<FloatElem = f32>>(
                                 terminated: outcome.terminated,
                                 truncated: outcome.truncated,
                                 termination: episode_termination(
-                                    &env,
+                                    env,
                                     outcome.terminated,
                                     outcome.truncated,
                                 ),
@@ -836,7 +867,7 @@ pub fn run_with_observer<B: AutodiffBackend<FloatElem = f32>>(
         if force_eval || (tcfg.eval_every > 0 && it % tcfg.eval_every == 0) {
             last_eval = Some(evaluate(
                 agent.as_ref(),
-                &mut env,
+                env,
                 &normalizer,
                 tcfg.eval_episodes,
                 tcfg.env_max_steps,
@@ -1662,6 +1693,7 @@ mod tests {
         assert_eq!(cp.algorithm.id(), crate::algo::ALGO_PPO);
         match cp.algorithm.spec() {
             AlgoSpec::Ppo { config } => assert_eq!(config.minibatch_size, 16),
+            _ => (),
         }
         assert_eq!(cp.normalizer.dim, AVIONICS_OBS_DIM);
 
@@ -1706,6 +1738,7 @@ mod tests {
         std::fs::remove_file(std::path::Path::new(&dir).join("algo.json")).expect("remove algo.json");
         let ppo_cfg = match spec {
             AlgoSpec::Ppo { config } => config,
+            other => panic!("expected ppo, got {other:?}"),
         };
         std::fs::write(
             std::path::Path::new(&dir).join("ppo.json"),
@@ -1717,6 +1750,7 @@ mod tests {
         assert_eq!(cp.algorithm.id(), crate::algo::ALGO_PPO);
         match cp.algorithm.spec() {
             AlgoSpec::Ppo { config } => assert_eq!(config.minibatch_size, PpoConfig::default().minibatch_size),
+            _ => (),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3,18 +3,21 @@ extends Control
 ## The entire UI is built procedurally so the scene file stays minimal.
 
 # ── Colour palette ───────────────────────────────────────────────────
-const BG_DARK      := Color(0.035, 0.05, 0.085)
-const BG_PANEL     := Color(0.07, 0.09, 0.14)
-const BG_CARD      := Color(0.09, 0.11, 0.17)
-const BG_CARD_HVR  := Color(0.12, 0.15, 0.22)
-const ACCENT       := Color(0.30, 0.65, 0.95)
-const ACCENT_DIM   := Color(0.22, 0.45, 0.68)
-const TEXT_LIGHT   := Color(0.88, 0.92, 0.97)
-const TEXT_MID     := Color(0.55, 0.63, 0.75)
-const TEXT_DIM     := Color(0.38, 0.46, 0.58)
-const TEXT_SPEC    := Color(0.45, 0.75, 0.95)
-const BORDER       := Color(0.15, 0.19, 0.28)
-const BORDER_LIGHT := Color(0.20, 0.26, 0.36)
+# Graphite cockpit surfaces with a single ice-blue signal colour. Amber is
+# reserved for the wind arrow in the terrain preview, not general chrome.
+const BG_DARK      := Color(0.043, 0.055, 0.071)
+const BG_PANEL     := Color(0.067, 0.086, 0.110)
+const BG_CARD      := Color(0.086, 0.110, 0.141)
+const BG_CARD_HVR  := Color(0.114, 0.145, 0.184)
+const BG_NAV       := Color(0.051, 0.067, 0.086)
+const ACCENT       := Color(0.498, 0.741, 0.886)
+const ACCENT_DIM   := Color(0.353, 0.553, 0.686)
+const TEXT_LIGHT   := Color(0.902, 0.933, 0.961)
+const TEXT_MID     := Color(0.647, 0.706, 0.776)
+const TEXT_DIM     := Color(0.478, 0.541, 0.616)
+const TEXT_SPEC    := Color(0.639, 0.824, 0.933)
+const BORDER       := Color(0.137, 0.176, 0.220)
+const BORDER_LIGHT := Color(0.196, 0.251, 0.310)
 
 # ── Aircraft data (mirrors the TOML configs) ────────────────────────
 const AIRCRAFT := {
@@ -43,6 +46,14 @@ const AIRCRAFT := {
 		"cl0": 0.15, "cla": 4.9, "cd0": 0.0170, "k": 0.038,
 		"mach_crit": 0.78,
 	},
+	"m_sweep_mini": {
+		"role": "Variable-Sweep Delivery Drone",
+		"desc": "Compact custom pusher with variable-sweep outer wings and a skyhook recovery system. Sweep back for efficient cruise/transit, unsweep for approach/capture.",
+		"mass": 11.0, "span": 2.7, "area": 1.22, "chord": 0.452,
+		"propulsion": "Electric pusher propeller",
+		"thrust": 152.0, "power": 24500.0,
+		"cl0": 0.27, "cla": 4.8, "cd0": 0.0205, "k": 0.039,
+	},
 }
 
 ## Per-aircraft 3D model alignment (mirrors `aircraft_view.gd`). `rot` brings
@@ -66,9 +77,14 @@ const MODEL_ALIGN := {
 		"procedural": true,
 		"cam_dist": 32.0,
 	},
+	"m_sweep_mini": {
+		"procedural": true,
+		"cam_dist": 14.0,
+	},
 }
 
 const _EngineFactoryScript := preload("res://scripts/engine_factory.gd")
+const _MSweepFactoryScript := preload("res://scripts/m_sweep_factory.gd")
 const _TerrainGeneratorScript := preload("res://scripts/terrain/terrain_generator.gd")
 const _RlTrainerScript := preload("res://scripts/rl_trainer.gd")
 
@@ -147,6 +163,11 @@ var _terrain_settings: Dictionary = {}
 var _terrain_summary: Label = null
 var _terrain_procedural_controls: Array = []
 
+# ── Home-tab state ──────────────────────────────────────────────────
+var _home_primary_btn: Button = null
+var _home_terrain_value: Label = null
+var _home_wind_value: Label = null
+
 # ── Terrain-tab live preview state ──────────────────────────────────
 var _terrain_viewport: SubViewport = null
 var _terrain_viewport_cam: Camera3D = null
@@ -163,13 +184,26 @@ var _ac_spin_root: Dictionary = {}    # name → Node3D (model wrapper that rota
 
 # ── Build ────────────────────────────────────────────────────────────
 func _ready() -> void:
+	# Keep the console layout intact on smaller desktop windows. The home
+	# split needs ~1200 px of content width; below that the preview and the
+	# launch rail would collide.
+	var win := get_window()
+	if win != null:
+		win.min_size = Vector2i(1280, 800)
 	_terrain_settings = _load_terrain_settings()
 	_build_ui()
 	_switch_page("Home")
+	if _home_primary_btn != null:
+		_home_primary_btn.grab_focus()
 
 ## Drive the animated 3D previews: spin the aircraft turntables on the Aircraft
 ## page and gently orbit + refresh the terrain preview on the Terrain page.
 func _process(delta: float) -> void:
+	if _current_page == "Home":
+		var home_root: Node3D = _ac_spin_root.get("home")
+		if home_root != null:
+			home_root.rotation.y += 0.22 * delta
+		return
 	if _current_page == "Aircraft":
 		var speed := 0.35 * delta
 		for name in _ac_spin_root:
@@ -179,6 +213,34 @@ func _process(delta: float) -> void:
 		return
 	if _current_page == "Terrain":
 		_update_terrain_preview_camera(delta)
+
+## Home-screen shortcuts. They only act on the Home tab so they cannot fire
+## while a text field or another page has focus.
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	if _activate_home_shortcut((event as InputEventKey).keycode):
+		get_viewport().set_input_as_handled()
+
+func _activate_home_shortcut(keycode: Key) -> bool:
+	if _current_page != "Home":
+		return false
+	match keycode:
+		KEY_1:
+			_launch_flight_with_terrain()
+		KEY_2:
+			_launch_wind_tunnel()
+		KEY_3:
+			_switch_page("Aircraft")
+		KEY_4:
+			_switch_page("Terrain")
+		KEY_5:
+			_switch_page("RL")
+		KEY_6:
+			_switch_page("About")
+		_:
+			return false
+	return true
 
 func _build_ui() -> void:
 	# Full-screen dark background
@@ -226,43 +288,65 @@ func _build_ui() -> void:
 # ── Navigation bar ───────────────────────────────────────────────────
 func _build_nav_bar() -> PanelContainer:
 	var bar := PanelContainer.new()
-	bar.custom_minimum_size.y = 56
+	bar.custom_minimum_size.y = 64
 
 	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.04, 0.06, 0.10)
-	style.border_width_bottom = 2
+	style.bg_color = BG_NAV
+	style.border_width_bottom = 1
 	style.border_color = BORDER
 	style.content_margin_left = 40
 	style.content_margin_right = 40
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
 	bar.add_theme_stylebox_override("panel", style)
 
-	var hflow := HBoxContainer.new()
-	hflow.add_theme_constant_override("separation", 8)
-	hflow.alignment = BoxContainer.ALIGNMENT_CENTER
-	bar.add_child(hflow)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	bar.add_child(row)
 
-	# Project title
+	# Brand mark + wordmark. The small accent bar is the only chrome the
+	# nav needs; no gradient or glow.
+	var brand := HBoxContainer.new()
+	brand.add_theme_constant_override("separation", 10)
+	row.add_child(brand)
+
+	var mark := ColorRect.new()
+	mark.color = ACCENT
+	mark.custom_minimum_size = Vector2(3, 22)
+	mark.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	brand.add_child(mark)
+
 	var title := Label.new()
-	title.text = "PROJECT RAPTOR M86"
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", ACCENT)
+	title.text = "RAPTOR M86"
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", TEXT_LIGHT)
 	title.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	hflow.add_child(title)
+	brand.add_child(title)
+
+	var tag := Label.new()
+	tag.text = "FLIGHT LAB"
+	tag.add_theme_font_size_override("font_size", 11)
+	tag.add_theme_color_override("font_color", TEXT_DIM)
+	tag.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	brand.add_child(tag)
 
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hflow.add_child(spacer)
+	row.add_child(spacer)
 
 	# Tab buttons
 	for tab_name in TABS:
 		var btn := Button.new()
 		btn.text = tab_name
-		btn.custom_minimum_size = Vector2(120, 36)
-		btn.add_theme_font_size_override("font_size", 16)
+		btn.custom_minimum_size = Vector2(100, 44)
+		btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		btn.focus_mode = Control.FOCUS_ALL
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		btn.add_theme_font_size_override("font_size", 15)
 		btn.add_theme_color_override("font_color", TEXT_MID)
 		btn.add_theme_color_override("font_hover_color", TEXT_LIGHT)
+		btn.add_theme_color_override("font_pressed_color", ACCENT)
+		btn.add_theme_color_override("font_focus_color", TEXT_LIGHT)
 
 		var btn_style := StyleBoxFlat.new()
 		btn_style.bg_color = Color.TRANSPARENT
@@ -270,6 +354,8 @@ func _build_nav_bar() -> PanelContainer:
 		btn_style.corner_radius_top_right = 6
 		btn_style.corner_radius_bottom_left = 6
 		btn_style.corner_radius_bottom_right = 6
+		btn_style.border_width_bottom = 2
+		btn_style.border_color = Color.TRANSPARENT
 		btn_style.content_margin_left = 16
 		btn_style.content_margin_right = 16
 		btn_style.content_margin_top = 6
@@ -277,31 +363,52 @@ func _build_nav_bar() -> PanelContainer:
 		btn.add_theme_stylebox_override("normal", btn_style)
 
 		var btn_hover := btn_style.duplicate()
-		btn_hover.bg_color = Color(0.12, 0.15, 0.22)
+		btn_hover.bg_color = BG_CARD_HVR
 		btn.add_theme_stylebox_override("hover", btn_hover)
 
 		var btn_active := btn_style.duplicate()
-		btn_active.bg_color = Color(0.16, 0.22, 0.32)
+		btn_active.bg_color = Color.TRANSPARENT
 		btn_active.border_width_bottom = 2
 		btn_active.border_color = ACCENT
+
+		var btn_active_hover := btn_active.duplicate()
+		btn_active_hover.bg_color = BG_CARD_HVR
+
+		var btn_focus := StyleBoxFlat.new()
+		btn_focus.bg_color = Color.TRANSPARENT
+		btn_focus.border_width_left = 1
+		btn_focus.border_width_right = 1
+		btn_focus.border_width_top = 1
+		btn_focus.border_width_bottom = 1
+		btn_focus.border_color = ACCENT
+		btn_focus.corner_radius_top_left = 7
+		btn_focus.corner_radius_top_right = 7
+		btn_focus.corner_radius_bottom_left = 7
+		btn_focus.corner_radius_bottom_right = 7
+		btn_focus.expand_margin_left = 1
+		btn_focus.expand_margin_right = 1
+		btn_focus.expand_margin_top = 1
+		btn_focus.expand_margin_bottom = 1
+		btn.add_theme_stylebox_override("focus", btn_focus)
 
 		_tab_styles[tab_name] = {
 			"normal": btn_style,
 			"hover": btn_hover,
 			"active": btn_active,
+			"active_hover": btn_active_hover,
 		}
 
 		btn.pressed.connect(_bind_tab(tab_name))
 		_tab_buttons[tab_name] = btn
-		hflow.add_child(btn)
+		row.add_child(btn)
 
-	# Version label
+	# Build stamp
 	var ver := Label.new()
-	ver.text = "v0.1  |  Rust + Godot 4"
-	ver.add_theme_font_size_override("font_size", 12)
+	ver.text = "v0.1"
+	ver.add_theme_font_size_override("font_size", 11)
 	ver.add_theme_color_override("font_color", TEXT_DIM)
 	ver.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	hflow.add_child(ver)
+	row.add_child(ver)
 
 	return bar
 
@@ -313,151 +420,536 @@ func _switch_page(name: String) -> void:
 	_current_page = name
 	for key in _pages:
 		_pages[key].visible = (key == name)
-	# Pause 3D preview rendering unless its page is active.
+	# Pause 3D preview rendering unless its page is active. The home preview
+	# and the Aircraft-tab turntables share this registry under distinct keys.
 	var aircraft_active := (name == "Aircraft")
+	var home_active := (name == "Home")
 	for key in _ac_viewports:
 		var vp: SubViewport = _ac_viewports[key]
 		if vp != null:
+			var active: bool = (
+				(key == "home" and home_active)
+				or (key != "home" and aircraft_active))
 			vp.render_target_update_mode = (
-				SubViewport.UPDATE_ALWAYS if aircraft_active
+				SubViewport.UPDATE_ALWAYS if active
 				else SubViewport.UPDATE_DISABLED)
 	if _terrain_viewport != null:
 		_terrain_viewport.render_target_update_mode = (
 			SubViewport.UPDATE_ALWAYS if name == "Terrain"
 			else SubViewport.UPDATE_DISABLED)
+	if name == "Home":
+		_refresh_home_setup()
 	# Update tab button styles
 	for key in _tab_buttons:
 		var styles: Dictionary = _tab_styles[key]
 		if key == name:
 			_tab_buttons[key].add_theme_stylebox_override("normal", styles["active"])
+			_tab_buttons[key].add_theme_stylebox_override("hover", styles["active_hover"])
 			_tab_buttons[key].add_theme_color_override("font_color", ACCENT)
 			_tab_buttons[key].add_theme_color_override("font_hover_color", ACCENT)
+			_tab_buttons[key].add_theme_color_override("font_focus_color", ACCENT)
 		else:
 			_tab_buttons[key].add_theme_stylebox_override("normal", styles["normal"])
+			_tab_buttons[key].add_theme_stylebox_override("hover", styles["hover"])
 			_tab_buttons[key].add_theme_color_override("font_color", TEXT_MID)
 			_tab_buttons[key].add_theme_color_override("font_hover_color", TEXT_LIGHT)
+			_tab_buttons[key].add_theme_color_override("font_focus_color", TEXT_LIGHT)
 
 # ── HOME PAGE ────────────────────────────────────────────────────────
+## The home tab is a launch console rather than a marketing hero: a live
+## turntable of the primary airframe, the actual terrain/wind setup that the
+## next flight will use, and a rail of large, keyboard-reachable destinations.
 func _build_home_page() -> Control:
 	var page := MarginContainer.new()
-	page.add_theme_constant_override("margin_top", 20)
+	page.add_theme_constant_override("margin_top", 8)
 
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 32)
-	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_theme_constant_override("separation", 20)
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	page.add_child(vbox)
 
-	# Hero title
-	var hero := Label.new()
-	hero.text = "PROJECT RAPTOR M86"
-	hero.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hero.add_theme_font_size_override("font_size", 48)
-	hero.add_theme_color_override("font_color", TEXT_LIGHT)
-	vbox.add_child(hero)
+	vbox.add_child(_build_home_header())
 
-	var subtitle := Label.new()
-	subtitle.text = "6-DOF fixed-wing flight dynamics engine — Rust physics, Godot visualization"
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.add_theme_font_size_override("font_size", 18)
-	subtitle.add_theme_color_override("font_color", TEXT_MID)
-	vbox.add_child(subtitle)
+	var main := HBoxContainer.new()
+	main.add_theme_constant_override("separation", 22)
+	main.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(main)
+	main.add_child(_build_primary_flight_panel())
+	main.add_child(_build_home_rail())
 
-	vbox.add_child(HSeparator.new())
-
-	# Mode cards in an HBox
-	var card_row := HBoxContainer.new()
-	card_row.add_theme_constant_override("separation", 24)
-	card_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	card_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_child(card_row)
-
-	card_row.add_child(_make_mode_card(
-		"Flight Simulator",
-		"Take off at 800 m / 60 m/s trimmed cruise, clear of the generated\nmountains. Chase camera, full control surface authority, flaps, trim,\nautopilot hold, wind.",
-		"res://scenes/flight_sim.tscn"
-	))
-	card_row.add_child(_make_mode_card(
-		"Wind Tunnel",
-		"Fix the aircraft in place and visualise the smoke flow field.\nFlow lines react to the real CL — upwash, downwash, tip vortices.",
-		"res://scenes/wind_tunnel.tscn"
-	))
-
-	# Bottom row: Quit + hint
-	var bottom := HBoxContainer.new()
-	bottom.alignment = BoxContainer.ALIGNMENT_CENTER
-	bottom.add_theme_constant_override("separation", 24)
-	vbox.add_child(bottom)
-
-	var btn_quit := _make_action_button("Quit", 140, 44)
-	btn_quit.pressed.connect(get_tree().quit)
-	bottom.add_child(btn_quit)
-
-	var hint := Label.new()
-	hint.text = "Esc returns to this menu from any mode"
-	hint.add_theme_font_size_override("font_size", 14)
-	hint.add_theme_color_override("font_color", TEXT_DIM)
-	hint.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	bottom.add_child(hint)
-
+	vbox.add_child(_build_home_footer())
 	return page
 
-func _make_mode_card(card_title: String, card_desc: String, scene_path: String) -> PanelContainer:
+func _build_home_header() -> Control:
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 28)
+	header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var copy := VBoxContainer.new()
+	copy.add_theme_constant_override("separation", 6)
+	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(copy)
+
+	copy.add_child(_make_eyebrow("SIX-DEGREE-OF-FREEDOM FLIGHT DYNAMICS"))
+
+	var title := Label.new()
+	title.text = "Take the aircraft up."
+	title.add_theme_font_size_override("font_size", 38)
+	title.add_theme_color_override("font_color", TEXT_LIGHT)
+	copy.add_child(title)
+
+	var sub := Label.new()
+	sub.text = "The Rust core integrates the airframe at 60 Hz; Godot renders the range, weather, and control response. Start in a trimmed cruise or open a test bench."
+	sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sub.add_theme_font_size_override("font_size", 15)
+	sub.add_theme_color_override("font_color", TEXT_MID)
+	sub.custom_minimum_size.x = 560
+	sub.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	copy.add_child(sub)
+
+	var facts := HBoxContainer.new()
+	facts.add_theme_constant_override("separation", 18)
+	facts.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	header.add_child(facts)
+	_add_fact(facts, "6-DOF", "rigid body")
+	_add_fact_rule(facts)
+	_add_fact(facts, "60 Hz", "RK4 step")
+	_add_fact_rule(facts)
+	_add_fact(facts, "4", "airframes")
+
+	return header
+
+func _build_primary_flight_panel() -> Control:
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(380, 200)
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	var style := StyleBoxFlat.new()
-	style.bg_color = BG_CARD
-	style.border_width_left = 2
-	style.border_width_right = 2
-	style.border_width_top = 2
-	style.border_width_bottom = 2
+	style.bg_color = BG_PANEL
+	style.border_width_left = 1
+	style.border_width_right = 1
+	style.border_width_top = 1
+	style.border_width_bottom = 1
 	style.border_color = BORDER
-	style.corner_radius_top_left = 10
-	style.corner_radius_top_right = 10
-	style.corner_radius_bottom_left = 10
-	style.corner_radius_bottom_right = 10
+	style.corner_radius_top_left = 12
+	style.corner_radius_top_right = 12
+	style.corner_radius_bottom_left = 12
+	style.corner_radius_bottom_right = 12
 	style.content_margin_left = 24
 	style.content_margin_right = 24
 	style.content_margin_top = 24
-	style.content_margin_bottom = 20
+	style.content_margin_bottom = 24
 	panel.add_theme_stylebox_override("panel", style)
 
-	var inner := VBoxContainer.new()
-	inner.add_theme_constant_override("separation", 10)
-	panel.add_child(inner)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 28)
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.add_child(row)
 
-	var heading := Label.new()
-	heading.text = card_title
-	heading.add_theme_font_size_override("font_size", 24)
-	heading.add_theme_color_override("font_color", ACCENT)
-	inner.add_child(heading)
+	var preview := _build_3d_viewport("MQI", "home", Vector2(410, 380))
+	preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(preview)
 
-	var desc_label := Label.new()
-	desc_label.text = card_desc
-	desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_label.add_theme_font_size_override("font_size", 14)
-	desc_label.add_theme_color_override("font_color", TEXT_MID)
-	inner.add_child(desc_label)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 12)
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(col)
+
+	col.add_child(_make_eyebrow("FLIGHT SIMULATOR"))
+
+	var title := Label.new()
+	title.text = "MQI  ·  Light tactical UAV"
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", TEXT_LIGHT)
+	col.add_child(title)
+
+	var desc := Label.new()
+	desc.text = "Single-engine reconnaissance drone. Start in a trimmed cruise above the generated range with chase camera, flaps, trim, autopilot hold, and live weather."
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.add_theme_font_size_override("font_size", 14)
+	desc.add_theme_color_override("font_color", TEXT_MID)
+	desc.custom_minimum_size.x = 300
+	col.add_child(desc)
+
+	var setup := HBoxContainer.new()
+	setup.add_theme_constant_override("separation", 20)
+	col.add_child(setup)
+	_home_terrain_value = _add_setup_item(setup, "TERRAIN", "")
+	_home_wind_value = _add_setup_item(setup, "WIND", "")
+	_add_setup_item(setup, "START", "1,000 m · 60 m/s")
+	_refresh_home_setup()
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 10)
+	col.add_child(actions)
+
+	var start := _make_keyed_button("Start flight", "1", true, 168)
+	start.pressed.connect(_launch_flight_with_terrain)
+	actions.add_child(start)
+	_home_primary_btn = start
+
+	var tunnel := _make_keyed_button("Wind tunnel", "2", false, 158)
+	tunnel.pressed.connect(_launch_wind_tunnel)
+	actions.add_child(tunnel)
+
+	return panel
+
+func _build_home_rail() -> Control:
+	var rail := VBoxContainer.new()
+	rail.custom_minimum_size.x = 340
+	rail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rail.add_theme_constant_override("separation", 8)
+	rail.add_child(_make_eyebrow("ALSO IN THE LAB"))
+
+	rail.add_child(_make_rail_button(
+		"Aircraft", "Four airframes, live 3D previews", "3", _bind_tab("Aircraft")))
+	rail.add_child(_make_rail_button(
+		"Terrain", "Shape the range and set the wind", "4", _bind_tab("Terrain")))
+	rail.add_child(_make_rail_button(
+		"RL training", "PPO controller, live metrics", "5", _bind_tab("RL")))
+	rail.add_child(_make_rail_button(
+		"About", "Architecture, avionics, and controls", "6", _bind_tab("About")))
 
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inner.add_child(spacer)
+	rail.add_child(spacer)
 
-	var launch := _make_action_button("Launch  →", 160, 40)
-	launch.pressed.connect(func() -> void:
-		get_tree().change_scene_to_file(scene_path))
-	inner.add_child(launch)
+	var quit := _make_ghost_button("Quit to desktop")
+	quit.pressed.connect(get_tree().quit)
+	rail.add_child(quit)
 
-	# Hover effect
-	panel.mouse_entered.connect(func() -> void:
-		style.bg_color = BG_CARD_HVR)
-	panel.mouse_exited.connect(func() -> void:
-		style.bg_color = BG_CARD)
+	return rail
 
-	return panel
+func _build_home_footer() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+
+	var hint := Label.new()
+	hint.text = "1 flight   ·   2 wind tunnel   ·   3 aircraft   ·   4 terrain   ·   5 RL   ·   6 about"
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_color_override("font_color", TEXT_DIM)
+	row.add_child(hint)
+
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spacer)
+
+	var esc := Label.new()
+	esc.text = "Esc returns here from any mode"
+	esc.add_theme_font_size_override("font_size", 12)
+	esc.add_theme_color_override("font_color", TEXT_DIM)
+	row.add_child(esc)
+
+	return row
+
+func _make_eyebrow(text: String) -> Label:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", ACCENT)
+	return lbl
+
+func _add_fact(parent: Container, value_text: String, label_text: String) -> void:
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	parent.add_child(col)
+
+	var value := Label.new()
+	value.text = value_text
+	value.add_theme_font_size_override("font_size", 20)
+	value.add_theme_color_override("font_color", TEXT_LIGHT)
+	col.add_child(value)
+
+	var label := Label.new()
+	label.text = label_text
+	label.add_theme_font_size_override("font_size", 11)
+	label.add_theme_color_override("font_color", TEXT_DIM)
+	col.add_child(label)
+
+func _add_fact_rule(parent: Container) -> void:
+	var rule := ColorRect.new()
+	rule.color = BORDER
+	rule.custom_minimum_size = Vector2(1, 28)
+	rule.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	parent.add_child(rule)
+
+func _add_setup_item(parent: Container, label_text: String, value_text: String) -> Label:
+	var item := VBoxContainer.new()
+	item.add_theme_constant_override("separation", 1)
+	parent.add_child(item)
+
+	var label := Label.new()
+	label.text = label_text
+	label.add_theme_font_size_override("font_size", 10)
+	label.add_theme_color_override("font_color", TEXT_DIM)
+	item.add_child(label)
+
+	var value := Label.new()
+	value.text = value_text
+	value.add_theme_font_size_override("font_size", 13)
+	value.add_theme_color_override("font_color", TEXT_LIGHT)
+	item.add_child(value)
+	return value
+
+func _refresh_home_setup() -> void:
+	if _home_terrain_value == null or _home_wind_value == null:
+		return
+	if bool(_terrain_settings.get("procedural_terrain", true)):
+		_home_terrain_value.text = "Procedural · seed %d" % int(_terrain_settings.get("noise_seed", 0))
+	else:
+		_home_terrain_value.text = "Imported landscape"
+	var speed := float(_terrain_settings.get("wind_speed", 0.0))
+	var bearing := float(_terrain_settings.get("wind_direction", 0.0))
+	_home_wind_value.text = (
+		"Calm" if speed < 0.05
+		else "%.1f m/s · %d°" % [speed, roundi(bearing)])
+
+func _launch_wind_tunnel() -> void:
+	get_tree().change_scene_to_file("res://scenes/wind_tunnel.tscn")
+
+func _make_keyed_button(label_text: String, key_text: String, primary: bool, min_w: int) -> Button:
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(min_w, 48)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.tooltip_text = "%s (%s)" % [label_text, key_text]
+
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = ACCENT if primary else Color.TRANSPARENT
+	normal.border_width_left = 1
+	normal.border_width_right = 1
+	normal.border_width_top = 1
+	normal.border_width_bottom = 1
+	normal.border_color = ACCENT if primary else BORDER_LIGHT
+	normal.corner_radius_top_left = 7
+	normal.corner_radius_top_right = 7
+	normal.corner_radius_bottom_left = 7
+	normal.corner_radius_bottom_right = 7
+	btn.add_theme_stylebox_override("normal", normal)
+
+	var hover := normal.duplicate()
+	if primary:
+		hover.bg_color = Color(0.60, 0.81, 0.93)
+	else:
+		hover.bg_color = BG_CARD_HVR
+		hover.border_color = ACCENT_DIM
+	btn.add_theme_stylebox_override("hover", hover)
+
+	var pressed := normal.duplicate()
+	pressed.bg_color = ACCENT_DIM if primary else BG_PANEL
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color.TRANSPARENT
+	focus.border_width_left = 2
+	focus.border_width_right = 2
+	focus.border_width_top = 2
+	focus.border_width_bottom = 2
+	focus.border_color = ACCENT
+	focus.corner_radius_top_left = 8
+	focus.corner_radius_top_right = 8
+	focus.corner_radius_bottom_left = 8
+	focus.corner_radius_bottom_right = 8
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	btn.add_theme_stylebox_override("focus", focus)
+
+	var content := HBoxContainer.new()
+	content.set_anchors_preset(Control.PRESET_FULL_RECT)
+	content.offset_left = 16
+	content.offset_right = -12
+	content.offset_top = 0
+	content.offset_bottom = 0
+	content.add_theme_constant_override("separation", 8)
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(content)
+
+	var label := Label.new()
+	label.text = label_text
+	label.add_theme_font_size_override("font_size", 15)
+	label.add_theme_color_override("font_color", BG_DARK if primary else TEXT_LIGHT)
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(label)
+
+	var cap := _make_keycap(key_text, primary)
+	cap.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	content.add_child(cap)
+
+	return btn
+
+func _make_rail_button(title_text: String, subtitle_text: String, key_text: String, action: Callable) -> Button:
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(0, 66)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.tooltip_text = "%s (%s)" % [title_text, key_text]
+
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = BG_CARD
+	normal.border_width_left = 2
+	normal.border_width_right = 1
+	normal.border_width_top = 1
+	normal.border_width_bottom = 1
+	normal.border_color = BORDER
+	normal.corner_radius_top_left = 8
+	normal.corner_radius_top_right = 8
+	normal.corner_radius_bottom_left = 8
+	normal.corner_radius_bottom_right = 8
+	btn.add_theme_stylebox_override("normal", normal)
+
+	var hover := normal.duplicate()
+	hover.bg_color = BG_CARD_HVR
+	hover.border_color = ACCENT_DIM
+	btn.add_theme_stylebox_override("hover", hover)
+
+	var pressed := normal.duplicate()
+	pressed.bg_color = BG_PANEL
+	pressed.border_color = ACCENT
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color.TRANSPARENT
+	focus.border_width_left = 2
+	focus.border_width_right = 2
+	focus.border_width_top = 2
+	focus.border_width_bottom = 2
+	focus.border_color = ACCENT
+	focus.corner_radius_top_left = 9
+	focus.corner_radius_top_right = 9
+	focus.corner_radius_bottom_left = 9
+	focus.corner_radius_bottom_right = 9
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	btn.add_theme_stylebox_override("focus", focus)
+
+	var content := HBoxContainer.new()
+	content.set_anchors_preset(Control.PRESET_FULL_RECT)
+	content.offset_left = 16
+	content.offset_right = -14
+	content.offset_top = 8
+	content.offset_bottom = -8
+	content.add_theme_constant_override("separation", 10)
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(content)
+
+	var text_col := VBoxContainer.new()
+	text_col.add_theme_constant_override("separation", 2)
+	text_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	text_col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	content.add_child(text_col)
+
+	var title := Label.new()
+	title.text = title_text
+	title.add_theme_font_size_override("font_size", 15)
+	title.add_theme_color_override("font_color", TEXT_LIGHT)
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_col.add_child(title)
+
+	var subtitle := Label.new()
+	subtitle.text = subtitle_text
+	subtitle.add_theme_font_size_override("font_size", 12)
+	subtitle.add_theme_color_override("font_color", TEXT_DIM)
+	subtitle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_col.add_child(subtitle)
+
+	var cap := _make_keycap(key_text, false)
+	cap.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	content.add_child(cap)
+
+	btn.pressed.connect(action)
+	return btn
+
+func _make_keycap(text: String, on_accent: bool) -> Label:
+	var cap := Label.new()
+	cap.text = text
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cap.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	cap.custom_minimum_size = Vector2(22, 22)
+	cap.add_theme_font_size_override("font_size", 11)
+	cap.add_theme_color_override("font_color", BG_DARK if on_accent else TEXT_MID)
+	cap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.0, 0.0, 0.0, 0.16) if on_accent else BG_DARK
+	style.border_width_left = 1
+	style.border_width_right = 1
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.border_color = Color(0.0, 0.0, 0.0, 0.0) if on_accent else BORDER_LIGHT
+	style.corner_radius_top_left = 4
+	style.corner_radius_top_right = 4
+	style.corner_radius_bottom_left = 4
+	style.corner_radius_bottom_right = 4
+	cap.add_theme_stylebox_override("normal", style)
+	return cap
+
+func _make_ghost_button(label_text: String) -> Button:
+	var btn := Button.new()
+	btn.text = label_text
+	btn.custom_minimum_size = Vector2(0, 44)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_font_size_override("font_size", 13)
+	btn.add_theme_color_override("font_color", TEXT_DIM)
+	btn.add_theme_color_override("font_hover_color", TEXT_LIGHT)
+	btn.add_theme_color_override("font_pressed_color", TEXT_LIGHT)
+	btn.add_theme_color_override("font_focus_color", TEXT_LIGHT)
+
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color.TRANSPARENT
+	normal.border_width_left = 1
+	normal.border_width_right = 1
+	normal.border_width_top = 1
+	normal.border_width_bottom = 1
+	normal.border_color = BORDER
+	normal.corner_radius_top_left = 6
+	normal.corner_radius_top_right = 6
+	normal.corner_radius_bottom_left = 6
+	normal.corner_radius_bottom_right = 6
+	normal.content_margin_left = 10
+	normal.content_margin_right = 10
+	normal.content_margin_top = 8
+	normal.content_margin_bottom = 8
+	btn.add_theme_stylebox_override("normal", normal)
+
+	var hover := normal.duplicate()
+	hover.bg_color = BG_CARD
+	hover.border_color = BORDER_LIGHT
+	btn.add_theme_stylebox_override("hover", hover)
+
+	var pressed := normal.duplicate()
+	pressed.bg_color = BG_PANEL
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color.TRANSPARENT
+	focus.border_width_left = 2
+	focus.border_width_right = 2
+	focus.border_width_top = 2
+	focus.border_width_bottom = 2
+	focus.border_color = ACCENT
+	focus.corner_radius_top_left = 7
+	focus.corner_radius_top_right = 7
+	focus.corner_radius_bottom_left = 7
+	focus.corner_radius_bottom_right = 7
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	btn.add_theme_stylebox_override("focus", focus)
+
+	return btn
 
 # ── AIRCRAFT PAGE ────────────────────────────────────────────────────
 func _build_aircraft_page() -> Control:
@@ -478,7 +970,7 @@ func _build_aircraft_page() -> Control:
 	vbox.add_child(heading)
 
 	var sub := Label.new()
-	sub.text = "Three aircraft are included — two propeller-driven UAV drones and one turbofan jet. Each has a full TOML configuration driving the Rust physics engine."
+	sub.text = "Four aircraft are included — two propeller-driven UAV drones, one turbofan jet, and the custom M-SWEEP Mini variable-sweep delivery drone with skyhook. Each has a full TOML configuration driving the Rust physics engine."
 	sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	sub.add_theme_font_size_override("font_size", 15)
 	sub.add_theme_color_override("font_color", TEXT_MID)
@@ -491,8 +983,9 @@ func _build_aircraft_page() -> Control:
 	gap.custom_minimum_size.y = 4
 	vbox.add_child(gap)
 
-	for ac_name in ["MQI", "TwinEngine", "Engine"]:
-		vbox.add_child(_make_aircraft_card(ac_name, AIRCRAFT[ac_name]))
+	for ac_name in ["MQI", "TwinEngine", "Engine", "m_sweep_mini"]:
+		if AIRCRAFT.has(ac_name):
+			vbox.add_child(_make_aircraft_card(ac_name, AIRCRAFT[ac_name]))
 
 	return scroll
 
@@ -590,16 +1083,18 @@ func _make_aircraft_card(ac_name: String, data: Dictionary) -> PanelContainer:
 ## spins slowly (see `_process`) and renders into a SubViewport layered over a
 ## radial-gradient backdrop. Registering the viewport lets `_switch_page`
 ## pause rendering whenever the Aircraft page is hidden.
-func _build_3d_viewport(ac_name: String) -> Control:
+func _build_3d_viewport(ac_name: String, view_key: String = "", min_size: Vector2 = Vector2(430, 350)) -> Control:
+	if view_key == "":
+		view_key = ac_name
 	var frame := PanelContainer.new()
-	frame.custom_minimum_size = Vector2(430, 350)
+	frame.custom_minimum_size = min_size
 
 	var fstyle := StyleBoxFlat.new()
-	fstyle.bg_color = Color(0.045, 0.06, 0.10)
-	fstyle.border_width_left = 2
-	fstyle.border_width_right = 2
-	fstyle.border_width_top = 2
-	fstyle.border_width_bottom = 2
+	fstyle.bg_color = BG_DARK
+	fstyle.border_width_left = 1
+	fstyle.border_width_right = 1
+	fstyle.border_width_top = 1
+	fstyle.border_width_bottom = 1
 	fstyle.border_color = BORDER_LIGHT
 	fstyle.corner_radius_top_left = 10
 	fstyle.corner_radius_top_right = 10
@@ -611,10 +1106,11 @@ func _build_3d_viewport(ac_name: String) -> Control:
 	fstyle.content_margin_bottom = 6
 	frame.add_theme_stylebox_override("panel", fstyle)
 
-	# Radial-gradient backdrop drawn behind the transparent viewport.
+	# Radial-gradient backdrop drawn behind the transparent viewport. This is a
+	# studio backdrop for the model, not a page-wide decorative gradient.
 	var grad := Gradient.new()
 	grad.offsets = PackedFloat32Array([0.0, 1.0])
-	grad.colors = PackedColorArray([Color(0.09, 0.13, 0.21), Color(0.025, 0.035, 0.06)])
+	grad.colors = PackedColorArray([Color(0.10, 0.14, 0.19), Color(0.025, 0.035, 0.05)])
 	var tex := GradientTexture2D.new()
 	tex.gradient = grad
 	tex.fill = GradientTexture2D.FILL_RADIAL
@@ -635,7 +1131,7 @@ func _build_3d_viewport(ac_name: String) -> Control:
 	frame.add_child(container)
 
 	var vp := SubViewport.new()
-	vp.size = Vector2i(418, 338)
+	vp.size = Vector2i(int(min_size.x - 12.0), int(min_size.y - 12.0))
 	vp.transparent_bg = true
 	vp.own_world_3d = true
 	vp.world_3d = World3D.new()
@@ -675,10 +1171,10 @@ func _build_3d_viewport(ac_name: String) -> Control:
 	vp.add_child(spin)
 	_load_3d_model(ac_name, spin)
 
-	_ac_containers[ac_name] = container
-	_ac_viewports[ac_name] = vp
-	_ac_models[ac_name] = spin.get_child(0) if spin.get_child_count() > 0 else null
-	_ac_spin_root[ac_name] = spin
+	_ac_containers[view_key] = container
+	_ac_viewports[view_key] = vp
+	_ac_models[view_key] = spin.get_child(0) if spin.get_child_count() > 0 else null
+	_ac_spin_root[view_key] = spin
 	return frame
 
 ## Load `ac_name`'s model under `root`. GLB models are aligned with the same
@@ -686,8 +1182,11 @@ func _build_3d_viewport(ac_name: String) -> Control:
 ## primitives via `EngineFactory`.
 func _load_3d_model(ac_name: String, root: Node3D) -> void:
 	var align: Dictionary = MODEL_ALIGN[ac_name]
-	if align.get("procedural", false):
-		_EngineFactoryScript.build(root)
+	if align.has("procedural") and align["procedural"]:
+		if ac_name == "m_sweep_mini":
+			_MSweepFactoryScript.build(root)
+		else:
+			_EngineFactoryScript.build(root)
 		return
 	var scene_path: String = align["scene"]
 	if not ResourceLoader.exists(scene_path):
@@ -805,7 +1304,7 @@ func _build_terrain_page() -> Control:
 	var reset := _make_action_button("Reset defaults", 200, 44)
 	reset.pressed.connect(_reset_terrain_settings)
 	actions.add_child(reset)
-	var launch := _make_action_button("Generate & launch flight", 300, 44)
+	var launch := _make_action_button("Generate & launch flight", 300, 44, true)
 	launch.pressed.connect(_launch_flight_with_terrain)
 	actions.add_child(launch)
 
@@ -1263,6 +1762,7 @@ func _set_terrain_setting(key: String, value: Variant) -> void:
 	_save_terrain_settings()
 	_update_terrain_summary()
 	_apply_terrain_preview_settings()
+	_refresh_home_setup()
 
 func _sanitize_terrain_setting(key: String, value: Variant) -> Variant:
 	match key:
@@ -1616,18 +2116,29 @@ func _make_controls_card(section_title: String, controls: Dictionary) -> PanelCo
 	return panel
 
 # ── Shared helpers ───────────────────────────────────────────────────
-func _make_action_button(label: String, min_w: int, min_h: int) -> Button:
+func _make_action_button(label: String, min_w: int, min_h: int, primary: bool = false) -> Button:
 	var btn := Button.new()
 	btn.text = label
 	btn.custom_minimum_size = Vector2(min_w, min_h)
-	btn.add_theme_font_size_override("font_size", 17)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_font_size_override("font_size", 15)
+	btn.add_theme_color_override("font_color", BG_DARK if primary else TEXT_LIGHT)
+	btn.add_theme_color_override("font_hover_color", BG_DARK if primary else TEXT_LIGHT)
+	btn.add_theme_color_override("font_pressed_color", BG_DARK if primary else TEXT_LIGHT)
+	btn.add_theme_color_override("font_focus_color", BG_DARK if primary else TEXT_LIGHT)
 
 	var normal := StyleBoxFlat.new()
-	normal.bg_color = ACCENT_DIM
-	normal.corner_radius_top_left = 6
-	normal.corner_radius_top_right = 6
-	normal.corner_radius_bottom_left = 6
-	normal.corner_radius_bottom_right = 6
+	normal.bg_color = ACCENT if primary else Color.TRANSPARENT
+	normal.border_width_left = 1
+	normal.border_width_right = 1
+	normal.border_width_top = 1
+	normal.border_width_bottom = 1
+	normal.border_color = ACCENT if primary else BORDER_LIGHT
+	normal.corner_radius_top_left = 7
+	normal.corner_radius_top_right = 7
+	normal.corner_radius_bottom_left = 7
+	normal.corner_radius_bottom_right = 7
 	normal.content_margin_left = 18
 	normal.content_margin_right = 18
 	normal.content_margin_top = 8
@@ -1635,13 +2146,32 @@ func _make_action_button(label: String, min_w: int, min_h: int) -> Button:
 	btn.add_theme_stylebox_override("normal", normal)
 
 	var hover := normal.duplicate()
-	hover.bg_color = ACCENT
+	if primary:
+		hover.bg_color = Color(0.60, 0.81, 0.93)
+	else:
+		hover.bg_color = BG_CARD_HVR
+		hover.border_color = ACCENT_DIM
 	btn.add_theme_stylebox_override("hover", hover)
 
 	var pressed := normal.duplicate()
-	pressed.bg_color = Color(0.20, 0.50, 0.80)
+	pressed.bg_color = ACCENT_DIM if primary else BG_PANEL
 	btn.add_theme_stylebox_override("pressed", pressed)
 
-	btn.add_theme_color_override("font_color", TEXT_LIGHT)
-	btn.add_theme_color_override("font_hover_color", Color.WHITE)
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color.TRANSPARENT
+	focus.border_width_left = 2
+	focus.border_width_right = 2
+	focus.border_width_top = 2
+	focus.border_width_bottom = 2
+	focus.border_color = ACCENT
+	focus.corner_radius_top_left = 8
+	focus.corner_radius_top_right = 8
+	focus.corner_radius_bottom_left = 8
+	focus.corner_radius_bottom_right = 8
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	btn.add_theme_stylebox_override("focus", focus)
+
 	return btn
