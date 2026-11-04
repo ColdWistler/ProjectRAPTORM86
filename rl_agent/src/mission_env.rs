@@ -118,7 +118,7 @@ impl RewardProfile {
     }
 }
 
-use flight_core::{MissionConfig, MissionEnvironment, MissionSignals, MissionContext};
+use flight_core::{WeatherConfig, MissionConfig, MissionEnvironment, MissionSignals, MissionContext};
 use crate::contracts::{MISSION_OBS_DIM, mission_observation, action_to_avionics};
 use crate::trainer::{EnvSpec, StepOutcome};
 
@@ -135,7 +135,17 @@ impl MissionEnv {
         reward: RewardProfile,
         seed: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let inner = MissionEnvironment::new(config_path, mission, seed)?;
+        Self::new_with_weather(config_path, mission, reward, seed, None)
+    }
+
+    pub fn new_with_weather(
+        config_path: &str,
+        mission: MissionConfig,
+        reward: RewardProfile,
+        seed: u64,
+        weather_config: Option<WeatherConfig>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let inner = MissionEnvironment::new_with_weather(config_path, mission, seed, weather_config)?;
         Ok(Self {
             inner,
             reward,

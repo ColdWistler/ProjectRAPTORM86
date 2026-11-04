@@ -441,18 +441,33 @@ pub struct MissionEnvironment {
     last_signals: MissionSignals,
     termination: MissionTermination,
     cached_features: MissionFeatures,
+    /// Optional RL weather configuration threaded through to the inner
+    /// [`AvionicsEnvironment`]. Set when the exam wants explicit weather
+    /// scenes baked into the launch scenario.
+    weather_config: Option<crate::weather::WeatherConfig>,
 }
 
 impl MissionEnvironment {
     pub fn new(config_path: &str, config: MissionConfig, seed: u64) -> Result<Self, Box<dyn std::error::Error>> {
-        let avionics = AvionicsEnvironment::with_config(config_path, EnvConfig {
+        Self::new_with_weather(config_path, config, seed, None)
+    }
+
+    pub fn new_with_weather(
+        config_path: &str,
+        config: MissionConfig,
+        seed: u64,
+        weather_config: Option<crate::weather::WeatherConfig>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let env_config = EnvConfig {
             target_altitude: config.cruise_altitude,
             target_airspeed: config.cruise_airspeed,
             ground_altitude: config.ground_altitude,
             max_steps: config.max_steps,
             dt: config.dt,
+            weather_config: weather_config.clone(),
             ..Default::default()
-        })?;
+        };
+        let avionics = AvionicsEnvironment::with_config(config_path, env_config)?;
 
         let capture_speed = config.resolve_capture_speed(avionics.aircraft_config());
         let v_stall = stall_speed(avionics.aircraft_config(), config.cruise_altitude);
@@ -486,6 +501,7 @@ impl MissionEnvironment {
             last_signals: MissionSignals::default(),
             termination: MissionTermination::None,
             cached_features: MissionFeatures::default(),
+            weather_config: weather_config.clone(),
         })
     }
 
