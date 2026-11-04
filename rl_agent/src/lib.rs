@@ -59,6 +59,7 @@ pub mod stream;
 pub mod telemetry;
 pub mod contracts;
 pub mod trainer;
+pub mod mission_env;
 
 pub use algo::{Algorithm, AlgoSpec};
 
