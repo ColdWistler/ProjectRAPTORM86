@@ -98,6 +98,10 @@ pub trait EnvSpec {
     fn weather_termination(&self) -> Option<TerminationReason> {
         None
     }
+
+    fn mission_context(&self) -> Option<flight_core::MissionContext> {
+        None
+    }
 }
 
 /// The default training target: `flight_core::AvionicsEnvironment`.

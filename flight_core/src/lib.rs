@@ -58,8 +58,9 @@ pub use env::{
 };
 #[cfg(feature = "full-avionics")]
 pub use mission::{
-    sample_pickup, stall_speed, MissionConfig, MissionFeatures, MissionPhase, MissionScenario,
-    MissionSignals, MissionTermination, MISSION_FEATURE_DIM,
+    sample_pickup, stall_speed, MissionConfig, MissionEnvironment, MissionContext, MissionFeatures,
+    MissionPhase, MissionReset, MissionScenario, MissionSignals, MissionStep, MissionTermination,
+    MISSION_FEATURE_DIM,
 };
 pub use env::{ControlAction, EnvConfig, EnvStep, Environment, Observation};
 pub use frame::FlightFrame;
