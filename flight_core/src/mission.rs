@@ -6,6 +6,7 @@
 
 use crate::atmosphere::Atmosphere;
 use crate::config::AircraftConfig;
+use nalgebra::Vector3;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -441,6 +442,8 @@ pub struct MissionEnvironment {
     last_signals: MissionSignals,
     termination: MissionTermination,
     cached_features: MissionFeatures,
+    tension: f64,
+    tension_stable_steps: usize,
     /// Optional RL weather configuration threaded through to the inner
     /// [`AvionicsEnvironment`]. Set when the exam wants explicit weather
     /// scenes baked into the launch scenario.
@@ -501,6 +504,8 @@ impl MissionEnvironment {
             last_signals: MissionSignals::default(),
             termination: MissionTermination::None,
             cached_features: MissionFeatures::default(),
+            tension: 0.0,
+            tension_stable_steps: 0,
             weather_config: weather_config.clone(),
         })
     }
@@ -550,6 +555,8 @@ impl MissionEnvironment {
             self.previous_pickup_distance = ((s.pos_x - self.scenario.pickup_north).powi(2) + (s.pos_y - self.scenario.pickup_east).powi(2)).sqrt();
             self.previous_home_distance = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
         }
+        self.tension = 0.0;
+        self.tension_stable_steps = 0;
         self.cached_features = MissionFeatures::default();
         MissionReset { avionics: self.inner.observation(), features: self.cached_features.clone(), phase: self.phase }
     }
@@ -560,76 +567,158 @@ impl MissionEnvironment {
         self.step_count += 1;
         let inner_terminated = inner_step.terminated;
         let inner_truncated = inner_step.truncated;
-        let s = self.inner.aircraft_state();
-        let pickup_distance = ((s.pos_x - self.scenario.pickup_north).powi(2) + (s.pos_y - self.scenario.pickup_east).powi(2)).sqrt();
-        let pickup_altitude = self.scenario.pickup_altitude;
-        let current_speed = s.airspeed();
-        let capture_speed = self.capture_speed;
 
-        let termination = if inner_terminated || s.altitude() <= self.config.ground_altitude {
+        // Snapshot plane geometry up front (NED frame) so later code doesn't hold
+        // an immutable borrow across the mutable cable-force application below.
+        let (pickup_distance, pickup_altitude, current_speed, capture_speed) = {
+            let s = self.inner.aircraft_state();
+            (
+                ((s.pos_x - self.scenario.pickup_north).powi(2)
+                    + (s.pos_y - self.scenario.pickup_east).powi(2))
+                    .sqrt(),
+                self.scenario.pickup_altitude,
+                s.airspeed(),
+                self.capture_speed,
+            )
+        };
+
+        let termination = if inner_terminated || self.inner.aircraft_state().altitude() <= self.config.ground_altitude {
             self.termination = MissionTermination::GroundImpact;
             MissionTermination::GroundImpact
-        } else if s.pos_x.abs() > self.config.max_range || s.pos_y.abs() > self.config.max_range {
-            self.termination = MissionTermination::OutOfBounds;
-            MissionTermination::OutOfBounds
-        } else if self.phase == MissionPhase::Done && phase_before == MissionPhase::Return {
-            self.termination = MissionTermination::CapturedAndReturned;
-            MissionTermination::CapturedAndReturned
-        } else if inner_truncated {
-            self.termination = MissionTermination::Timeout;
-            MissionTermination::Timeout
         } else {
-            match self.phase {
-                MissionPhase::Outbound => {
-                    if pickup_distance <= self.config.pickup_radius {
-                        self.phase = MissionPhase::Capture;
-                        self.capture_attempts += 1;
-                    }
-                }
-                MissionPhase::Capture => {
-                    if pickup_distance > 2.0 * self.config.pickup_radius {
-                        self.phase = MissionPhase::Outbound;
-                        self.dwell_steps = 0;
-                    } else if pickup_distance <= self.config.pickup_radius
-                        && (s.altitude() - pickup_altitude).abs() <= self.config.pickup_vertical_tolerance
-                        && current_speed <= capture_speed
-                    {
-                        self.dwell_steps += 1;
-                        if self.dwell_steps >= self.config.capture_dwell_steps {
-                            self.phase = MissionPhase::Return;
+            let s_term = self.inner.aircraft_state();
+            if s_term.pos_x.abs() > self.config.max_range
+                || s_term.pos_y.abs() > self.config.max_range
+            {
+                self.termination = MissionTermination::OutOfBounds;
+                MissionTermination::OutOfBounds
+            } else if self.phase == MissionPhase::Done && phase_before == MissionPhase::Return {
+                self.termination = MissionTermination::CapturedAndReturned;
+                MissionTermination::CapturedAndReturned
+            } else if inner_truncated {
+                self.termination = MissionTermination::Timeout;
+                MissionTermination::Timeout
+            } else {
+                match self.phase {
+                    MissionPhase::Outbound => {
+                        if pickup_distance <= self.config.pickup_radius {
+                            self.phase = MissionPhase::Capture;
+                            self.capture_attempts += 1;
                         }
-                    } else {
-                        self.dwell_steps = 0;
                     }
-                }
-                MissionPhase::Return => {
-                    let home_dist = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
-                    if home_dist <= self.config.home_radius
-                        && (s.altitude() - self.config.cruise_altitude).abs() <= self.config.home_vertical_tolerance
-                    {
-                        self.phase = MissionPhase::Done;
-                        self.termination = MissionTermination::CapturedAndReturned;
+                    MissionPhase::Capture => {
+                        let within_capture = pickup_distance <= self.config.pickup_radius
+                            && current_speed <= capture_speed;
+                        if pickup_distance > 2.0 * self.config.pickup_radius {
+                            self.phase = MissionPhase::Outbound;
+                            self.dwell_steps = 0;
+                        } else if within_capture {
+                            self.dwell_steps += 1;
+                        } else {
+                            self.dwell_steps = 0;
+                        }
                     }
+                    MissionPhase::Return => {
+                        let s = self.inner.aircraft_state();
+                        let home_dist = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
+                        if home_dist <= self.config.home_radius
+                            && (s.altitude() - self.config.cruise_altitude).abs() <= self.config.home_vertical_tolerance
+                        {
+                            self.phase = MissionPhase::Done;
+                            self.termination = MissionTermination::CapturedAndReturned;
+                        }
+                    }
+                    MissionPhase::Done => {}
                 }
-                MissionPhase::Done => {}
+                self.termination
             }
-            self.termination
         };
+
+        // Cable-tension physics, driven by SkyhookConfig fields taken from
+        // `m_sweep_mini.toml` [skyhook]: stiffness 1000, damping 65,
+        // breakaway 2200 N. Applied as a force when inside the pickup zone
+        // during Capture phase; capture fires only once the tension has been
+        // stable for the full dwell window. If the tension exceeds the
+        // breakaway load the mission terminates with a crash.
+        if self.phase == MissionPhase::Capture {
+            let skyhook = self.aircraft_config().skyhook.as_ref();
+            if let Some(cfg) = skyhook {
+                let rest_length = cfg.cable_length_max;
+                let stiffness = cfg.cable_stiffness;
+                let damping = cfg.cable_damping;
+                let breakaway = cfg.tension_breakaway;
+                let s = self.inner.aircraft_state();
+                let within_zone = pickup_distance <= self.config.pickup_radius;
+                let pickup_alt = self.scenario.pickup_altitude;
+                if within_zone
+                    && (s.altitude() - pickup_alt).abs() <= self.config.pickup_vertical_tolerance
+                    && current_speed <= capture_speed
+                {
+                    let cable_vec = Vector3::new(self.scenario.pickup_north - s.pos_x,
+                                                 self.scenario.pickup_east - s.pos_y,
+                                                 -(pickup_alt - s.altitude()));
+                    let d = cable_vec.norm();
+                    if d > 1e-6 && rest_length > 0.0 {
+                        let cable_dir = cable_vec / d;
+                        let extension = d - rest_length;
+                        let vel_along = s.velocity_ned().dot(&cable_dir);
+                        let tension = (stiffness * extension - damping * vel_along).max(0.0);
+                        self.tension = tension;
+                        // Apply the tension as an acceleration over dt into the
+                        // body-frame velocity.
+                        let tension_force = cable_dir * tension;
+                        let force_body = s.rotation_earth_to_body().inverse()
+                            .transform_vector(&tension_force);
+                        let dt = self.config.dt;
+                        let mass = self.aircraft_config().mass.max(1e-6);
+                        self.inner.state_mut().u += force_body.x * dt / mass;
+                        self.inner.state_mut().v += force_body.y * dt / mass;
+                        self.inner.state_mut().w += force_body.z * dt / mass;
+                        if tension > breakaway {
+                            self.termination = MissionTermination::GroundImpact;
+                        }
+                        if tension > 10.0 {
+                            self.tension_stable_steps += 1;
+                        } else {
+                            self.tension_stable_steps = 0;
+                        }
+                    }
+                }
+            }
+            // Transition to Return requires stable tension AND dwell completion.
+            let stable = self.tension_stable_steps >= self.config.capture_dwell_steps
+                || (self.tension == 0.0 && self.dwell_steps > 0);
+            if self.dwell_steps >= self.config.capture_dwell_steps && stable {
+                self.phase = MissionPhase::Return;
+            }
+        } else if self.phase == MissionPhase::Return {
+            let s = self.inner.aircraft_state();
+            let home_dist = (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt();
+            if home_dist <= self.config.home_radius
+                && (s.altitude() - self.config.cruise_altitude).abs() <= self.config.home_vertical_tolerance
+            {
+                self.phase = MissionPhase::Done;
+                self.termination = MissionTermination::CapturedAndReturned;
+            }
+        }
 
         let signals = MissionSignals {
             progress_outbound: self.previous_pickup_distance.max(0.0) - pickup_distance.max(0.0),
             progress_inbound: 0.0,
-            altitude_error: (pickup_altitude - s.altitude()).abs() / 500.0,
-            speed_error: (current_speed - capture_speed).abs() / capture_speed,
-            capture_alignment: if pickup_distance > self.config.pickup_radius { 0.0 } else { ((pickup_distance - self.config.pickup_radius).max(0.0) / self.config.pickup_radius) + ((current_speed - capture_speed).max(0.0) / capture_speed) },
+            altitude_error: (pickup_altitude - self.inner.aircraft_state().altitude()).abs() / 500.0,
+            speed_error: (self.inner.aircraft_state().airspeed() - capture_speed).abs() / capture_speed,
+            capture_alignment: if pickup_distance > self.config.pickup_radius { 0.0 } else { ((pickup_distance - self.config.pickup_radius).max(0.0) / self.config.pickup_radius) + ((self.inner.aircraft_state().airspeed() - capture_speed).max(0.0) / capture_speed) },
             dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64,
             time_penalty: 1.0,
             energy_penalty: action.throttle.clamp(0.0, 1.0),
             crash: matches!(termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds),
-            captured: (self.phase == MissionPhase::Capture && self.dwell_steps >= self.config.capture_dwell_steps) || self.phase == MissionPhase::Return || self.phase == MissionPhase::Done,
+            captured: (self.phase == MissionPhase::Capture && self.dwell_steps >= self.config.capture_dwell_steps)
+                || self.phase == MissionPhase::Return
+                || self.phase == MissionPhase::Done,
             returned: self.phase == MissionPhase::Done,
         };
 
+        let s = self.inner.aircraft_state();
         let heading = s.euler_angles().2;
         let pickup_bearing = f64::atan2(self.scenario.pickup_east - s.pos_y, self.scenario.pickup_north - s.pos_x) - heading;
         let pickup_bearing = wrap_pi(pickup_bearing);
@@ -644,7 +733,7 @@ impl MissionEnvironment {
             home_bearing_sin: home_bearing.sin(),
             home_bearing_cos: home_bearing.cos(),
             phase: match self.phase { MissionPhase::Outbound => 0.0, MissionPhase::Capture => 1.0, MissionPhase::Return => 2.0, MissionPhase::Done => 2.0 },
-            speed_margin_norm: (current_speed - self.v_stall) / 10.0,
+            speed_margin_norm: (s.airspeed() - self.v_stall) / 10.0,
             time_remaining_fraction: (1.0 - (self.step_count as f64 / self.config.max_steps.max(1) as f64)).clamp(0.0, 1.0),
             capture_dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64,
             horizontal_offset_norm: pickup_distance / self.config.pickup_radius.max(1e-6),
@@ -653,7 +742,14 @@ impl MissionEnvironment {
         self.previous_pickup_distance = pickup_distance;
         self.cached_features = features.clone();
         self.last_signals = signals;
-        MissionStep { avionics: self.inner.observation(), features, signals, termination, terminated: matches!(termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds | MissionTermination::CapturedAndReturned), truncated: termination == MissionTermination::Timeout }
+        MissionStep {
+            avionics: self.inner.observation(),
+            features,
+            signals,
+            termination,
+            terminated: matches!(termination, MissionTermination::GroundImpact | MissionTermination::OutOfBounds | MissionTermination::CapturedAndReturned),
+            truncated: termination == MissionTermination::Timeout,
+        }
     }
 
     pub fn phase(&self) -> MissionPhase { self.phase }

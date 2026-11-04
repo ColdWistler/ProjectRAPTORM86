@@ -11,6 +11,10 @@ extends Control
 const ALGORITHMS := [
 	{ "name": "PPO — clipped surrogate", "id": "ppo" },
 	{ "name": "A2C — advantage actor-critic", "id": "a2c" },
+	{ "name": "SAC — soft actor-critic", "id": "sac" },
+	{ "name": "TD3 — twin delayed DDPG", "id": "td3" },
+	{ "name": "D3QN — dueling double DQN (continuous)", "id": "d3qn" },
+	{ "name": "Hybrid — phase selector", "id": "hybrid" },
 ]
 
 ## Backends (display name -> `--backend` value).
