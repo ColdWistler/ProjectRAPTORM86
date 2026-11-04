@@ -50,14 +50,21 @@ func _process(delta: float) -> bool:
 		_settle += delta
 		return false
 	var points: Array = _trainer._points.get("mean_reward_per_step", [])
+	var env_points: Array = _trainer._points.get("env_alt_mean", [])
 	var chart_len: int = _trainer._chart.points.size()
 	print("CHART: run_id     = ", _trainer._telemetry_run_id)
 	print("CHART: chart title= ", _trainer._chart.title)
 	print("CHART: stored pts = ", points.size(), " | chart pts = ", chart_len)
+	print("CHART: env pts    = ", env_points.size())
 	if points.size() >= 2 and chart_len >= 2:
 		print("CHART: first/last = ", points[0], " / ", points[points.size() - 1])
-		print("CHART: PASS — telemetry streamed from metrics.jsonl into the live chart")
-		quit(0)
+		if env_points.size() >= 2:
+			print("CHART: env first/last = ", env_points[0], " / ", env_points[env_points.size() - 1])
+			print("CHART: PASS — telemetry streamed from metrics.jsonl into the live chart")
+			quit(0)
+			return true
+		print("CHART: FAIL — env telemetry never reached the chart")
+		quit(1)
 		return true
 	print("CHART: FAIL — telemetry never reached the chart")
 	quit(1)

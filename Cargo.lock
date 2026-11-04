@@ -6949,6 +6949,7 @@ dependencies = [
  "rand_distr 0.4.3",
  "serde",
  "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]

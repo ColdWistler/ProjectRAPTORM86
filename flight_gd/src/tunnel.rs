@@ -671,6 +671,7 @@ self.particles = (0..PARTICLE_COUNT)
             rudder: self.rudder as f64,
             throttle: self.throttle,
             flap: self.flaps_deg.to_radians() as f64,
+            wing_sweep: 0.0,
         };
         let (mut forces, mut moments) =
             compute_forces_moments(&state, &config, controls, 0.0, &wind_earth);

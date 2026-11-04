@@ -25,12 +25,14 @@ var _material: Material = null
 var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
+var _wing_sweep_pivots: Array = []
 var _aircraft_index := 0
 var _imported_name := ""
+var _current_aircraft_name: String = ""
 # Resolution for voxelizing an imported model into wind panels (edge cells,
 # powers of two). Min/max matched to the Rust voxelizer (4..=24).
 var _import_resolution := 12
-const AIRCRAFT_NAMES := ["MQI", "TwinEngine", "Engine"]
+const AIRCRAFT_NAMES := ["MQI", "TwinEngine", "Engine", "m_sweep_mini"]
 const MODEL_FILTERS := [
 	"*.glb;GLTF Binary",
 	"*.gltf;GLTF Text",
@@ -88,6 +90,8 @@ func _load_aircraft(name: String) -> void:
 			_propellers = view.propellers
 			_ailerons = view.ailerons
 			_flaps = view.flaps
+			_wing_sweep_pivots = view.get("wing_sweep_pivots") if view.get("wing_sweep_pivots") != null else []
+		_current_aircraft_name = name
 		# Resize the Godot flow-collision box to roughly match the airframe.
 		var cs := _drone.get_node_or_null("FlowCollision") as CollisionShape3D
 		if cs and cs.shape is BoxShape3D:
@@ -397,21 +401,52 @@ func _update_flow_uniform() -> void:
 		var t := Time.get_ticks_msec() * 0.001
 		_material.emission_energy_multiplier = 3.6 + sin(t * 2.7) * 0.9
 
+## Animate propulsion: propellers (m_sweep_mini) or turbofan fans (Engine)
+func _animate_propulsion(delta: float) -> void:
+	for prop in _propellers:
+		if not (prop is Node3D):
+			continue
+		# In wind tunnel, engines run at full throttle (1.0) to show thrust effects
+		if _current_aircraft_name == "Engine":
+			# Turbofan: very high RPM
+			var fan_speed_rad_s := 400.0  # ~3800 RPM at full throttle
+			prop.rotate_x(delta * fan_speed_rad_s)
+		else:
+			# Propeller (m_sweep_mini, TwinEngine, MQI): lower RPM
+			var prop_speed_rad_s := 210.0  # ~2000 RPM at full throttle
+			prop.rotate_x(delta * prop_speed_rad_s)
+
+## Animate variable-sweep wings for m_sweep_mini (visual only in wind tunnel)
+func _animate_wing_sweep(delta: float) -> void:
+	if _current_aircraft_name != "m_sweep_mini" or _wing_sweep_pivots.is_empty():
+		return
+	for entry in _wing_sweep_pivots:
+		var pivot: Node3D = entry.pivot
+		if pivot is Node3D:
+			pivot.rotation = Vector3.ZERO
+
 func _physics_process(delta: float) -> void:
 	_apply_settings()
 	_update_flow_uniform()
 	_tunnel.step(delta)
 	_drone.transform = _tunnel.get_drone_transform()
-	# Propellers spin with the wind; ailerons/flaps deflect with their controls.
-	for prop in _propellers:
-		if prop is Node3D:
-			prop.rotate_x(wind_speed * 0.5 * delta)
+	_animate_propulsion(delta)
+	_animate_wing_sweep(delta)
+	# Control surfaces (ailerons/flaps/rudder/elevator)
 	for ail in _ailerons:
 		if ail is Node3D:
-			ail.rotation.z = -aileron * 0.6
+			var aname: String = ail.name.to_lower()
+			if aname.find("rudder") >= 0:
+				ail.rotation.y = -rudder * 0.6
+			else:
+				ail.rotation.z = -aileron * 1.0
 	for flap in _flaps:
 		if flap is Node3D:
-			flap.rotation.z = flaps_deg * PI / 180.0
+			var fname: String = flap.name.to_lower()
+			if fname.find("elev") >= 0:
+				flap.rotation.z = -elevator * 0.8
+			else:
+				flap.rotation.z = flaps_deg * PI / 180.0 * 2.0
 	_rebuild_smoke(true)
 	_camera_orbit()
 	_update_hud()
@@ -530,7 +565,7 @@ func _process(delta: float) -> void:
 var _held := {}
 
 func _just_pressed(key: Key) -> bool:
-	return Input.is_physical_key_pressed(key) and not _held.get(key, false)
+	return Input.is_physical_key_pressed(key) and not (_held.get(key) if _held.has(key) else false)
 
 ## The tunnel holds the aircraft fixed in the flow, so the engines run at a
 ## fixed full throttle to make the thrust-line and asymmetric-engine moments

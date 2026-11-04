@@ -27,7 +27,7 @@ var _weather_menu = null
 var _weather_toggle_btn = null
 var _weather_menu_visible := false
 
-const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine"]
+const AIRCRAFT_NAMES := ["TwinEngine", "MQI", "Engine", "m_sweep_mini"]
 const _AircraftViewScript := preload("res://scripts/aircraft_view.gd")
 const _HudScript := preload("res://scripts/hud.gd")
 const _WeatherMenuScript := preload("res://scripts/weather_menu.gd")
@@ -65,12 +65,15 @@ const MODE_TRIM := {
 	"TwinEngine": Vector2(800.0, 60.0),
 	"MQI": Vector2(800.0, 60.0),
 	"Engine": Vector2(8000.0, 200.0),
+	"m_sweep_mini": Vector2(150.0, 22.0),  # 11kg UAV: low altitude, ~22 m/s cruise
 }
 
 var _propellers: Array = []
 var _flaps: Array = []
 var _ailerons: Array = []
+var _wing_sweep_pivots: Array = []
 var _aircraft_index := 0
+var _current_aircraft_name: String = ""
 var _telemetry := PackedFloat64Array()
 var _hud_timer := 0.0
 var _aircraft_btn: Button = null
@@ -124,7 +127,7 @@ func _ready() -> void:
 			push_error("FlightSimNode failed to load any aircraft config; drone will stay frozen at origin")
 			set_physics_process(false)
 			return
-		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
+		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index]) if MODE_TRIM.has(AIRCRAFT_NAMES[_aircraft_index]) else Vector2(800.0, 60.0)
 		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -169,8 +172,11 @@ func _load_aircraft(name: String) -> void:
 		_propellers = view.propellers
 		_ailerons = view.ailerons
 		_flaps = view.flaps
+		# Get wing sweep pivots for variable-sweep aircraft (m_sweep_mini)
+		_wing_sweep_pivots = view.get("wing_sweep_pivots") if view.get("wing_sweep_pivots") != null else []
+	_current_aircraft_name = name
 	if ok and not is_editor:
-		var trm: Vector2 = MODE_TRIM.get(name, Vector2(800.0, 60.0))
+		var trm: Vector2 = MODE_TRIM.get(name) if MODE_TRIM.has(name) else Vector2(800.0, 60.0)
 		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -203,10 +209,10 @@ func _apply_terrain_settings() -> void:
 func _apply_wind_settings() -> void:
 	if _physics == null:
 		return
-	var wind_speed := float(_terrain_settings.get("wind_speed", 0.0))
+	var wind_speed := float(_terrain_settings.get("wind_speed") if _terrain_settings.has("wind_speed") else 0.0)
 	if wind_speed <= 0.0:
 		return
-	var wind_dir := float(_terrain_settings.get("wind_direction", 0.0))
+	var wind_dir := float(_terrain_settings.get("wind_direction") if _terrain_settings.has("wind_direction") else 0.0)
 	_physics.set_wind(wind_speed, wind_dir)
 	print("wind configured: %0.1f m/s toward %0.0f°" % [wind_speed, wind_dir])
 
@@ -455,10 +461,8 @@ func _physics_process(delta: float) -> void:
 	_drone.transform = _physics.get_drone_transform()
 	_update_control_surfaces()
 	_chase_camera()
-
-	for prop in _propellers:
-		if prop is Node3D:
-			prop.rotate_x(delta * (throttle * 60.0 + 3.0))
+	_animate_propulsion(delta)
+	_animate_wing_sweep(delta)
 
 	# Feed the instrument overlay every frame so the tapes/ladder feel live.
 	_telemetry = _physics.telemetry()
@@ -563,7 +567,7 @@ func regenerate_terrain() -> void:
 
 ## Re-trim to the active mode's cruise state (menu button, same as the [R] key).
 func reset_flight() -> void:
-	var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
+	var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index]) if MODE_TRIM.has(AIRCRAFT_NAMES[_aircraft_index]) else Vector2(800.0, 60.0)
 	var tr: Vector2 = _physics.trim(trm.x, trm.y)
 	elevator = 0.0
 	elevator_trim = tr.x
@@ -681,7 +685,7 @@ func _handle_input(delta: float) -> void:
 
 	# Reset: R (re-trims to the active mode's cruise altitude / speed)
 	if _just_pressed(KEY_R):
-		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index], Vector2(800.0, 60.0))
+		var trm: Vector2 = MODE_TRIM.get(AIRCRAFT_NAMES[_aircraft_index]) if MODE_TRIM.has(AIRCRAFT_NAMES[_aircraft_index]) else Vector2(800.0, 60.0)
 		var tr: Vector2 = _physics.trim(trm.x, trm.y)
 		elevator = 0.0
 		elevator_trim = tr.x
@@ -712,7 +716,7 @@ func engine_out_side() -> int:
 ## True only on the rising edge of `key` (physical keycode space, matching
 ## `_input` which records `physical_keycode`).
 func _just_pressed(key: Key) -> bool:
-	return Input.is_physical_key_pressed(key) and not _held.get(key, false)
+	return Input.is_physical_key_pressed(key) and not (_held.get(key) if _held.has(key) else false)
 
 var _held := {}
 
@@ -739,10 +743,46 @@ func _input(event: InputEvent) -> void:
 func _update_control_surfaces() -> void:
 	for flap in _flaps:
 		if flap is Node3D:
-			flap.rotation.z = flaps_deg * PI / 180.0
+			# For most aircraft flaps are controlled by flaps_deg; also allow elevator animation if named appropriately
+			var fname: String = flap.name.to_lower()
+			if fname.find("elev") >= 0:
+				flap.rotation.z = -elevator * 0.8
+			else:
+				flap.rotation.z = flaps_deg * PI / 180.0 * 2.0
 	for ail in _ailerons:
 		if ail is Node3D:
-			ail.rotation.z = -aileron * 0.6
+			var aname: String = ail.name.to_lower()
+			if aname.find("rudder") >= 0:
+				ail.rotation.y = -rudder * 0.6
+			else:
+				ail.rotation.z = -aileron * 1.0
+
+## Animate propulsion: propellers (m_sweep_mini) or turbofan fans (Engine)
+func _animate_propulsion(delta: float) -> void:
+	for prop in _propellers:
+		if not (prop is Node3D):
+			continue
+		# Turbofan fans (Engine mode) spin much faster than propellers
+		# Fan N1 ~ 100% at full throttle = ~3000-4000 RPM = ~300-400 rad/s
+		# Propeller (m_sweep_mini) ~ 2000 RPM = ~200 rad/s at full throttle
+		if _current_aircraft_name == "Engine":
+			# Turbofan: very high RPM, scales with throttle
+			var fan_speed_rad_s := (throttle * 350.0 + 50.0)  # 50-400 rad/s
+			prop.rotate_x(delta * fan_speed_rad_s)
+		else:
+			# Propeller (m_sweep_mini, TwinEngine, MQI): lower RPM
+			var prop_speed_rad_s := (throttle * 200.0 + 10.0)  # 10-210 rad/s
+			prop.rotate_x(delta * prop_speed_rad_s)
+
+## Animate variable-sweep wings for m_sweep_mini
+func _animate_wing_sweep(delta: float) -> void:
+	if _current_aircraft_name != "m_sweep_mini" or _wing_sweep_pivots.is_empty():
+		return
+	# Single solid wings attached to fuselage - keep them fixed
+	for entry in _wing_sweep_pivots:
+		var pivot: Node3D = entry.pivot
+		if pivot is Node3D:
+			pivot.rotation = Vector3.ZERO
 
 ## Position the camera: either a fixed chase offset behind the drone, or a
 ## free orbit around `cam_center` driven by the yaw/pitch/dist parameters.

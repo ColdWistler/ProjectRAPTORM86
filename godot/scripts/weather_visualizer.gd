@@ -177,7 +177,7 @@ func _make_emitter(name: String, mesh: Mesh, cfg: Dictionary) -> GPUParticles3D:
 	pm.gravity = cfg.gravity
 	pm.initial_velocity_min = cfg.speed_min
 	pm.initial_velocity_max = cfg.speed_max
-	pm.spread = cfg.get("spread", 6.0)
+	pm.spread = cfg.get("spread") if cfg.has("spread") else 6.0
 	pm.scale_min = cfg.scale_min
 	pm.scale_max = cfg.scale_max
 	pm.color = cfg.color

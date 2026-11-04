@@ -1,4 +1,43 @@
+use serde::{Deserialize, Serialize};
+
 pub const MISSION_CONTRACT: &str = "mission.v1";
+pub const AVIONICS_CONTRACT: &str = "avionics";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionSummary {
+    pub airframe: String,
+    pub contract: String,
+    pub reward_profile: String,
+    pub cruise_altitude: f64,
+    pub cruise_airspeed: f64,
+    pub pickup_radius: f64,
+    pub pickup_vertical_tolerance: f64,
+    pub capture_speed: f64,
+    pub capture_dwell_steps: usize,
+    pub max_steps: usize,
+}
+
+impl MissionSummary {
+    pub fn from_config(
+        airframe: &str,
+        config: &flight_core::MissionConfig,
+        capture_speed: f64,
+        reward_profile: &str,
+    ) -> Self {
+        Self {
+            airframe: airframe.into(),
+            contract: MISSION_CONTRACT.into(),
+            reward_profile: reward_profile.into(),
+            cruise_altitude: config.cruise_altitude,
+            cruise_airspeed: config.cruise_airspeed,
+            pickup_radius: config.pickup_radius,
+            pickup_vertical_tolerance: config.pickup_vertical_tolerance,
+            capture_speed,
+            capture_dwell_steps: config.capture_dwell_steps,
+            max_steps: config.max_steps,
+        }
+    }
+}
 pub const AVIONICS_CHANNELS: usize = flight_core::AVIONICS_OBS_DIM;
 pub const MISSION_FEATURE_OFFSET: usize = AVIONICS_CHANNELS;
 pub const MISSION_OBS_DIM: usize = MISSION_FEATURE_OFFSET + flight_core::MISSION_FEATURE_DIM;

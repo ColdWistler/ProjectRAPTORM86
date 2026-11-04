@@ -296,6 +296,7 @@ pub fn voxelize_panels(
                         normal,
                         cp,
                         cd: PANEL_CD,
+                        id: String::new(),
                     });
                 }
             }

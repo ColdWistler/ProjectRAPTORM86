@@ -263,6 +263,14 @@ pub struct AircraftConfig {
     /// what lets the two aircraft models feel different in the wind.
     #[serde(default)]
     pub collision_panels: Vec<CollisionPanel>,
+
+    /// Variable sweep wing configuration
+    #[serde(default)]
+    pub morphing_wing: Option<MorphingWingConfig>,
+
+    /// Skyhook system configuration
+    #[serde(default)]
+    pub skyhook: Option<SkyhookConfig>,
 }
 
 /// One flat-plate surface of the aircraft's collision shape, defined in the
@@ -280,6 +288,9 @@ pub struct CollisionPanel {
     /// Flat-plate drag coefficient for this panel (typical 1.2 – 2.0).
     #[serde(default = "default_panel_cd")]
     pub cd: f64,
+    /// Optional panel identifier for hit reporting
+    #[serde(default)]
+    pub id: String,
 }
 
 fn default_panel_cd() -> f64 { 1.5 }
@@ -307,6 +318,76 @@ impl AircraftConfig {
         Ok(config)
     }
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WingPivot {
+    pub pivot: [f64; 3],
+    #[serde(default = "default_pivot_axis")]
+    pub axis: [f64; 3],
+    #[serde(default)]
+    pub inner_span_frac: f64,
+    #[serde(default)]
+    pub panels: Vec<CollisionPanel>,
+}
+
+fn default_pivot_axis() -> [f64; 3] { [0.0, 0.0, 1.0] }
+
+fn default_sweep_min_deg() -> f64 { 0.0 }
+fn default_sweep_max_deg() -> f64 { 24.0 }
+fn default_sweep_rate_deg_s() -> f64 { 8.0 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MorphingWingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_sweep_min_deg")]
+    pub sweep_min_deg: f64,
+    #[serde(default = "default_sweep_max_deg")]
+    pub sweep_max_deg: f64,
+    #[serde(default = "default_sweep_rate_deg_s")]
+    pub sweep_rate_deg_s: f64,
+    #[serde(default)]
+    pub pivots: Vec<WingPivot>,
+    #[serde(default)]
+    pub fixed_panels: Vec<CollisionPanel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SkyhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_hook_offset")]
+    pub hook_offset_body: [f64; 3],
+    #[serde(default = "default_cable_length_max")]
+    pub cable_length_max: f64,
+    #[serde(default = "default_cable_stiffness")]
+    pub cable_stiffness: f64,
+    #[serde(default = "default_cable_damping")]
+    pub cable_damping: f64,
+    #[serde(default = "default_winch_rate")]
+    pub winch_rate: f64,
+    #[serde(default = "default_capture_radius")]
+    pub capture_radius: f64,
+    #[serde(default = "default_capture_cone_deg")]
+    pub capture_cone_angle_deg: f64,
+    #[serde(default = "default_max_capture_speed")]
+    pub max_capture_speed: f64,
+    #[serde(default = "default_tension_breakaway")]
+    pub tension_breakaway: f64,
+}
+
+fn default_hook_offset() -> [f64; 3] { [-1.9, 0.0, -0.08] }
+fn default_cable_length_max() -> f64 { 8.0 }
+fn default_cable_stiffness() -> f64 { 1000.0 }
+fn default_cable_damping() -> f64 { 65.0 }
+fn default_winch_rate() -> f64 { 0.6 }
+fn default_capture_radius() -> f64 { 0.35 }
+fn default_capture_cone_deg() -> f64 { 28.0 }
+fn default_max_capture_speed() -> f64 { 5.0 }
+fn default_tension_breakaway() -> f64 { 2200.0 }
 
 /// Convenience helper that loads a config from `path` and initializes a
 /// fresh flight state.

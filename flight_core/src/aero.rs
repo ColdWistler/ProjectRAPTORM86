@@ -144,6 +144,8 @@ pub struct ControlInputs {
     pub throttle: f64,
     /// Trailing-edge flap deflection (radians, positive down).
     pub flap: f64,
+    /// Wing sweep position `[0.0 .. 1.0]` where 0 = unswept, 1 = fully swept.
+    pub wing_sweep: f64,
 }
 
 impl Default for ControlInputs {
@@ -154,6 +156,7 @@ impl Default for ControlInputs {
             rudder: 0.0,
             throttle: 0.0,
             flap: 0.0,
+            wing_sweep: 0.0,
         }
     }
 }

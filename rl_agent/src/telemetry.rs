@@ -7,7 +7,8 @@
 //! runs/
 //! └── 20260923_143512_123_ppo_seed42_smoke/
 //!     ├── run.json        # manifest: config, timestamps, git commit, argv
-//!     └── metrics.jsonl   # one JSON object per PPO iteration (append-only)
+//!     ├── metrics.jsonl   # one JSON object per PPO iteration (append-only)
+//!     └── episodes.jsonl  # one JSON object per finished rollout episode
 //! ```
 //!
 //! - `run_id` is a UTC timestamp + algorithm + seed (+ an optional human
@@ -18,6 +19,12 @@
 //! - `metrics.jsonl` is flushed after every iteration, so a live consumer
 //!   (the Godot RL panel, a shell `tail -f`, an HTML dashboard) can watch the
 //!   file as training progresses — no schema changes needed to add fields.
+//!   Each iteration carries an optional [`EnvSummary`] (`env` key) describing
+//!   the flight state seen during that rollout.
+//! - `episodes.jsonl` gets one [`EpisodeRecord`] per episode that ends during
+//!   the rollout, with its termination cause and the same environment summary.
+//!   Eval episodes are deliberately excluded: they are a periodic probe, not
+//!   part of the training distribution.
 //!
 //! The writer is plain `std` (no external deps): UTC timestamps are computed
 //! from `SystemTime` with the Howard Hinnant civil-from-days algorithm.
@@ -25,7 +32,7 @@
 use crate::algo::AlgoSpec;
 use crate::net::NetConfig;
 use crate::trainer::{EvalMetrics, TrainerConfig};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +43,7 @@ pub const TELEMETRY_SCHEMA: &str = "rl_agent.telemetry.v1";
 
 const MANIFEST: &str = "run.json";
 const METRICS: &str = "metrics.jsonl";
+const EPISODES: &str = "episodes.jsonl";
 
 /// Optional label added to the run id; the label is slugified
 /// (lowercased, non-alphanumerics → `_`).
@@ -80,6 +88,11 @@ pub struct RunMeta<'a> {
     pub tcfg: &'a TrainerConfig,
     pub ncfg: &'a NetConfig,
     pub spec: &'a AlgoSpec,
+    pub mission: Option<&'a crate::contracts::MissionSummary>,
+    pub reward_profile: Option<&'a str>,
+    pub specialization: Option<&'a str>,
+    pub contract: &'a str,
+    pub expert: Option<&'a crate::policy::ExpertCard>,
 }
 
 /// An append-only writer for one training run.
@@ -91,6 +104,7 @@ pub struct TelemetryWriter {
     run_id: String,
     run_dir: PathBuf,
     metrics: Option<BufWriter<File>>,
+    episodes: Option<BufWriter<File>>,
     started: Instant,
     finished: bool,
 }
@@ -109,6 +123,15 @@ struct Manifest<'a> {
     trainer: &'a TrainerConfig,
     network: &'a NetConfig,
     algorithm: &'a AlgoSpec,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mission: Option<&'a crate::contracts::MissionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reward_profile: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    specialization: Option<&'a str>,
+    contract: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expert: Option<&'a crate::policy::ExpertCard>,
 }
 
 /// Per-iteration telemetry. Serde-flattened eval metrics ride along when an
@@ -133,7 +156,9 @@ pub struct IterationRecord<'a> {
     pub advantage_std: f32,
     /// Mean per-step reward over the rollout (crash penalties included).
     pub mean_reward_per_step: f32,
-    /// Mean steps per completed episode in this rollout.
+    /// Mean steps per episode completed during this rollout. Episodes can
+    /// span iteration boundaries, so this is the true episode length, not
+    /// just the steps collected since the boundary.
     pub mean_episode_steps: f32,
     /// Fraction of completed episodes that ended in a crash (0..=1).
     pub crash_rate: f32,
@@ -142,8 +167,126 @@ pub struct IterationRecord<'a> {
     /// Deterministic-evaluation metrics, present on eval iterations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eval: Option<&'a EvalMetrics>,
+    /// Ground-truth flight state summarised over this rollout, present when
+    /// the environment can report it (see [`crate::trainer::EnvSpec::frame`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<EnvSummary>,
     /// Whether a checkpoint was written this iteration.
     pub checkpoint: bool,
+    /// Live-stream counters, present when frame streaming is enabled.
+    ///
+    /// `dropped` is the honest part: a viewer that missed frames would
+    /// otherwise be indistinguishable from an aircraft that sat still, so the
+    /// loss is reported rather than hidden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamRecord>,
+}
+
+/// Frame-streaming counters attached to an iteration record.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct StreamRecord {
+    /// Frames handed to the writer thread so far.
+    pub frames: u64,
+    /// Frames dropped because the consumer could not keep up.
+    pub dropped: u64,
+    /// Episodes flushed to `episodes/`.
+    pub episodes: u64,
+}
+
+/// Environment telemetry summarised over a window of rollout steps.
+///
+/// This is the ground-truth counterpart to the agent's noisy observation: the
+/// reward curve says *whether* the policy improved, this says *how* it flew.
+/// Values are plain `f64` in SI units so a JSON consumer can plot them without
+/// knowing the simulation's internals.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct EnvSummary {
+    /// Steps accumulated into this summary (0 means "no data").
+    pub samples: u64,
+    /// Mean/min/max true altitude (m).
+    pub alt_mean: f64,
+    pub alt_min: f64,
+    pub alt_max: f64,
+    /// Mean/min/max true airspeed (m/s).
+    pub airspeed_mean: f64,
+    pub airspeed_min: f64,
+    pub airspeed_max: f64,
+    /// Mean/min/max climb rate (m/s, positive climbing).
+    pub climb_mean: f64,
+    pub climb_min: f64,
+    pub climb_max: f64,
+    /// Mean ground speed (m/s).
+    pub ground_speed_mean: f64,
+    /// Mean absolute bank / pitch (rad).
+    pub roll_abs_mean: f64,
+    pub pitch_abs_mean: f64,
+    /// Mean angle of attack (rad) and mean absolute sideslip (rad).
+    pub aoa_mean: f64,
+    pub sideslip_abs_mean: f64,
+    /// Mean and max wind magnitude (m/s).
+    pub wind_mean: f64,
+    pub wind_max: f64,
+    /// Mean commanded throttle `[0, 1]`.
+    pub throttle_mean: f64,
+    /// Mean absolute surface deflection (deg) across elevator/aileron/rudder.
+    pub surface_effort_mean: f64,
+    /// Mean absolute barometric altitude error (m) — perceived vs true.
+    pub baro_err_abs_mean: f64,
+    /// Mean absolute indicated-airspeed error (m/s) — perceived vs true.
+    pub airspeed_err_abs_mean: f64,
+    /// Lowest battery charge seen (%), or 0 when the stack has no battery.
+    pub battery_pct_min: f64,
+    /// Weather summary, present only when the env has a weather system.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weather: Option<WeatherSummary>,
+}
+
+/// Weather telemetry summarised over the same window as [`EnvSummary`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct WeatherSummary {
+    /// Steps accumulated into this summary.
+    pub samples: u64,
+    /// Mean steady wind speed of the active scene (m/s).
+    pub wind_speed_mean: f64,
+    /// Mean and max effective gust RMS (m/s).
+    pub gust_rms_mean: f64,
+    pub gust_rms_max: f64,
+    /// Mean turbulence band index (`Light = 0` … `Extreme = 3`).
+    pub turbulence_mean: f64,
+    /// Mean severity rank (`Clear = 0` … `Severe = 3`).
+    pub severity_mean: f64,
+    /// Mean rain intensity `[0, 1]`.
+    pub rain_mean: f64,
+    /// Lowest visibility seen (m).
+    pub visibility_min: f64,
+    /// Mean absolute updraft strength (m/s).
+    pub updraft_abs_mean: f64,
+    /// Mean absolute wind-shear gradient ((m/s)/m).
+    pub shear_abs_mean: f64,
+}
+
+/// One finished rollout episode, written to `episodes.jsonl`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EpisodeRecord<'a> {
+    /// Monotonic episode counter across the run.
+    pub episode: u32,
+    /// Iteration during which the episode ended.
+    pub iteration: usize,
+    /// Environment steps in the episode.
+    pub steps: usize,
+    /// Episode wall-clock duration implied by `steps * env_dt` (s).
+    pub duration_s: f64,
+    /// Cumulative shaped reward, crash penalty included.
+    pub reward_sum: f64,
+    /// Ended on a terminal state (ground impact or weather limit).
+    pub terminated: bool,
+    /// Ended because the step budget ran out.
+    pub truncated: bool,
+    /// Why the episode ended: `ground_impact`, `gust_limit`,
+    /// `visibility_limit`, `severe_exposure`, `step_budget`, or `terminated`.
+    pub termination: &'a str,
+    /// Environment telemetry accumulated over the episode.
+    pub env: EnvSummary,
 }
 
 impl TelemetryWriter {
@@ -175,14 +318,22 @@ impl TelemetryWriter {
             trainer: meta.tcfg,
             network: meta.ncfg,
             algorithm: meta.spec,
+            mission: meta.mission,
+            reward_profile: meta.reward_profile,
+            specialization: meta.specialization,
+            contract: meta.contract,
+            expert: meta.expert,
         };
         write_json(&run_dir.join(MANIFEST), &serde_json::to_string_pretty(&manifest)?)?;
 
         let file = File::options().create(true).append(true).open(run_dir.join(METRICS))?;
+        let episodes =
+            File::options().create(true).append(true).open(run_dir.join(EPISODES))?;
         Ok(Some(Self {
             run_id,
             run_dir,
             metrics: Some(BufWriter::new(file)),
+            episodes: Some(BufWriter::new(episodes)),
             started: Instant::now(),
             finished: false,
         }))
@@ -202,6 +353,25 @@ impl TelemetryWriter {
     /// see it immediately). Marks the manifest as `completed` on success.
     pub fn record(&mut self, rec: &IterationRecord<'_>) -> Result<(), Box<dyn std::error::Error>> {
         let Some(w) = self.metrics.as_mut() else {
+            return Ok(());
+        };
+        serde_json::to_writer(&mut *w, rec)?;
+        w.write_all(b"\n")?;
+        w.flush()?;
+        Ok(())
+    }
+
+    /// Append one finished-episode record and flush.
+    ///
+    /// Called from inside the rollout as soon as an episode ends, so a live
+    /// consumer sees episode boundaries without waiting for the iteration to
+    /// finish. The cost is one flush per episode (thousands of steps), not per
+    /// step, so it stays off the hot path.
+    pub fn record_episode(
+        &mut self,
+        rec: &EpisodeRecord<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(w) = self.episodes.as_mut() else {
             return Ok(());
         };
         serde_json::to_writer(&mut *w, rec)?;
@@ -378,6 +548,11 @@ mod tests {
             tcfg: &tcfg,
             ncfg: &ncfg,
             spec: &spec,
+            mission: None,
+            reward_profile: None,
+            specialization: None,
+            contract: "avionics",
+            expert: None,
         };
         let mut w = TelemetryWriter::start(&cfg, &meta)
             .expect("start")
@@ -406,9 +581,58 @@ mod tests {
             crash_rate: 0.25,
             episodes_completed: 4,
             eval: Some(&ev),
+            env: Some(EnvSummary {
+                samples: 2048,
+                alt_mean: 1200.0,
+                alt_min: 1100.0,
+                alt_max: 1300.0,
+                airspeed_mean: 60.0,
+                airspeed_min: 55.0,
+                airspeed_max: 65.0,
+                climb_mean: 0.5,
+                climb_min: -2.0,
+                climb_max: 3.0,
+                ground_speed_mean: 61.0,
+                roll_abs_mean: 0.1,
+                pitch_abs_mean: 0.05,
+                aoa_mean: 0.02,
+                sideslip_abs_mean: 0.01,
+                wind_mean: 4.0,
+                wind_max: 9.0,
+                throttle_mean: 0.55,
+                surface_effort_mean: 2.5,
+                baro_err_abs_mean: 0.8,
+                airspeed_err_abs_mean: 0.3,
+                battery_pct_min: 91.0,
+                weather: Some(WeatherSummary {
+                    samples: 2048,
+                    wind_speed_mean: 5.0,
+                    gust_rms_mean: 1.2,
+                    gust_rms_max: 3.4,
+                    turbulence_mean: 1.0,
+                    severity_mean: 1.0,
+                    rain_mean: 0.2,
+                    visibility_min: 5000.0,
+                    updraft_abs_mean: 0.4,
+                    shear_abs_mean: 0.01,
+                }),
+            }),
             checkpoint: false,
+            stream: None,
         };
         w.record(&rec).expect("record");
+        w.record_episode(&EpisodeRecord {
+            episode: 7,
+            iteration: 0,
+            steps: 512,
+            duration_s: 17.07,
+            reward_sum: 42.5,
+            terminated: false,
+            truncated: true,
+            termination: "step_budget",
+            env: rec.env.expect("env summary"),
+        })
+        .expect("record episode");
         w.finish().expect("finish");
 
         // Files exist and contain the expected shape.
@@ -417,6 +641,17 @@ mod tests {
         assert_eq!(line["iteration"], 0);
         assert_eq!(line["eval"]["episodes"], 2);
         assert_eq!(line["mean_reward_per_step"], 0.02);
+        assert_eq!(line["env"]["alt_mean"], 1200.0);
+        assert_eq!(line["env"]["weather"]["gust_rms_max"], 3.4);
+
+        // Episode rows are a separate append-only file, one JSON object each.
+        let episodes =
+            std::fs::read_to_string(w.run_dir().join(EPISODES)).expect("episodes.jsonl");
+        let ep: serde_json::Value = serde_json::from_str(episodes.trim()).expect("episode json");
+        assert_eq!(ep["episode"], 7);
+        assert_eq!(ep["termination"], "step_budget");
+        assert_eq!(ep["env"]["samples"], 2048);
+
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(w.run_dir().join(MANIFEST)).expect("run.json"),
         )
@@ -447,8 +682,66 @@ mod tests {
             tcfg: &tcfg,
             ncfg: &ncfg,
             spec: &spec,
+            mission: None,
+            reward_profile: None,
+            specialization: None,
+            contract: "avionics",
+            expert: None,
         };
         let w = TelemetryWriter::start(&cfg, &meta).expect("start");
         assert!(w.is_none());
+    }
+
+    #[test]
+    fn manifest_records_mission_metadata() {
+        use crate::contracts::MissionSummary;
+        let dir = std::env::temp_dir().join(format!(
+            "rl_agent_manifest_mission_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tcfg = TrainerConfig {
+            iterations: 1,
+            rollout_steps: 8,
+            ..Default::default()
+        };
+        let ncfg = NetConfig { obs_dim: 32, ..Default::default() };
+        let spec = AlgoSpec::from_id("ppo").unwrap();
+        let summary = MissionSummary {
+            airframe: "m_sweep_mini.toml".into(),
+            contract: crate::contracts::MISSION_CONTRACT.into(),
+            reward_profile: "balanced".into(),
+            cruise_altitude: 1000.0,
+            cruise_airspeed: 55.0,
+            pickup_radius: 40.0,
+            pickup_vertical_tolerance: 15.0,
+            capture_speed: 11.5,
+            capture_dwell_steps: 15,
+            max_steps: 4500,
+        };
+        let mut w = TelemetryWriter::start(
+            &TelemetryConfig { run_root: dir.to_string_lossy().into(), name: Some("mt".into()) },
+            &RunMeta {
+                algo: "ppo",
+                backend: "cpu",
+                tcfg: &tcfg,
+                ncfg: &ncfg,
+                spec: &spec,
+                mission: Some(&summary),
+                reward_profile: Some("balanced"),
+                specialization: Some("full"),
+                contract: crate::contracts::MISSION_CONTRACT,
+                expert: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        w.finish().unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(w.run_dir().join("run.json")).unwrap()).unwrap();
+        assert_eq!(json["mission"]["contract"], "mission.v1");
+        assert_eq!(json["mission"]["capture_speed"], 11.5);
+        assert_eq!(json["contract"], "mission.v1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

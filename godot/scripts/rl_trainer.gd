@@ -10,6 +10,7 @@ extends Control
 
 const ALGORITHMS := [
 	{ "name": "PPO — clipped surrogate", "id": "ppo" },
+	{ "name": "A2C — advantage actor-critic", "id": "a2c" },
 ]
 
 ## Backends (display name -> `--backend` value).
@@ -50,13 +51,13 @@ const ChartScript := preload("res://scripts/rl_chart.gd")
 # project root, so raw `res://../runs` access silently lists the project dir.
 const RUNS_DIR := "res://../runs"
 
-const BG_CARD := Color(0.09, 0.11, 0.17)
-const BORDER := Color(0.15, 0.19, 0.28)
-const BORDER_LIGHT := Color(0.20, 0.26, 0.36)
-const ACCENT := Color(0.30, 0.65, 0.95)
-const TEXT_LIGHT := Color(0.88, 0.92, 0.97)
-const TEXT_MID := Color(0.55, 0.63, 0.75)
-const TEXT_DIM := Color(0.38, 0.46, 0.58)
+const BG_CARD := Color(0.086, 0.110, 0.141)
+const BORDER := Color(0.137, 0.176, 0.220)
+const BORDER_LIGHT := Color(0.196, 0.251, 0.310)
+const ACCENT := Color(0.498, 0.741, 0.886)
+const TEXT_LIGHT := Color(0.902, 0.933, 0.961)
+const TEXT_MID := Color(0.647, 0.706, 0.776)
+const TEXT_DIM := Color(0.478, 0.541, 0.616)
 const OK_COLOR := Color(0.45, 0.85, 0.50)
 const ERR_COLOR := Color(0.95, 0.45, 0.40)
 
@@ -397,7 +398,7 @@ func _on_metric_changed(index: int) -> void:
 func _rebuild_chart(key: String) -> void:
 	_chart.clear()
 	_chart.set_metric(key)
-	var series: Array = _points.get(key, [])
+	var series: Array = _points.get(key) if _points.has(key) else []
 	for p in series:
 		_chart.push(int(p["x"]), float(p["y"]))
 	_chart.update_title()
@@ -671,7 +672,7 @@ func _jsonl_filled(p: String) -> bool:
 
 
 func _ingest_record(rec: Dictionary) -> void:
-	var it := int(rec.get("iteration", -1))
+	var it := int(rec.get("iteration") if rec.has("iteration") else -1)
 	if it < 0:
 		return
 	_push_point("mean_reward_per_step", it, rec.get("mean_reward_per_step"))
@@ -684,6 +685,24 @@ func _ingest_record(rec: Dictionary) -> void:
 		_push_point("alt_err", it, ev.get("alt_err"))
 		_push_point("spd_err", it, ev.get("spd_err"))
 		_push_point("eval_reward", it, ev.get("total_reward"))
+	# Ground-truth flight state. Older runs have no `env` key, so this is a
+	# no-op for them and the chart keeps showing the metrics it always had.
+	var env: Variant = rec.get("env")
+	if typeof(env) == TYPE_DICTIONARY:
+		_push_point("env_alt_mean", it, env.get("alt_mean"))
+		_push_point("env_airspeed_mean", it, env.get("airspeed_mean"))
+		_push_point("env_climb_mean", it, env.get("climb_mean"))
+		_push_point("env_roll_abs_mean", it, env.get("roll_abs_mean"))
+		_push_point("env_pitch_abs_mean", it, env.get("pitch_abs_mean"))
+		_push_point("env_wind_mean", it, env.get("wind_mean"))
+		_push_point("env_throttle_mean", it, env.get("throttle_mean"))
+		_push_point("env_surface_effort_mean", it, env.get("surface_effort_mean"))
+		_push_point("env_baro_err_abs_mean", it, env.get("baro_err_abs_mean"))
+		_push_point("env_battery_pct_min", it, env.get("battery_pct_min"))
+		var wx: Variant = env.get("weather")
+		if typeof(wx) == TYPE_DICTIONARY:
+			_push_point("weather_gust_rms_max", it, wx.get("gust_rms_max"))
+			_push_point("weather_visibility_min", it, wx.get("visibility_min"))
 
 
 func _push_point(key: String, it: int, value: Variant) -> void:
