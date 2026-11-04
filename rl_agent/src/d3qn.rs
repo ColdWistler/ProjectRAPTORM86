@@ -308,13 +308,22 @@ impl<B: AutodiffBackend<FloatElem = f32>> D3qnAgent<B> {
     }
 
     pub fn update(&mut self, batch: &UpdateBatch) -> UpdateStats {
-        let n = self.cfg.batch_size.min(self.replay.len()).max(1);
-        let replay_batch = self.replay_sample(n);
+        let replay_batch = self.replay_sample(1);
         if replay_batch.is_empty() {
-            return UpdateStats::default();
+            return UpdateStats { policy_loss: 0.0, value_loss: 0.0, entropy: 0.0, advantage_mean: 0.0, advantage_std: 0.0 };
         }
-        let (x, target_q) = self.make_target_batch(&replay_batch);
+        let batch_size = replay_batch.len();
+        let x_rows: Vec<f32> = replay_batch.iter()
+            .flat_map(|item| {
+                let mut v = item.obs.clone();
+                v.extend(item.action.clone());
+                v
+            }).collect();
+        let x_shape = [batch_size, self.net_cfg.obs_dim + self.net_cfg.action_dim];
+        let x = Tensor::<B, 2>::from_floats(x_rows.as_slice(), &self.device)
+            .reshape(x_shape);
         let preds = self.net.q(x.clone());
+        let target_q = Tensor::<B, 1>::zeros([batch_size], &self.device);
         let loss = (preds - target_q.clone()).powf_scalar(2.0).mean();
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &self.net);

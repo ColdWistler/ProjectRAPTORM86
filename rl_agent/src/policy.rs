@@ -4,7 +4,7 @@
 use crate::contracts::{action_to_avionics, MISSION_OBS_DIM};
 use crate::{algo::Algorithm, normalize::RunningNormalizer};
 use burn::tensor::backend::AutodiffBackend;
-use flight_core::{MissionPhase, MissionContext};
+use flight_core::{MissionFeatures, MissionPhase, MissionContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +74,9 @@ pub struct PolicyContext {
     pub phase: MissionPhase,
     pub step: usize,
     pub captured: bool,
+    /// Optional mission features (13-dim). Ignored when `None`; the selector
+    /// falls back to phase-only gating in that case.
+    pub features: Option<MissionFeatures>,
 }
 
 /// A policy returns **physical** commands (not tanh-space).
@@ -265,7 +268,8 @@ mod tests {
     #[test]
     fn heuristic_actions_stay_in_bounds() {
         let mut p = HeuristicPolicy::new(55.0, 11.5, 10.0);
-        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false };
+        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false,
+            features: None };
         for bearing in [-3.0, -0.5, 0.0, 0.5, 3.0] {
             let a = p.act(&obs_with(bearing, 55.0), &ctx);
             assert_eq!(a.len(), 4);
@@ -279,7 +283,8 @@ mod tests {
     #[test]
     fn heuristic_rolls_toward_a_target_on_the_right() {
         let mut p = HeuristicPolicy::new(55.0, 11.5, 10.0);
-        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false };
+        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false,
+            features: None };
         let a = p.act(&obs_with(0.5, 55.0), &ctx);
         assert!(a[0] > 0.0);
     }
@@ -287,8 +292,10 @@ mod tests {
     #[test]
     fn heuristic_bleeds_throttle_in_capture_when_fast() {
         let mut p = HeuristicPolicy::new(55.0, 11.5, 10.0);
-        let fast = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false };
-        let slow = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false };
+        let fast = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false,
+            features: None };
+        let slow = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false,
+            features: None };
         let a_fast = p.act(&obs_with(0.0, 40.0), &fast);
         let a_slow = p.act(&obs_with(0.0, 11.5), &slow);
         assert!(a_fast[3] < a_slow[3]);
@@ -297,7 +304,8 @@ mod tests {
     #[test]
     fn heuristic_never_commands_nan_on_zero_airspeed() {
         let mut p = HeuristicPolicy::new(55.0, 11.5, 10.0);
-        let ctx = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false };
+        let ctx = PolicyContext { phase: MissionPhase::Capture, step: 0, captured: false,
+            features: None };
         let a = p.act(&obs_with(0.0, 0.0), &ctx);
         assert!(a.iter().all(|v| v.is_finite()));
     }
@@ -327,7 +335,8 @@ mod tests {
             notes: String::new(),
         };
         let mut p = RlPolicy::new(algo, normalizer, card);
-        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false };
+        let ctx = PolicyContext { phase: MissionPhase::Outbound, step: 0, captured: false,
+            features: None };
         let a = p.act(&vec![0.0f32; MISSION_OBS_DIM], &ctx);
         assert_eq!(a.len(), crate::ACTION_DIM);
         assert!(a.iter().all(|v| v.is_finite()));

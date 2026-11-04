@@ -145,6 +145,7 @@ pub fn run_eval_suite(
                 phase: env.phase(),
                 step,
                 captured: env.phase() == flight_core::MissionPhase::Return || env.phase() == flight_core::MissionPhase::Done,
+                features: None,
             };
             let action = policy.act(&obs_vec.iter().map(|v| *v as f32).collect::<Vec<_>>(), &ctx);
             let av_action = flight_core::AvionicsAction {
