@@ -483,6 +483,11 @@ impl AvionicsEnvironment {
         &self.sim.config
     }
 
+    /// The live 6-DOF physics state.
+    pub fn aircraft_state(&self) -> &crate::state::AircraftState {
+        &self.sim.state
+    }
+
     /// Reset to trimmed level flight and clear all injected faults.
     pub fn reset(&mut self) -> (AvionicsObservation, usize) {
         self.reset_trimmed(1000.0, 60.0)
@@ -604,33 +609,6 @@ impl AvionicsEnvironment {
         self.step_count
     }
 
-    /// Ground-truth flight state for the most recent step.
-    ///
-    /// The observation vector ([`Self::observation`]) is deliberately limited to
-    /// the noisy sensor bus the agent may perceive, so it carries no attitude,
-    /// ground track, or true altitude. Anything that needs to *show* the
-    /// aircraft — a live training viewer, a replay, a debugging overlay —
-    /// reads it from here instead.
-    ///
-    /// Sampling this mid-`step` (rather than after it) yields a frame whose
-    /// physics and avionics halves describe different instants; call it once
-    /// the step has completed.
-    pub fn frame(&self) -> FlightFrame {
-        FlightFrame::capture(&self.sim.state, self.avionics.bus())
-    }
-
-    /// The live 6-DOF physics state.
-    ///
-    /// Exposed for inspection and replay; training should prefer
-    /// [`Self::frame`], which additionally folds in the avionics bus.
-    pub fn aircraft_state(&self) -> &crate::state::AircraftState {
-        &self.sim.state
-    }
-
-    /// The avionics sensor bus (noisy outputs plus ground-truth `true_*`).
-    pub fn bus(&self) -> &crate::avionics::AvionicsBus {
-        self.avionics.bus()
-    }
 }
 
 /// Verification & Validation (V&V) for the OpenAI-gym-style environment
