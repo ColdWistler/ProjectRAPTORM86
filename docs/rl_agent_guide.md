@@ -39,15 +39,15 @@ algorithm, backend and hyper-parameters and runs training with a live log
 | Flag | Default | Meaning |
 |---|---|---|
 | `--mode train\|eval` | `train` | Train, or evaluate a checkpointed policy |
-| `--algo NAME` | `ppo` | Training algorithm (see §5: `ppo`; add yours to `algo.rs`) |
+| `--algo NAME` | `ppo` | Training algorithm: `ppo`, `a2c`, `d3qn`, `sac`, `td3` (see §5) |
 | `--backend cpu\|gpu\|auto` | `auto` | Tensor backend at runtime (see §3) |
-| `--iterations N` | `1000` | PPO iterations (one rollout + update each) |
+| `--iterations N` | `300` | Iterations (one rollout + update each) |
 | `--rollout N` | `2048` | Env steps collected per iteration |
 | `--env-max-steps N` | `2000` | Per-episode step budget (truncation) |
 | `--env-dt SECONDS` | `0.0333` | Physics step size (1/30 s) |
 | `--hidden N` | `128` | Width of both shared hidden layers |
 | `--log-std-init F` | `-0.5` | Initial per-channel policy `log_std` |
-| `--epochs N` | `10` | PPO epochs per update |
+| `--epochs N` | `10` | PPO epochs per update (A2C: `1`) |
 | `--minibatch N` | `64` | Transitions per gradient step |
 | `--lr F` | `3e-4` | AdamW learning rate |
 | `--gamma F` | `0.99` | Discount factor |
@@ -56,6 +56,10 @@ algorithm, backend and hyper-parameters and runs training with a live log
 | `--value-coef F` | `0.5` | Value-loss coefficient |
 | `--entropy-coef F` | `0.0` | Entropy bonus coefficient |
 | `--max-grad-norm F` | `0.5` | Global gradient-norm clip |
+| `--polyak-tau F` | `0.005` | Target-network soft-update rate (`sac`, `td3`, `d3qn`) |
+| `--alpha F` | `0.2` | SAC entropy temperature |
+| `--policy-delay N` | `2` | TD3 critic steps between actor updates |
+| `--batch-size N` | `64` | Replay batch size (`sac`, `td3`, `d3qn`) |
 | `--seed N` | `42` | Weights init + host sampler RNG |
 | `--save-every N` | `100` | Checkpoint every N iterations (0 = never) |
 | `--print-every N` | `1` | Log per-iteration stats every N (0 = silent) |
@@ -133,15 +137,50 @@ runtime — on the CLI (`--algo`) or from the Godot menu dropdown.
 | Piece | File | Notes |
 |---|---|---|
 | `Algorithm<B>` trait | `src/algo.rs` | `id`, `net_config`, `spec`, `td_params`, `act`/`deterministic_action`, `value_single`/`value_all`, `update`, `save_weights`/`load_weights`. The shared loop consumes only these. |
+| Off-policy hooks | `src/algo.rs` | `is_off_policy`, `observe_transition`, `gradient_steps_per_env_step`, `set_normalizer` — see §5.1. |
 | `AlgoSpec` enum | `src/algo.rs` | Serializable `(id, config)` selection; persisted into every checkpoint as `algo.json`. Internally `serde`-tagged so files are versioned by algorithm id. |
 | Registry | `src/algo.rs::make_algorithm` | `Box<dyn Algorithm<B>>` factory — one match arm per algorithm. |
-| `UpdateBatch` / `UpdateStats` | `src/algo.rs` | Algo-agnostic transition batch and averaged loss stats exchanged with `update`. On-policy algos consume the GAE fields; off-policy algos can ignore them. |
+| `UpdateBatch` / `UpdateStats` | `src/algo.rs` | Algo-agnostic transition batch and averaged loss stats exchanged with `update`. On-policy algos consume the GAE fields; off-policy algos ignore them. |
 | Trainer | `src/trainer.rs` | Generic `run<B>(&TrainerConfig, &NetConfig, &AlgoSpec, &device, &config_path)` — builds via the registry, rolls out, GAE, update, eval, checkpoint. |
 
 The shared loop computes GAE with the discount/trace-decay from
 `Algorithm::td_params()` (PPO returns its γ/λ); a value-free algorithm
 returns `(0.99, 0.95)` and can override the bootstrap behavior in its own
 `update`.
+
+### 5.1 On-policy vs off-policy
+
+Spec §10 lets each model's loop differ. The trait carries four optional
+hooks so the shared trainer can drive both families:
+
+| Hook | Default | Meaning |
+|---|---|---|
+| `is_off_policy()` | `false` | The model learns from its **own** replay buffer, not from the rollout batch. |
+| `observe_transition(&Transition)` | no-op | Receives one raw (`obs`, `action`, `reward`, `terminated`, `truncated`, `next_obs`) transition per env step. |
+| `gradient_steps_per_env_step()` | `0.0` | `0.0` = one update per rollout (on-policy). `1.0` = one gradient step per collected transition (off-policy). |
+| `set_normalizer(RunningNormalizer)` | no-op | Hands the model the trainer's observation statistics. |
+
+Why the off-policy models need them: `UpdateBatch` carries observations,
+actions, log-probs, advantages and returns — **no reward, no next
+observation and no done flag**. A Bellman target cannot be built from it.
+So SAC / TD3 / D3QN keep their own replay buffer, receive the raw
+transitions through `observe_transition`, and run their gradient steps
+*inside* the rollout loop (one per env step, with a fractional `grad_debt`
+so a ratio like `0.5` works). The trainer skips the host-side GAE for them.
+
+**The normalizer is frozen for the whole rollout.** The statistics are
+snapshotted before the rollout and refreshed from the rollout's observations
+*after* the update:
+
+- for PPO/A2C, the policy that sampled the data and the policy that trains
+  on it must see identically scaled observations, otherwise the importance
+  ratio is not `1.0` at the first epoch;
+- for the off-policy models, `obs` and `next_obs` of one transition must be
+  scaled with the *same* statistics, otherwise the Bellman target is
+  inconsistent.
+
+Off-policy replay buffers therefore store **raw** observations and scale the
+sampled batch at update time with the injected snapshot.
 
 ### Adding a new model
 
@@ -165,10 +204,37 @@ models that produce `(action, log_prob)` pairs and a value.
 cargo run -p rl_agent --release -- --algo ppo --backend auto
 ```
 
-`--algo` accepts any id in `rl_agent::algo::ALGORITHM_IDS` (currently
-`ppo`). The algorithm's own flags (`--lr`, `--gamma`, ...) configure the
-selected model; `AlgoSpec::from_id` rejects unknown ids with the registered
-list.
+`--algo` accepts any id in `rl_agent::algo::ALGORITHM_IDS` (currently `ppo`,
+`a2c`, `d3qn`, `sac`, `td3`). The algorithm's own flags (`--lr`, `--gamma`,
+`--epochs`, `--polyak-tau`, ...) configure the selected model;
+`AlgoSpec::from_id` rejects unknown ids with the registered list.
+
+### The five models
+
+| Id | Module | Family | What it does |
+|---|---|---|---|
+| `ppo` | `src/ppo.rs` | on-policy | PPO-Clip with per-minibatch advantage whitening. The reference model. |
+| `a2c` | `src/a2c.rs` | on-policy | Advantage actor-critic, **one** gradient pass per rollout, no clipping. |
+| `sac` | `src/sac.rs` | off-policy | Soft actor-critic: tanh-Gaussian actor, twin Q-critics, entropy bonus, Polyak targets. |
+| `td3` | `src/td3.rs` | off-policy | TD3: deterministic tanh actor, twin Q-critics, delayed actor updates, target-policy smoothing. |
+| `d3qn` | `src/d3qn.rs` | off-policy | Dueling critic + separate policy head, double-Q target, prioritized replay. |
+
+Shared invariants (each has a behavioural test):
+
+- the target networks start as an **exact copy** of the online networks and
+  are then **Polyak-averaged** (`τ`), never hard-synced and never
+  re-randomized;
+- the actor's action stays attached to the autodiff graph — a host
+  round-trip would sever the gradient and freeze the actor forever;
+- a **truncation** (step budget) still bootstraps; only a **termination**
+  stops the bootstrap;
+- the learnable per-channel `log_std` is clamped to `[-5, 1]`, so an entropy
+  bonus cannot turn the policy into pure noise;
+- burn's `Linear` weights initialize **lazily** from a process-wide RNG, so
+  every model seeds the backend and materializes its parameters under one
+  lock (`net::init_lock` / `net::materialize`) before any clone. Cloning an
+  unmaterialized parameter yields an *independently initialized* copy — that
+  is how a target network silently becomes a different network.
 
 ## 6. The Godot menu
 
@@ -216,21 +282,28 @@ r = exp(log π_θ(a|s) − log π_old(a|s))
 | Sampling | `src/ppo.rs` | Action sampled on the **host** with a seeded `StdRng` from the device-computed mean, so rollouts are reproducible. The tensor `log_prob` and the host `gaussian_log_prob_tanh` implement the **identical formula** (checked to 1e-5 in tests). |
 | Buffer | `src/buffer.rs` | Flat `f32` arrays: raw obs, actions, log-probs, rewards, `terminated`/`truncated` flags. |
 | GAE | `src/gae.rs` | Host-side generalized advantage estimation; `terminated` zeroes the next value **and** masks the accumulator. |
-| Normalizer | `src/normalize.rs` | Welford running mean/variance observed during rollout; applied with **final** stats at update/eval time; clipped to ±5. |
+| Normalizer | `src/normalize.rs` | Welford running mean/variance; **frozen for the whole rollout** and refreshed from the rollout's observations after the update; clipped to ±5. See §5.1. |
 | Optimizer | `src/ppo.rs` | AdamW with `GradientClippingConfig::Norm(max_grad_norm)` baked into the optimizer config. |
 | Trainer | `src/trainer.rs` | Generic `run<B>` loop: rollout → values → GAE → update → eval/checkpoint. |
 
 **Rollout flow** (per iteration):
 
-1. For `rollout_steps` transitions: normalize the current obs, `agent.act()`
-   produces `(action, log_prob)`, the env steps, reward += `crash_penalty()`
-   on termination, transition is pushed (with the **pre-reset** observation
-   as `final_obs`), and on `terminated`/`truncated` the env resets and the
-   normalizer observes the fresh initial state.
-2. Values are predicted over the whole normalized batch; the last value is
-   `0` if the final rollout step terminated, else V(final obs).
-3. GAE advantages + returns; one `agent.update` over shuffled minibatches.
-4. Periodic deterministic eval and checkpoint save.
+1. The normalizer's statistics are snapshotted (`frozen`) and handed to the
+   model (`set_normalizer`).
+2. For `rollout_steps` transitions: normalize the current obs with the
+   **frozen** stats, `agent.act()` produces `(action, log_prob)`, the env
+   steps, reward += `crash_penalty()` on termination, the transition is
+   pushed (with the **pre-reset** observation as `final_obs`), and on
+   `terminated`/`truncated` the env resets. Off-policy models also receive
+   the transition through `observe_transition` and run their own gradient
+   steps here.
+3. On-policy only: values are predicted over the whole normalized batch; the
+   last value is `0` if the final rollout step terminated, else V(final obs).
+4. On-policy only: GAE advantages + returns; one `agent.update` over
+   shuffled minibatches.
+5. The rollout's observations are folded into the running statistics (every
+   step, not just the episode resets).
+6. Periodic deterministic eval and checkpoint save.
 
 ## 8. Determinism
 
@@ -312,12 +385,21 @@ let value = agent.value_single(&obs_norm);
 cargo test -p rl_agent
 ```
 
-The suite covers the network (host/tensor log-prob parity to 1e-5), GAE
-math (terminated bootstrapping), the normalizer, the rollout buffer, PPO
-updates, the algorithm layer (spec serde round-trip, registry factory +
-`act`), and end-to-end trainer smoke tests — including a real-environment
-two-iteration run, same-seed reproducibility, FC-limit action mapping, new
-and legacy checkpoint round-trips to a temp directory.
+The suite covers the network (host/tensor log-prob parity to 1e-5, the
+`log_std` clamp), GAE math (terminated bootstrapping), the normalizer, the
+rollout buffer, PPO / A2C updates, the algorithm layer (spec serde
+round-trip, registry factory + `act`), and end-to-end trainer smoke tests —
+including a real-environment two-iteration run, same-seed reproducibility,
+FC-limit action mapping, new and legacy checkpoint round-trips to a temp
+directory.
+
+It also contains the **behavioural acceptance tests** for the off-policy
+models (`rl_agent/src/{sac,td3,d3qn}.rs`) and the end-to-end CLI checks in
+`rl_agent/tests/algo_training_cli.rs`: an algorithm whose weights never move
+is not learning, so each test asserts that the actor/critic actually trains,
+that the target networks are Polyak-averaged rather than hard-synced, that
+the TD target is non-zero, and that a real training run reports non-zero
+metrics.
 
 ---
 

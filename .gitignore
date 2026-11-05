@@ -1,3 +1,5 @@
 /target
+# burn/wgpu writes its autotune logs next to the crate that runs the GPU probe.
+/rl_agent/target/
 checkpoints/
 runs/

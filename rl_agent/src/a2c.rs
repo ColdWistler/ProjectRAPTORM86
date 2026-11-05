@@ -39,7 +39,11 @@ impl Default for A2cConfig {
             entropy_coef: 0.01,
             max_grad_norm: 0.5,
             minibatch_size: 64,
-            epochs: 4,
+            // A2C makes **one** gradient pass per rollout (spec §9.2). More
+            // than one pass means several updates on the same on-policy data
+            // without an importance ratio, which is PPO's job — and it makes
+            // A2C diverge.
+            epochs: 1,
         }
     }
 }
@@ -300,5 +304,76 @@ mod tests {
         assert!(stats.policy_loss.is_finite());
         assert!(stats.value_loss.is_finite());
         assert!(stats.entropy.is_finite());
+    }
+
+    // ------------------------------------------------------------------
+    // Behavioural acceptance tests (spec §9.2).
+    //
+    // A2C is defined as *one* gradient pass per rollout. Running several
+    // passes over the same on-policy data without an importance ratio turns
+    // A2C into an off-policy algorithm and makes it diverge.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a2c_default_runs_one_gradient_pass_per_rollout() {
+        assert_eq!(
+            A2cConfig::default().epochs,
+            1,
+            "A2C must make one gradient pass per rollout (spec §9.2)"
+        );
+    }
+
+    #[test]
+    fn a2c_entropy_bonus_cannot_run_the_policy_std_away() {
+        // Zero advantages leave the entropy bonus as the only force on
+        // `log_std`; without a bound it walks upwards until the policy is
+        // pure noise and the run diverges.
+        let device = device();
+        let net_cfg = NetConfig {
+            obs_dim: 4,
+            hidden: 16,
+            action_dim: 2,
+            log_std_init: -0.5,
+        };
+        let cfg = A2cConfig {
+            lr: 0.02,
+            entropy_coef: 0.5,
+            epochs: 1,
+            ..A2cConfig::default()
+        };
+        let mut ag = A2cAgent::<Cpu>::new(&device, &net_cfg, &cfg, 7);
+
+        let n = 24;
+        let mut batch = UpdateBatch {
+            obs: vec![0.0; n * 4],
+            actions: vec![0.0; n * 2],
+            old_log_probs: vec![0.0; n],
+            advantages: vec![0.0; n],
+            returns: vec![0.5; n],
+        };
+        for i in 0..n {
+            for d in 0..4 {
+                batch.obs[i * 4 + d] = (i as f32) * 0.05 + d as f32;
+            }
+        }
+
+        for _ in 0..200 {
+            let stats = ag.update(&batch);
+            assert!(stats.policy_loss.is_finite(), "A2C policy loss diverged");
+            assert!(stats.value_loss.is_finite(), "A2C value loss diverged");
+        }
+
+        let log_std = ag.net.log_std_host();
+        for &s in &log_std {
+            assert!(s.is_finite(), "A2C log_std diverged: {s}");
+            assert!(
+                s <= crate::net::LOG_STD_MAX + 1e-6,
+                "A2C log_std escaped its upper bound: {s}"
+            );
+            assert!(
+                s >= crate::net::LOG_STD_MIN - 1e-6,
+                "A2C log_std escaped its lower bound: {s}"
+            );
+        }
     }
 }

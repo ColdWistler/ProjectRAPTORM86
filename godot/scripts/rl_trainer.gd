@@ -28,7 +28,7 @@ const BACKENDS := [
 ## flag passed to the binary. "int" and "float" map to SpinBoxes.
 const ALGO_FIELDS := {
 	"ppo": [
-		{ "label": "Iterations",       "key": "iterations",    "value": 1000,    "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
 		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
 		{ "label": "Episode budget",   "key": "env-max-steps", "value": 2000,    "min": 10,    "max": 50000,  "step": 10,    "format": "%d",     "kind": "int" },
 		{ "label": "Hidden width",     "key": "hidden",        "value": 128,     "min": 16,    "max": 4096,   "step": 16,    "format": "%d",     "kind": "int" },
@@ -42,6 +42,45 @@ const ALGO_FIELDS := {
 		{ "label": "Save every",       "key": "save-every",    "value": 100,     "min": 0,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
 		{ "label": "Eval every",       "key": "eval-every",    "value": 100,     "min": 0,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
 		{ "label": "Eval episodes",    "key": "eval-episodes", "value": 3,       "min": 0,     "max": 100,    "step": 1,     "format": "%d",     "kind": "int" },
+	],
+},
+	"a2c": [
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Hidden width",     "key": "hidden",        "value": 128,     "min": 16,    "max": 4096,   "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Learning rate",    "key": "lr",            "value": 0.0003,  "min": 0.0,   "max": 1.0,    "step": 0.0001, "format": "%.5f", "kind": "float" },
+		{ "label": "Gamma",            "key": "gamma",         "value": 0.99,    "min": 0.0,   "max": 1.0,    "step": 0.01,  "format": "%.2f",  "kind": "float" },
+	],
+	"sac": [
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Hidden width",     "key": "hidden",        "value": 128,     "min": 16,    "max": 4096,   "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Learning rate",    "key": "lr",            "value": 0.0003,  "min": 0.0,   "max": 1.0,    "step": 0.0001, "format": "%.5f", "kind": "float" },
+		{ "label": "Gamma",            "key": "gamma",         "value": 0.99,    "min": 0.0,   "max": 1.0,    "step": 0.01,  "format": "%.2f",  "kind": "float" },
+		{ "label": "Tau (soft update)", "key": "polyak-tau",  "value": 0.005,   "min": 0.001, "max": 1.0,    "step": 0.001, "format": "%.4f", "kind": "float" },
+	],
+	"td3": [
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Hidden width",     "key": "hidden",        "value": 128,     "min": 16,    "max": 4096,   "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Learning rate",    "key": "lr",            "value": 0.0003,  "min": 0.0,   "max": 1.0,    "step": 0.0001, "format": "%.5f", "kind": "float" },
+		{ "label": "Gamma",            "key": "gamma",         "value": 0.99,    "min": 0.0,   "max": 1.0,    "step": 0.01,  "format": "%.2f",  "kind": "float" },
+		{ "label": "Tau (soft update)", "key": "polyak-tau",  "value": 0.005,   "min": 0.001, "max": 1.0,    "step": 0.001, "format": "%.4f", "kind": "float" },
+	],
+	"d3qn": [
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Hidden width",     "key": "hidden",        "value": 128,     "min": 16,    "max": 4096,   "step": 16,    "format": "%d",     "kind": "int" },
+		{ "label": "Replay capacity",  "key": "buffer-capacity", "value": 50000,"min": 1000,"max": 500000, "step": 1000, "format": "%d",     "kind": "int" },
+		{ "label": "Batch size",       "key": "batch-size",    "value": 32,      "min": 4,     "max": 512,    "step": 4,     "format": "%d",     "kind": "int" },
+		{ "label": "Learning rate",    "key": "lr",            "value": 0.0003,  "min": 0.0,   "max": 1.0,    "step": 0.0001, "format": "%.5f", "kind": "float" },
+		{ "label": "Gamma",            "key": "gamma",         "value": 0.99,    "min": 0.0,   "max": 1.0,    "step": 0.01,  "format": "%.2f",  "kind": "float" },
+		{ "label": "Tau (soft update)", "key": "polyak-tau",  "value": 0.005,   "min": 0.001, "max": 1.0,    "step": 0.001, "format": "%.4f", "kind": "float" },
+	],
+	"hybrid": [
+		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Phase hysteresis", "key": "hysteresis",    "value": 3,       "min": 1,     "max": 20,     "step": 1,     "format": "%d",     "kind": "int" },
+		{ "label": "Learned gate",     "key": "learned-gate",  "value": 1,       "min": 0,     "max": 1,     "step": 1,     "format": "%d",     "kind": "int" },
 	],
 }
 
