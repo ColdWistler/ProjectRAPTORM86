@@ -3320,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "flight_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nalgebra",
  "rand 0.8.8",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "flight_gd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flight_core",
  "godot",
@@ -6941,7 +6941,7 @@ dependencies = [
 
 [[package]]
 name = "rl_agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "burn",
  "flight_core",
@@ -6954,7 +6954,7 @@ dependencies = [
 
 [[package]]
 name = "rl_dash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_plot",
