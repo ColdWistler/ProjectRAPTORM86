@@ -2,8 +2,9 @@
 //! with target noise smoothing, delayed actor updates, deterministic tanh actor,
 //! and uniform replay.
 use crate::algo::{Algorithm, AlgoSpec, UpdateBatch, UpdateStats, ALGO_TD3};
-use crate::backend::{Cpu, cpu_device};
-use crate::net::NetConfig;
+use crate::buffer::Transition;
+use crate::net::{polyak_linear, NetConfig};
+use crate::normalize::RunningNormalizer;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
@@ -16,9 +17,13 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::ElementConversion;
 
 pub const ACTION_CLAMP: f32 = 0.999_999;
+
+/// Default Polyak coefficient for the target networks.
+fn default_tau() -> f32 {
+    0.005
+}
 
 /// TD3 hyper-parameters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -35,6 +40,9 @@ pub struct Td3Config {
     pub action_noise_std: f32,
     /// Target noise clip = `noise_clip * action_noise_std` (brief: 3.0 * std).
     pub noise_clip: f32,
+    /// Polyak coefficient for the target networks.
+    #[serde(default = "default_tau")]
+    pub tau: f32,
 }
 
 impl Default for Td3Config {
@@ -49,13 +57,14 @@ impl Default for Td3Config {
             policy_delay: 2,
             action_noise_std: 0.2,
             noise_clip: 3.0,
+            tau: default_tau(),
         }
     }
 }
 
 /// Replay item (same shape as SAC).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ReplayItem {
+pub struct ReplayItem {
     obs: Vec<f32>,
     action: Vec<f32>,
     reward: f32,
@@ -65,7 +74,7 @@ struct ReplayItem {
 }
 
 /// Uniform replay buffer (same approach as SAC / D3QN).
-struct UniformReplay {
+pub struct UniformReplay {
     capacity: usize,
     count: usize,
     items: Vec<Option<ReplayItem>>,
@@ -178,6 +187,37 @@ impl<B: Backend> CriticNet<B> {
     }
 }
 
+/// Polyak-average a critic network towards the online critic.
+fn polyak_critic<B: Backend>(
+    target: &CriticNet<B>,
+    online: &CriticNet<B>,
+    tau: f32,
+) -> CriticNet<B> {
+    CriticNet {
+        trunk: polyak_linear(&target.trunk, &online.trunk, tau),
+        fc2: polyak_linear(&target.fc2, &online.fc2, tau),
+        q_head: polyak_linear(&target.q_head, &online.q_head, tau),
+        device: target.device.clone(),
+        obs_dim: target.obs_dim,
+        act_dim: target.act_dim,
+    }
+}
+
+/// Polyak-average an actor network towards the online actor.
+fn polyak_actor<B: Backend>(
+    target: &ActorNet<B>,
+    online: &ActorNet<B>,
+    tau: f32,
+) -> ActorNet<B> {
+    ActorNet {
+        trunk: polyak_linear(&target.trunk, &online.trunk, tau),
+        mean_head: polyak_linear(&target.mean_head, &online.mean_head, tau),
+        device: target.device.clone(),
+        obs_dim: target.obs_dim,
+        act_dim: target.act_dim,
+    }
+}
+
 pub struct Td3Agent<B: AutodiffBackend<FloatElem = f32>> {
     pub actor: ActorNet<B>,
     pub actor_target: ActorNet<B>,
@@ -194,16 +234,33 @@ pub struct Td3Agent<B: AutodiffBackend<FloatElem = f32>> {
     pub net_cfg: NetConfig,
     /// Step counter for delayed policy updates.
     update_counter: usize,
+    /// Trainer-owned observation statistics (the replay stores raw values).
+    pub normalizer: RunningNormalizer,
 }
 
 impl<B: AutodiffBackend<FloatElem = f32>> Td3Agent<B> {
     pub fn new(device: &B::Device, net_cfg: &NetConfig, cfg: &Td3Config, seed: u64) -> Self {
-        let actor = ActorNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
-        let actor_target = ActorNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
-        let q1 = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
-        let q2 = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
-        let q1_target = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
-        let q2_target = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
+        // Seed the backend and materialize every parameter under one lock:
+        // burn's ndarray backend shares one process-wide RNG and initializes
+        // `Linear` weights lazily, so an unlocked build is neither
+        // reproducible nor safe to clone.
+        let (actor, q1, q2) = {
+            let _guard = crate::net::init_lock();
+            B::seed(device, seed);
+            let actor = ActorNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
+            let q1 = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
+            let q2 = CriticNet::new(device, net_cfg.obs_dim, net_cfg.action_dim, cfg.hidden);
+            crate::net::materialize(&actor);
+            crate::net::materialize(&q1);
+            crate::net::materialize(&q2);
+            (actor, q1, q2)
+        };
+        // The target networks are *exact copies* of the online networks.
+        // Building them from scratch gives the target an unrelated random
+        // policy, which makes every bootstrap term meaningless.
+        let actor_target = polyak_actor(&actor, &actor, 1.0);
+        let q1_target = polyak_critic(&q1, &q1, 1.0);
+        let q2_target = polyak_critic(&q2, &q2, 1.0);
         let actor_opt = AdamWConfig::new()
             .with_grad_clipping(Some(GradientClippingConfig::Norm(cfg.max_grad_norm)))
             .init::<B, ActorNet<B>>();
@@ -225,6 +282,7 @@ impl<B: AutodiffBackend<FloatElem = f32>> Td3Agent<B> {
             rng: StdRng::seed_from_u64(seed),
             net_cfg: *net_cfg,
             update_counter: 0,
+            normalizer: RunningNormalizer::new(net_cfg.obs_dim),
         }
     }
 
@@ -248,7 +306,7 @@ impl<B: AutodiffBackend<FloatElem = f32>> Td3Agent<B> {
         for d in 0..self.net_cfg.action_dim {
             let noise: f32 = rand_distr::StandardNormal.sample(&mut self.rng);
             noise_samples.push(noise);
-            let raw = mean_v[d] + 0.2 * noise; // exploration noise scaled
+            let raw = mean_v[d] + self.cfg.action_noise_std * noise;
             let a = raw.tanh();
             action.push(a.clamp(-ACTION_CLAMP, ACTION_CLAMP));
         }
@@ -293,118 +351,122 @@ impl<B: AutodiffBackend<FloatElem = f32>> Td3Agent<B> {
         self.replay.sample(n, &mut self.rng)
     }
 
-    /// Hard-copy target networks to current networks (simplified Polyak-like sync
-    /// for burn 0.21 compatibility — brief requires delayed updates, not exact Polyak).
-    fn sync_targets_hard(&mut self) {
-        self.q1_target = self.q1.clone();
-        self.q2_target = self.q2.clone();
-        self.actor_target = self.actor.clone();
+    /// Number of transitions currently held in the replay buffer.
+    pub fn replay_len(&self) -> usize {
+        self.replay.len()
     }
 
-    pub fn update(&mut self, batch: &UpdateBatch) -> UpdateStats {
+    /// Polyak-average the target networks towards the online networks.
+    fn polyak_targets(&mut self) {
+        let tau = self.cfg.tau as f32;
+        self.q1_target = polyak_critic(&self.q1_target, &self.q1, tau);
+        self.q2_target = polyak_critic(&self.q2_target, &self.q2, tau);
+        self.actor_target = polyak_actor(&self.actor_target, &self.actor, tau);
+    }
+
+    /// One TD3 gradient step.
+    ///
+    /// The on-policy `UpdateBatch` is **ignored**: TD3 is off-policy and
+    /// builds its own targets from its replay buffer (spec §9.4).
+    pub fn update(&mut self, _batch: &UpdateBatch) -> UpdateStats {
         self.update_counter += 1;
         let n = self.cfg.batch_size.min(self.replay.len()).max(1);
         let replay_batch = self.replay_sample(n);
         if replay_batch.is_empty() {
             return UpdateStats::default();
         }
+        let m = replay_batch.len();
+        let obs_dim = self.net_cfg.obs_dim;
+        let act_dim = self.net_cfg.action_dim;
 
-        // --- Build target Q values with clipped noisy target policy smoothing ---
-        let mut x_flat = Vec::with_capacity(replay_batch.len() * (self.net_cfg.obs_dim + self.net_cfg.action_dim));
-        let mut target_q_vals = vec![0.0f32; replay_batch.len()];
-        let clip = self.cfg.noise_clip * self.cfg.action_noise_std;
-
-        for (i, item) in replay_batch.iter().enumerate() {
-            x_flat.extend_from_slice(&item.obs);
-            x_flat.extend_from_slice(&item.action);
-
-            // Target policy smoothing: deterministic actor_target(s') + clipped noise
-            let s_next_t = Tensor::<B, 1>::from_floats(item.next_obs.as_slice(), &self.device)
-                .reshape([1, self.net_cfg.obs_dim]);
-            let a_next_raw_t = self.actor_target.forward(s_next_t);
-            let a_next_raw_v: Vec<f32> = a_next_raw_t.into_data().to_vec::<f32>().expect("actor_target f32");
-
-            let mut a_next_clipped = Vec::with_capacity(self.net_cfg.action_dim);
-            for d in 0..self.net_cfg.action_dim {
-                let noise: f32 = rand_distr::Normal::new(0.0, self.cfg.action_noise_std as f64).unwrap().sample(&mut self.rng) as f32;
-                let clipped_noise = noise.clamp(-self.cfg.noise_clip as f32, self.cfg.noise_clip as f32);
-                let raw = a_next_raw_v[d] + clipped_noise;
-                a_next_clipped.push(raw.tanh().clamp(-ACTION_CLAMP, ACTION_CLAMP));
-            }
-
-            // Build (next_obs + smoothed_action) for target Q
-            let mut next_flat = item.next_obs.clone();
-            next_flat.extend_from_slice(&a_next_clipped);
-            let t_next = Tensor::<B, 1>::from_floats(next_flat.as_slice(), &self.device)
-                .reshape([1, self.net_cfg.obs_dim + self.net_cfg.action_dim]);
-
-            let q1_t = self.q1_target.forward(t_next.clone());
-            let q2_t = self.q2_target.forward(t_next);
-            let q1_t_v = q1_t.into_scalar();
-            let q2_t_v = q2_t.into_scalar();
-            let min_q_t = q1_t_v.min(q2_t_v);
-
-            let y = item.reward + if item.terminated || item.truncated {
-                0.0
-            } else {
-                self.cfg.gamma * min_q_t
-            };
-            target_q_vals[i] = y;
+        // ---- Gather the batch, then scale it with one set of statistics ----
+        let mut obs_raw = Vec::with_capacity(m * obs_dim);
+        let mut next_obs_raw = Vec::with_capacity(m * obs_dim);
+        let mut act_flat = Vec::with_capacity(m * act_dim);
+        let mut rewards = Vec::with_capacity(m);
+        let mut alive = Vec::with_capacity(m);
+        for item in &replay_batch {
+            obs_raw.extend_from_slice(&item.obs);
+            next_obs_raw.extend_from_slice(&item.next_obs);
+            act_flat.extend_from_slice(&item.action);
+            rewards.push(item.reward);
+            // Only a *termination* ends the episode for bootstrapping purposes.
+            // A truncation (step budget) still has a valid next state.
+            alive.push(if item.terminated { 0.0 } else { 1.0 });
         }
+        let obs = self.normalizer.normalize_batch(&obs_raw);
+        let next_obs = self.normalizer.normalize_batch(&next_obs_raw);
 
-        let x = Tensor::<B, 1>::from_floats(x_flat.as_slice(), &self.device)
-            .reshape([replay_batch.len(), self.net_cfg.obs_dim + self.net_cfg.action_dim]);
-        let targets = Tensor::<B, 1>::from_floats(target_q_vals.as_slice(), &self.device);
+        let obs_t = Tensor::<B, 1>::from_floats(obs.as_slice(), &self.device)
+            .reshape([m, obs_dim]);
+        let next_obs_t = Tensor::<B, 1>::from_floats(next_obs.as_slice(), &self.device)
+            .reshape([m, obs_dim]);
+        let act_t = Tensor::<B, 1>::from_floats(act_flat.as_slice(), &self.device)
+            .reshape([m, act_dim]);
+        let rewards_t = Tensor::<B, 1>::from_floats(rewards.as_slice(), &self.device);
+        let alive_t = Tensor::<B, 1>::from_floats(alive.as_slice(), &self.device);
 
-        // --- Critic updates (both Q networks independently) ---
-        let preds1 = self.q1.forward(x.clone());
+        // ---- Critic target with target-policy smoothing ----
+        // `a' = clamp(μ_target(s') + ε, ±c)` with `ε ~ N(0, action_noise_std)`
+        // clipped to `±noise_clip·action_noise_std`. The smoothing breaks the
+        // correlation between the critic's error and the actor's next action.
+        let noise_bound = (self.cfg.noise_clip * self.cfg.action_noise_std) as f32;
+        let a_target = self.actor_target.forward(next_obs_t.clone());
+        let mut a_next_v = a_target.into_data().to_vec::<f32>().expect("actor target f32");
+        for i in 0..m {
+            for d in 0..act_dim {
+                let noise: f32 = rand_distr::Normal::new(0.0, self.cfg.action_noise_std as f64)
+                    .expect("valid noise std")
+                    .sample(&mut self.rng) as f32;
+                let clipped = noise.clamp(-noise_bound, noise_bound);
+                let idx = i * act_dim + d;
+                a_next_v[idx] = (a_next_v[idx] + clipped).clamp(-ACTION_CLAMP, ACTION_CLAMP);
+            }
+        }
+        let a_next_t = Tensor::<B, 1>::from_floats(a_next_v.as_slice(), &self.device)
+            .reshape([m, act_dim]);
+
+        let next_input = Tensor::cat(vec![next_obs_t.clone(), a_next_t], 1);
+        let q1_next = self.q1_target.forward(next_input.clone());
+        let q2_next = self.q2_target.forward(next_input);
+        let min_q_next = q1_next.min_pair(q2_next);
+        let targets = rewards_t.add(min_q_next.mul_scalar(self.cfg.gamma).mul(alive_t));
+
+        // ---- Critic updates ----
+        let q_input = Tensor::cat(vec![obs_t.clone(), act_t], 1);
+        let preds1 = self.q1.forward(q_input.clone());
         let loss1 = (preds1 - targets.clone()).powf_scalar(2.0).mean();
         let grads1 = loss1.backward();
         let grads1_params = GradientsParams::from_grads(grads1, &self.q1);
         self.q1 = self.critic_opt.step(self.cfg.lr as f64, self.q1.clone(), grads1_params);
 
-        let preds2 = self.q2.forward(x.clone());
+        let preds2 = self.q2.forward(q_input.clone());
         let loss2 = (preds2 - targets.clone()).powf_scalar(2.0).mean();
         let grads2 = loss2.backward();
         let grads2_params = GradientsParams::from_grads(grads2, &self.q2);
         self.q2 = self.critic_opt.step(self.cfg.lr as f64, self.q2.clone(), grads2_params);
 
-        // --- Delayed actor update ---
+        // ---- Delayed actor update ----
+        // The actor's action must stay attached to the graph: the policy
+        // gradient is `∂Q/∂a · ∂a/∂θ`, so a host round-trip would freeze
+        // the actor forever.
         let policy_loss_scalar: f32;
         if self.update_counter % self.cfg.policy_delay == 0 {
-            // Actor update: maximize Q(s, actor(s)) using Q1 only (TD3 convention uses Q1 for actor gradient).
-            let obs_flat: Vec<f32> = replay_batch.iter().flat_map(|r| r.obs.iter().copied()).collect();
-            let obs_batch = Tensor::<B, 1>::from_floats(obs_flat.as_slice(), &self.device)
-                .reshape([replay_batch.len(), self.net_cfg.obs_dim]);
-
-            // Actor outputs tanh actions; we compute them directly.
-            let a_pred_t = self.actor.forward(obs_batch.clone());
-            let a_pred_v: Vec<f32> = a_pred_t.into_data().to_vec::<f32>().expect("actor pred f32");
-
-            // Build (obs + actor_action) for Q evaluation
-            let mut qa_flat = Vec::with_capacity(replay_batch.len() * (self.net_cfg.obs_dim + self.net_cfg.action_dim));
-            for i in 0..replay_batch.len() {
-                qa_flat.extend_from_slice(&replay_batch[i].obs);
-                let offset = i * self.net_cfg.action_dim;
-                qa_flat.extend_from_slice(&a_pred_v[offset..offset + self.net_cfg.action_dim]);
-            }
-            let qa_t = Tensor::<B, 1>::from_floats(qa_flat.as_slice(), &self.device)
-                .reshape([replay_batch.len(), self.net_cfg.obs_dim + self.net_cfg.action_dim]);
-
-            let q1_actor = self.q1.forward(qa_t);
-            // Actor loss = -mean(Q1(s, actor(s)))
-            let actor_loss_t = q1_actor.mul_scalar(-1.0).mean();
-            let grads_a = actor_loss_t.backward();
+            let a_pred = self.actor.forward(obs_t.clone());
+            let pi_input = Tensor::cat(vec![obs_t.clone(), a_pred], 1);
+            // TD3 convention: the actor is updated through Q1 only.
+            let q1_pi = self.q1.forward(pi_input);
+            let actor_loss = q1_pi.mul_scalar(-1.0).mean();
+            let grads_a = actor_loss.backward();
             let grads_a_params = GradientsParams::from_grads(grads_a, &self.actor);
             self.actor = self.actor_opt.step(self.cfg.lr as f64, self.actor.clone(), grads_a_params);
-
-            policy_loss_scalar = actor_loss_t.into_data().to_vec::<f32>().expect("actor loss f32")[0];
-
-            // Hard sync targets (simplified for burn 0.21) — brief requires target networks.
-            self.sync_targets_hard();
+            policy_loss_scalar = actor_loss.into_data().to_vec::<f32>().expect("actor loss f32")[0];
         } else {
             policy_loss_scalar = 0.0; // no actor update this step
         }
+
+        // ---- Target networks ----
+        self.polyak_targets();
 
         let critic_loss = (loss1.into_data().to_vec::<f32>().expect("f32")[0]
             + loss2.into_data().to_vec::<f32>().expect("f32")[0])
@@ -470,6 +532,25 @@ impl<B: AutodiffBackend<FloatElem = f32>> Algorithm<B> for Td3Agent<B> {
     fn update(&mut self, batch: &UpdateBatch) -> UpdateStats {
         self.update(batch)
     }
+    fn is_off_policy(&self) -> bool {
+        true
+    }
+    fn observe_transition(&mut self, transition: &Transition) {
+        self.replay_push(ReplayItem {
+            obs: transition.obs.clone(),
+            action: transition.action.clone(),
+            reward: transition.reward,
+            terminated: transition.terminated,
+            truncated: transition.truncated,
+            next_obs: transition.next_obs.clone(),
+        });
+    }
+    fn gradient_steps_per_env_step(&self) -> f32 {
+        1.0
+    }
+    fn set_normalizer(&mut self, normalizer: RunningNormalizer) {
+        self.normalizer = normalizer;
+    }
     fn save_weights(&self, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         self.save_weights(dir)
     }
@@ -482,6 +563,8 @@ impl<B: AutodiffBackend<FloatElem = f32>> Algorithm<B> for Td3Agent<B> {
 mod tests {
     use super::*;
     use crate::algo::{AlgoSpec, make_algorithm, ALGO_TD3};
+    use crate::backend::{Cpu, cpu_device};
+    use crate::buffer::Transition;
     use crate::net::NetConfig;
 
     fn agent() -> Td3Agent<Cpu> {
@@ -566,5 +649,132 @@ mod tests {
         assert_eq!(action.len(), 4);
         assert!(logp.is_finite());
         assert!(action.iter().all(|a| a.abs() < 1.0));
+    }
+
+    // ------------------------------------------------------------------
+    // Behavioural acceptance tests (spec §9.4).
+    // ------------------------------------------------------------------
+
+    fn param_vec(p: &burn::module::Param<burn::tensor::Tensor<Cpu, 2>>) -> Vec<f32> {
+        p.val().into_data().to_vec::<f32>().expect("f32")
+    }
+
+    fn max_delta(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    fn fill_replay(a: &mut Td3Agent<Cpu>, n: usize) {
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            a.replay_push(ReplayItem {
+                obs: vec![t, t * 0.5, -t, 1.0 - t],
+                action: vec![0.2 * t, -0.3, 0.1 * t, 0.4],
+                reward: (i % 7) as f32 - 3.0,
+                terminated: false,
+                truncated: false,
+                next_obs: vec![t + 0.01, t * 0.5, -t, 1.0 - t],
+            });
+        }
+    }
+
+    fn empty_batch() -> UpdateBatch {
+        UpdateBatch {
+            obs: vec![],
+            actions: vec![],
+            old_log_probs: vec![],
+            advantages: vec![],
+            returns: vec![],
+        }
+    }
+
+    #[test]
+    fn td3_target_actor_starts_as_an_exact_copy_of_the_online_actor() {
+        let a = agent();
+        assert_eq!(
+            param_vec(&a.actor.mean_head.weight),
+            param_vec(&a.actor_target.mean_head.weight),
+            "TD3 target actor must start as an exact copy of the online actor"
+        );
+        assert_eq!(
+            param_vec(&a.q1.trunk.weight),
+            param_vec(&a.q1_target.trunk.weight),
+            "TD3 target critic must start as an exact copy of the online critic"
+        );
+    }
+
+    #[test]
+    fn td3_actor_trains_on_the_delayed_update() {
+        let mut a = agent();
+        fill_replay(&mut a, 64);
+
+        let actor_before = param_vec(&a.actor.mean_head.weight);
+        let critic_before = param_vec(&a.q1.trunk.weight);
+
+        a.update(&empty_batch()); // policy_delay = 2 -> critic only
+        a.update(&empty_batch()); // policy_delay reached -> critic + actor
+
+        let actor_after = param_vec(&a.actor.mean_head.weight);
+        let critic_after = param_vec(&a.q1.trunk.weight);
+
+        assert!(
+            max_delta(&critic_before, &critic_after) > 0.0,
+            "TD3 critic did not train"
+        );
+        assert!(
+            max_delta(&actor_before, &actor_after) > 0.0,
+            "TD3 actor did not train (gradient was severed)"
+        );
+    }
+
+    #[test]
+    fn td3_target_nets_are_polyak_averaged_not_hard_synced() {
+        let mut a = agent();
+        fill_replay(&mut a, 64);
+
+        let target_before = param_vec(&a.q1_target.trunk.weight);
+        a.update(&empty_batch());
+        a.update(&empty_batch());
+        let target_after = param_vec(&a.q1_target.trunk.weight);
+        let online_after = param_vec(&a.q1.trunk.weight);
+
+        assert_ne!(
+            target_before, target_after,
+            "TD3 target critic never moved"
+        );
+        assert_ne!(
+            online_after, target_after,
+            "TD3 target critic was hard-synced; spec requires Polyak averaging with tau"
+        );
+    }
+
+    #[test]
+    fn td3_exploration_noise_uses_the_configured_std() {
+        let mut a = agent();
+        // A zero exploration noise makes `act` deterministic.
+        a.cfg.action_noise_std = 0.0;
+        let (a1, _) = a.act(&[0.1, -0.2, 0.3, 0.4]);
+        let (a2, _) = a.act(&[0.1, -0.2, 0.3, 0.4]);
+        assert_eq!(a1, a2, "TD3 exploration noise ignored action_noise_std");
+    }
+
+    #[test]
+    fn td3_collects_transitions_through_the_algorithm_trait() {
+        let mut a = agent();
+        assert!(a.is_off_policy());
+        assert!(a.gradient_steps_per_env_step() > 0.0);
+        let t = Transition {
+            obs: vec![0.1; 4],
+            action: vec![0.2; 4],
+            log_prob: 0.0,
+            reward: 1.0,
+            terminated: false,
+            truncated: false,
+            next_obs: vec![0.3; 4],
+        };
+        Algorithm::observe_transition(&mut a, &t);
+        assert_eq!(a.replay_len(), 1, "TD3 replay did not receive the transition");
     }
 }

@@ -12,7 +12,7 @@
 //! 4. Periodically evaluate and save a checkpoint
 //!    (weights + JSON configs; optimizer state is not persisted in v1).
 
-use crate::algo::{make_algorithm, Algorithm, AlgoSpec, UpdateBatch};
+use crate::algo::{make_algorithm, Algorithm, AlgoSpec, UpdateBatch, UpdateStats};
 use crate::buffer::{RolloutBuffer, Transition};
 use crate::gae::compute_gae;
 use crate::net::NetConfig;
@@ -205,7 +205,7 @@ pub struct TrainerConfig {
 impl Default for TrainerConfig {
     fn default() -> Self {
         Self {
-            iterations: 1000,
+            iterations: 300,
             rollout_steps: 2048,
             env_max_steps: 2000,
             env_dt: 1.0 / 30.0,
@@ -728,11 +728,39 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
         // loop reads a register instead of chasing the observer's Option.
         let streaming = obs.frames.is_enabled();
 
+        // The normalizer's statistics are **frozen** for the whole rollout and
+        // only refreshed afterwards.
+        //
+        // If they moved mid-rollout, the policy that sampled the data and the
+        // policy that trains on it would see differently scaled observations.
+        // For PPO that breaks the importance ratio, which must be exactly 1.0
+        // at the first epoch; for the off-policy algorithms it breaks the
+        // Bellman target, because `obs` and `next_obs` of one transition must
+        // be scaled with the same statistics.
+        let frozen = normalizer.clone();
+        agent.set_normalizer(frozen.clone());
+
+        // Off-policy algorithms (SAC / TD3 / D3QN) learn from their own replay
+        // buffer and run their own update schedule — one gradient step per
+        // collected transition (spec §9.3). On-policy algorithms take exactly
+        // one update per rollout.
+        let off_policy = agent.is_off_policy();
+        let grad_per_step = agent.gradient_steps_per_env_step();
+        let mut grad_debt = 0.0f32;
+        let mut stats = UpdateStats::default();
+        let empty_batch = UpdateBatch {
+            obs: Vec::new(),
+            actions: Vec::new(),
+            old_log_probs: Vec::new(),
+            advantages: Vec::new(),
+            returns: Vec::new(),
+        };
+
         // ---- 1. Rollout ----
         let mut env_stats = EnvStats::default();
         for step in 0..tcfg.rollout_steps {
             let obs_f32: Vec<f32> = obs_vec.iter().map(|&x| x as f32).collect();
-            let norm = normalizer.normalize_f32(&obs_f32);
+            let norm = frozen.normalize_f32(&obs_f32);
             let (action, log_prob) = agent.act(&norm);
             let outcome = env.step(&action);
 
@@ -773,19 +801,33 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
                 }
             }
 
-            buffer.push(Transition {
+            let next_f32: Vec<f32> = outcome.obs.iter().map(|&x| x as f32).collect();
+            let transition = Transition {
                 obs: obs_f32,
                 action,
                 log_prob,
                 reward: reward as f32,
                 terminated: outcome.terminated,
                 truncated: outcome.truncated,
-            });
+                next_obs: next_f32.clone(),
+            };
+            buffer.push(transition.clone());
+            // Off-policy algorithms keep their own copy of the transition and
+            // sample from it; on-policy algorithms ignore this.
+            agent.observe_transition(&transition);
+
+            // Off-policy: one gradient step per collected transition.
+            if off_policy {
+                grad_debt += grad_per_step;
+                while grad_debt >= 1.0 {
+                    grad_debt -= 1.0;
+                    stats = agent.update(&empty_batch);
+                }
+            }
 
             roll.reward_sum += reward;
             episode_reward += reward;
             ep_steps += 1;
-            let next_f32: Vec<f32> = outcome.obs.iter().map(|&x| x as f32).collect();
             final_obs = Some(next_f32);
 
             if outcome.terminated || outcome.truncated {
@@ -822,7 +864,6 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
                 episode_stats = EnvStats::default();
                 episode_id += 1;
                 obs_vec = env.reset();
-                normalizer.observe(&obs_vec);
             } else {
                 obs_vec = outcome.obs;
             }
@@ -830,34 +871,46 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
 
         let final_obs = final_obs.expect("rollout_steps > 0 guarantees one transition");
 
-        // ---- 2. Values + GAE ----
-        let norm_batch = normalizer.normalize_batch(&buffer.obs_flat());
-        let values = agent.value_all(&norm_batch);
-        let last_value = match buffer.last() {
-            Some(last) if last.terminated => 0.0,
-            Some(_) => agent.value_single(&normalizer.normalize_f32(&final_obs)),
-            None => 0.0,
-        };
-        let (advantages, returns) = compute_gae(
-            &buffer.rewards(),
-            &values,
-            &buffer.terminated(),
-            last_value,
-            gamma,
-            lambda,
-        );
+        // ---- 2. Values + GAE (on-policy only) ----
+        // An off-policy algorithm builds its own targets from its replay
+        // buffer; the host-side GAE would be meaningless for it.
+        if !off_policy {
+            let norm_batch = frozen.normalize_batch(&buffer.obs_flat());
+            let values = agent.value_all(&norm_batch);
+            let last_value = match buffer.last() {
+                Some(last) if last.terminated => 0.0,
+                Some(_) => agent.value_single(&frozen.normalize_f32(&final_obs)),
+                None => 0.0,
+            };
+            let (advantages, returns) = compute_gae(
+                &buffer.rewards(),
+                &values,
+                &buffer.terminated(),
+                last_value,
+                gamma,
+                lambda,
+            );
 
-        // ---- 3. Update ----
-        let batch = UpdateBatch {
-            obs: norm_batch,
-            actions: buffer.actions_flat(),
-            old_log_probs: buffer.log_probs(),
-            advantages,
-            returns,
-        };
-        let stats = agent.update(&batch);
+            // ---- 3. Update ----
+            let batch = UpdateBatch {
+                obs: norm_batch,
+                actions: buffer.actions_flat(),
+                old_log_probs: buffer.log_probs(),
+                advantages,
+                returns,
+            };
+            stats = agent.update(&batch);
+        }
 
-        // ---- 4. Eval + checkpoint + telemetry ----
+        // ---- 4. Refresh the statistics with the rollout we just collected ----
+        // Every step of the rollout — not just the episode resets — is folded
+        // into the running statistics. Observing only the resets gave the
+        // normalizer one sample per episode for 32 channels.
+        for chunk in buffer.obs_flat().chunks_exact(ncfg.obs_dim) {
+            normalizer.observe_f32(chunk);
+        }
+
+        // ---- 5. Eval + checkpoint + telemetry ----
         let iter_elapsed = run_start.elapsed().as_secs_f64();
         let since_last = last_iter_at.elapsed().as_secs_f64().max(1e-9);
         last_iter_at = std::time::Instant::now();
@@ -868,7 +921,7 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
             last_eval = Some(evaluate(
                 agent.as_ref(),
                 env,
-                &normalizer,
+                &frozen,
                 tcfg.eval_episodes,
                 tcfg.env_max_steps,
             ));

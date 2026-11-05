@@ -12,11 +12,12 @@
 //! ([`gaussian_log_prob_tanh`]) implement *exactly* the same formula so the
 //! PPO importance ratio stays consistent.
 
-use burn::module::Param;
+use burn::module::{Module, ModuleVisitor, Param};
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
+use burn::tensor::{Bool, Int};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// Serializes backend seeding + lazy parameter materialization.
 ///
@@ -27,11 +28,77 @@ use std::sync::Mutex;
 /// seed-reproducibility.
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// Acquire the global initialization lock.
+///
+/// Hold it across **both** the backend seeding and the materialization of
+/// every parameter the agent owns. Releasing it in between lets another
+/// thread consume the shared RNG stream and change this agent's weights.
+pub fn init_lock() -> MutexGuard<'static, ()> {
+    INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Force every lazily-initialized parameter of a module to materialize now.
+///
+/// burn's `Param::clone` deliberately keeps the *lazy* state when the source
+/// parameter has not been initialized yet — and each copy then draws its own
+/// random values. A target network cloned from an unmaterialized online
+/// network therefore starts as a **different** network, which silently
+/// invalidates every bootstrap term that uses it.
+///
+/// Materializing before cloning makes the clone an exact copy.
+pub fn materialize<M: Module<B>, B: Backend>(net: &M) {
+    struct Materializer;
+
+    impl<B: Backend> ModuleVisitor<B> for Materializer {
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+            let _ = param.val();
+        }
+        fn visit_int<const D: usize>(&mut self, param: &Param<Tensor<B, D, Int>>) {
+            let _ = param.val();
+        }
+        fn visit_bool<const D: usize>(&mut self, param: &Param<Tensor<B, D, Bool>>) {
+            let _ = param.val();
+        }
+    }
+
+    let mut materializer = Materializer;
+    net.visit(&mut materializer);
+}
+
+/// Build a module with a seeded backend and materialize its parameters.
+///
+/// Seeding and materialization happen under one lock so that a concurrent
+/// agent cannot interleave the process-wide RNG stream.
+pub fn build_seeded<B: Backend, M: Module<B>>(
+    device: &B::Device,
+    seed: u64,
+    build: impl FnOnce() -> M,
+) -> M {
+    let _guard = init_lock();
+    B::seed(device, seed);
+    let module = build();
+    materialize(&module);
+    module
+}
+
 /// Clamp applied to sampled/action values so `atanh` stays finite.
 pub const ACTION_CLAMP: f32 = 0.999_999;
 
 /// `ln(2π)`, shared by the Gaussian entropy and log-density formulas.
-const LN_2PI: f32 = 1.837_877_1;
+pub const LN_2PI: f32 = 1.837_877_1;
+
+/// Lower bound on the learnable per-channel `log_std`.
+///
+/// The policy spread is a learnable parameter, so an entropy bonus pushes it
+/// upwards without limit: the policy degenerates into pure noise and the
+/// run diverges. The bound keeps `σ` above `e⁻⁵ ≈ 0.0067`.
+pub const LOG_STD_MIN: f32 = -5.0;
+
+/// Upper bound on the learnable per-channel `log_std`.
+///
+/// Keeps `σ` below `e ≈ 2.72`, i.e. the tanh-squashed policy can still
+/// explore but never becomes a uniform sampler over `[-1, 1]`.
+pub const LOG_STD_MAX: f32 = 1.0;
 
 /// Architecture hyper-parameters for the actor-critic.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -82,10 +149,10 @@ impl<B: Backend> ActorCritic<B> {
     /// before releasing the lock. Callers get weights that depend only on
     /// `seed` regardless of concurrent agent creation.
     pub fn new(device: &B::Device, cfg: &NetConfig, seed: u64) -> Self {
-        let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = init_lock();
         B::seed(device, seed);
         let net = Self::build(device, cfg);
-        net.materialize();
+        materialize(&net);
         net
     }
 
@@ -113,16 +180,9 @@ impl<B: Backend> ActorCritic<B> {
     }
 
     /// Force every lazily-initialized parameter to materialize now.
+    #[allow(dead_code)]
     fn materialize(&self) {
-        let _ = self.fc1.weight.val();
-        let _ = self.fc1.bias.as_ref().map(|b| b.val());
-        let _ = self.fc2.weight.val();
-        let _ = self.fc2.bias.as_ref().map(|b| b.val());
-        let _ = self.mu_head.weight.val();
-        let _ = self.mu_head.bias.as_ref().map(|b| b.val());
-        let _ = self.value_head.weight.val();
-        let _ = self.value_head.bias.as_ref().map(|b| b.val());
-        let _ = self.log_std.val();
+        materialize(self);
     }
 
     /// Shared feature trunk: `tanh(fc2(tanh(fc1(x))))`.
@@ -159,17 +219,24 @@ impl<B: Backend> ActorCritic<B> {
     }
 
     /// Broadcast `log_std` to `[batch, action_dim]`.
+    ///
+    /// The parameter is clamped: an entropy bonus pushes `log_std` upwards
+    /// without limit, which turns the policy into pure noise. The clamp is
+    /// applied **here** (and in [`ActorCritic::log_std_host`]) so that the
+    /// device and the host always agree on the policy's spread.
     fn log_std_2d(&self, batch: usize) -> Tensor<B, 2> {
         self.log_std
             .val()
+            .clamp(LOG_STD_MIN, LOG_STD_MAX)
             .unsqueeze_dim::<2>(0)
             .expand([batch, self.action_dim])
     }
 
-    /// Host copy of the per-channel `log_std` parameters.
+    /// Host copy of the per-channel `log_std` parameters (clamped).
     pub fn log_std_host(&self) -> Vec<f32> {
         self.log_std
             .val()
+            .clamp(LOG_STD_MIN, LOG_STD_MAX)
             .into_data()
             .to_vec::<f32>()
             .expect("log_std must be f32 data")
@@ -227,6 +294,48 @@ pub fn gaussian_log_prob_tanh(action: f32, mean: f32, log_std: f32) -> f32 {
         - (1.0 - a).ln()
 }
 
+/// Polyak (soft) update of a rank-2 parameter:
+/// `target ← τ·online + (1−τ)·target`.
+///
+/// Burn's [`Param`] is immutable from the outside, so the blended value is
+/// written into a fresh parameter. The parameter *id* changes, which is fine:
+/// the target networks are not optimizer state.
+pub fn polyak_param_2<B: Backend>(
+    target: &Param<Tensor<B, 2>>,
+    online: &Param<Tensor<B, 2>>,
+    tau: f32,
+) -> Param<Tensor<B, 2>> {
+    let t = target.val().detach();
+    let o = online.val().detach();
+    let device = o.device();
+    let blended = t.mul_scalar(1.0 - tau).add(o.mul_scalar(tau));
+    Param::from_data(blended.into_data(), &device)
+}
+
+/// Polyak (soft) update of a rank-1 parameter.
+pub fn polyak_param_1<B: Backend>(
+    target: &Param<Tensor<B, 1>>,
+    online: &Param<Tensor<B, 1>>,
+    tau: f32,
+) -> Param<Tensor<B, 1>> {
+    let t = target.val().detach();
+    let o = online.val().detach();
+    let device = o.device();
+    let blended = t.mul_scalar(1.0 - tau).add(o.mul_scalar(tau));
+    Param::from_data(blended.into_data(), &device)
+}
+
+/// Polyak (soft) update of a whole [`Linear`] layer.
+pub fn polyak_linear<B: Backend>(target: &Linear<B>, online: &Linear<B>, tau: f32) -> Linear<B> {
+    Linear {
+        weight: polyak_param_2(&target.weight, &online.weight, tau),
+        bias: match (&target.bias, &online.bias) {
+            (Some(t), Some(o)) => Some(polyak_param_1(t, o, tau)),
+            _ => None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,8 +376,40 @@ mod tests {
     }
 
     #[test]
-    fn host_and_tensor_log_prob_agree() {
+    fn log_std_is_clamped_to_the_policy_bounds() {
         let device = cpu();
+        let mut n = net();
+        // Force `log_std` far outside the allowed range.
+        n.log_std = Param::from_data(
+            Tensor::<Cpu, 1>::from_floats([100.0f32, -100.0], &device).into_data(),
+            &device,
+        );
+
+        let host = n.log_std_host();
+        assert!(
+            host[0] <= LOG_STD_MAX,
+            "log_std upper bound not enforced: {} > {LOG_STD_MAX}",
+            host[0]
+        );
+        assert!(
+            host[1] >= LOG_STD_MIN,
+            "log_std lower bound not enforced: {} < {LOG_STD_MIN}",
+            host[1]
+        );
+
+        // The device-side entropy must use the *clamped* value, otherwise the
+        // host and the tensor disagree about the policy's spread.
+        let x = Tensor::<Cpu, 2>::ones([3, 4], &device);
+        let entropy = n.entropy(x).into_data().to_vec::<f32>().expect("f32")[0];
+        let expected = host[0] + host[1] + (LN_2PI + 1.0);
+        assert!(
+            (entropy - expected).abs() < 1e-4,
+            "entropy {entropy} does not match the clamped log_std ({expected})"
+        );
+    }
+
+    #[test]
+    fn host_and_tensor_log_prob_agree() {        let device = cpu();
         let n = net();
         let x = Tensor::<Cpu, 1>::from_floats(
             [0.1f32, -0.2, 0.3, 0.4, -0.1, 0.2, 0.5, -0.3],

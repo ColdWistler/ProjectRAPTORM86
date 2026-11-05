@@ -22,6 +22,9 @@ pub struct Transition {
     pub terminated: bool,
     /// `true` if the episode ended because the step budget ran out.
     pub truncated: bool,
+    /// Raw observation *after* the step (`s'`). Off-policy algorithms need it
+    /// to build the bootstrap term `γ·V(s')`; on-policy algorithms ignore it.
+    pub next_obs: Vec<f32>,
 }
 
 /// Flat arrays backing an iteration of rollouts.
@@ -128,6 +131,7 @@ mod tests {
                 reward: 1.0 - i as f32 * 0.25,
                 terminated: i == 3,
                 truncated: false,
+                next_obs: vec![i as f32 + 0.5, i as f32 + 1.5, i as f32 + 2.5],
             });
         }
         assert_eq!(buf.len(), 4);

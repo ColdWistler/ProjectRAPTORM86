@@ -17,7 +17,9 @@
 //!    (`rl_agent --algo <id>` in `main.rs`) and the Godot menu dropdown
 //!    (`ALGORITHMS` in `godot/scripts/rl_trainer.gd`).
 
+use crate::buffer::Transition;
 use crate::net::NetConfig;
+use crate::normalize::RunningNormalizer;
 use crate::ppo::{PpoAgent, PpoConfig};
 use crate::a2c::{A2cAgent, A2cConfig};
 use crate::d3qn::{D3qnConfig, D3qnAgent};
@@ -181,6 +183,39 @@ pub trait Algorithm<B: AutodiffBackend> {
     fn value_all(&self, obs_norm_flat: &[f32]) -> Vec<f32>;
     /// One update pass over the collected batch.
     fn update(&mut self, batch: &UpdateBatch) -> UpdateStats;
+    /// True when the algorithm learns from its **own** replay buffer rather
+    /// than from the on-policy rollout batch handed to [`Algorithm::update`].
+    ///
+    /// The spec (§10) requires each model's loop to be free to differ: an
+    /// off-policy algorithm cannot build a TD target from `UpdateBatch`,
+    /// because that struct carries no reward, next observation or done flag.
+    /// Off-policy algorithms therefore get their transitions through
+    /// [`Algorithm::observe_transition`] and run their own update schedule.
+    fn is_off_policy(&self) -> bool {
+        false
+    }
+    /// Receive one environment transition during the rollout.
+    ///
+    /// `obs` / `next_obs` are **raw** (un-normalized) observations, so an
+    /// off-policy algorithm can replay them and normalize the sampled batch
+    /// later with one consistent set of statistics. On-policy algorithms
+    /// ignore this: their data lives in the trainer's rollout buffer.
+    fn observe_transition(&mut self, _transition: &Transition) {}
+    /// Gradient steps per collected environment step.
+    ///
+    /// `0.0` means "one update per rollout", which is the on-policy contract.
+    /// Off-policy algorithms reuse every transition several times and report
+    /// `1.0` (one gradient step per environment step), per spec §9.3.
+    fn gradient_steps_per_env_step(&self) -> f32 {
+        0.0
+    }
+    /// Receive the trainer's observation normalizer.
+    ///
+    /// Off-policy algorithms replay raw observations, so they need the
+    /// trainer's statistics to scale a sampled batch. The `obs` and
+    /// `next_obs` of one transition must be scaled with the *same* statistics
+    /// or the Bellman target is inconsistent.
+    fn set_normalizer(&mut self, _normalizer: RunningNormalizer) {}
     /// Persist the model weights under `dir` (e.g. `dir/net`).
     fn save_weights(&self, dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
     /// Load the model weights under `dir` onto `device`, replacing this

@@ -81,6 +81,12 @@ impl RunningNormalizer {
         out
     }
 
+    /// Fold one observation carried as `f32` into the running statistics.
+    pub fn observe_f32(&mut self, obs: &[f32]) {
+        let f64_in: Vec<f64> = obs.iter().map(|&x| x as f64).collect();
+        self.observe(&f64_in);
+    }
+
     /// Normalize a single observation carried as `f32`.
     pub fn normalize_f32(&self, obs: &[f32]) -> Vec<f32> {
         let f64_in: Vec<f64> = obs.iter().map(|&x| x as f64).collect();

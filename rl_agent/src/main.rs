@@ -28,7 +28,7 @@ const USAGE: &str = "\
 rl_agent — burn/PPO trainer for the flight_core AvionicsEnvironment
 
 USAGE:
-  rl_agent [--mode train|eval] [--algo ppo] [--backend cpu|gpu|auto] [options]
+  rl_agent [--mode train|eval] [--algo ppo|a2c|d3qn|sac|td3] [--backend cpu|gpu|auto] [options]
 
 ALGORITHM (--algo, default ppo):
   The training algorithm is pluggable: `--algo` selects one of the
@@ -36,14 +36,20 @@ ALGORITHM (--algo, default ppo):
   below configure it. Add a new model by implementing `Algorithm<B>` and
   registering it in `algo::make_algorithm` (see docs/rl_agent_guide.md).
 
+  ppo   on-policy  PPO-Clip with advantage whitening (the reference model)
+  a2c   on-policy  advantage actor-critic, one gradient pass per rollout
+  sac   off-policy soft actor-critic (twin critics, entropy bonus)
+  td3   off-policy twin delayed DDPG (delayed actor, target smoothing)
+  d3qn  off-policy dueling critic, double-Q target, prioritized replay
+
 TRAIN MODE (default):
-  --iterations N        PPO update iterations                    (default 1000)
+  --iterations N        update iterations                        (default 300)
   --rollout N           env steps collected per iteration        (default 2048)
   --env-max-steps N     episode step budget                      (default 2000)
   --env-dt SECONDS      physics step size                        (default 0.0333)
   --hidden N            shared hidden layer width                (default 128)
   --log-std-init F      initial log_std for the policy           (default -0.5)
-  --epochs N            PPO epochs per update                    (default 10)
+  --epochs N            PPO epochs per update (A2C: 1)           (default 10)
   --minibatch N         transitions per gradient step            (default 64)
   --lr F                AdamW learning rate                      (default 3e-4)
   --gamma F             discount factor                          (default 0.99)
@@ -52,6 +58,11 @@ TRAIN MODE (default):
   --value-coef F        value-loss coefficient                   (default 0.5)
   --entropy-coef F      entropy bonus coefficient                (default 0.0)
   --max-grad-norm F     global gradient-norm clip                (default 0.5)
+  --polyak-tau F        target-network soft-update rate          (default 0.005)
+  --alpha F             SAC entropy temperature                  (default 0.2)
+  --policy-delay N      TD3 critic steps between actor updates   (default 2)
+  --batch-size N        replay batch size                        (default 64)
+  --buffer-capacity N   replay capacity                          (default 8192)
   --seed N              RNG seed (weights + sampling)            (default 42)
   --save-every N        checkpoint every N iterations            (default 100)
   --print-every N       log stats every N iterations             (default 1)
@@ -495,6 +506,7 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
             config.tau = get_num(args, "polyak-tau", config.tau)?;
             config.hidden = get_num(args, "hidden", config.hidden)?;
             config.batch_size = get_num(args, "batch-size", config.batch_size)?;
+            config.buffer_capacity = get_num(args, "buffer-capacity", config.buffer_capacity)?;
         }
         AlgoSpec::Sac { config } => {
             config.lr = get_num(args, "lr", config.lr)?;
@@ -502,13 +514,16 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
             config.tau = get_num(args, "polyak-tau", config.tau)?;
             config.hidden = get_num(args, "hidden", config.hidden)?;
             config.batch_size = get_num(args, "batch-size", config.batch_size)?;
+            config.buffer_capacity = get_num(args, "buffer-capacity", config.buffer_capacity)?;
             config.alpha = get_num(args, "alpha", config.alpha)?;
         }
         AlgoSpec::Td3 { config } => {
             config.lr = get_num(args, "lr", config.lr)?;
             config.gamma = get_num(args, "gamma", config.gamma)?;
+            config.tau = get_num(args, "polyak-tau", config.tau)?;
             config.hidden = get_num(args, "hidden", config.hidden)?;
             config.batch_size = get_num(args, "batch-size", config.batch_size)?;
+            config.buffer_capacity = get_num(args, "buffer-capacity", config.buffer_capacity)?;
             config.policy_delay = get_num(args, "policy-delay", config.policy_delay)?;
         }
     }
