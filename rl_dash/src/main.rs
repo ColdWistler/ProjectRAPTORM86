@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
+use sysinfo::System;
+
 use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, Points, Polygon, VLine};
 use serde::Deserialize;
 
@@ -1118,6 +1120,15 @@ impl eframe::App for DashApp {
 
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // System resource monitor (CPU / RAM)
+                let mut sys = System::new_all();
+                sys.refresh_memory();
+                let cpu_usage = if let Some(c) = sys.cpus().first() { c.cpu_usage() } else { 0.0 };
+                let ram_used = sys.total_memory() - sys.available_memory();
+                let ram_total = sys.total_memory();
+                ui.add(egui::ProgressBar::new(cpu_usage as f32 / 100.0).text(format!("CPU {:.0}%", cpu_usage)));
+                ui.add(egui::ProgressBar::new(ram_used as f32 / ram_total as f32).text(format!("RAM {:.0}MB / {:.0}MB", ram_used / 1024 / 1024, ram_total / 1024 / 1024)));
+
                 let tab_ids = self.active_run_ids();
                 let tab_total = tab_ids.len();
                 let tab_checked = tab_ids
