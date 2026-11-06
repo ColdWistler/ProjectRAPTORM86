@@ -71,6 +71,7 @@ TRAIN MODE (default):
   --eval-episodes N     episodes per eval run                    (default 3)
   --config PATH         aircraft.toml / m_sweep_mini.toml (default avionics)
   --mission avionics|mission  training mode (default avionics)
+  --specialization full|outbound|capture|return  phase focus (default full)
   --model ppo|heuristic   alias for --algo; heuristic is eval-only
   --reward-profile NAME|PATH  balanced|aggressive|cautious|capture_focus|file
   --checkpoint DIR      checkpoint directory                     (default checkpoints)
@@ -284,6 +285,7 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
             let outcome = if is_mission_mode(args) {
                 let mission_cfg = build_mission_config(args, tcfg.env_max_steps)?;
                 let reward = build_reward_profile(args)?;
+                let specialization = build_specialization(args)?;
                 run_mission::<B>(
                     &tcfg,
                     &telemetry,
@@ -293,6 +295,7 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
                     &config_path,
                     &mission_cfg,
                     &reward,
+                    specialization,
                     &mut observer,
                 )?
             } else {
@@ -556,6 +559,19 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
         }
     }
     Ok(spec)
+}
+
+fn build_specialization(
+    args: &HashMap<String, String>,
+) -> Result<Option<&str>, Box<dyn std::error::Error>> {
+    match args.get("specialization").map(String::as_str) {
+        None => Ok(None),
+        Some(value @ ("full" | "outbound" | "capture" | "return")) => Ok(Some(value)),
+        Some(other) => Err(format!(
+            "--specialization must be `full`, `outbound`, `capture`, or `return`, got `{other}`"
+        )
+        .into()),
+    }
 }
 
 fn build_reward_profile(args: &HashMap<String, String>) -> Result<rl_agent::mission_env::RewardProfile, Box<dyn std::error::Error>> {
