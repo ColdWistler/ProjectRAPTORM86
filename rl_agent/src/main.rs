@@ -17,7 +17,8 @@ use rl_agent::backend::{cpu_device, probe_gpu_train, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
 use rl_agent::telemetry::TelemetryConfig;
 use rl_agent::trainer::{
-    evaluate, load_checkpoint, run_with_observer, AvionicsEnv, TrainObserver, TrainerConfig,
+    evaluate, load_checkpoint, run_mission, run_with_observer, AvionicsEnv, TrainObserver,
+    TrainerConfig,
 };
 use rl_agent::{ACTION_DIM, AVIONICS_OBS_DIM};
 use rl_agent::mission_env::{MissionEnv, RewardProfile};
@@ -280,15 +281,31 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
         "train" => {
             let telemetry = build_telemetry_config(args)?;
             let mut observer = build_observer(args, &telemetry)?;
-            let outcome = run_with_observer::<B>(
-                &tcfg,
-                &telemetry,
-                &ncfg,
-                &spec,
-                &device,
-                &config_path,
-                &mut observer,
-            )?;
+            let outcome = if is_mission_mode(args) {
+                let mission_cfg = build_mission_config(args, tcfg.env_max_steps)?;
+                let reward = build_reward_profile(args)?;
+                run_mission::<B>(
+                    &tcfg,
+                    &telemetry,
+                    &ncfg,
+                    &spec,
+                    &device,
+                    &config_path,
+                    &mission_cfg,
+                    &reward,
+                    &mut observer,
+                )?
+            } else {
+                run_with_observer::<B>(
+                    &tcfg,
+                    &telemetry,
+                    &ncfg,
+                    &spec,
+                    &device,
+                    &config_path,
+                    &mut observer,
+                )?
+            };
             // The stream handle must outlive the run: dropping it signals the
             // writer thread and joins it, flushing the ring and any in-flight
             // episode. Report what it achieved so a silent stream is visible.
@@ -319,6 +336,17 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
                 ))
             } else {
                 let cp = load_checkpoint::<B>(&tcfg.checkpoint_dir, &device, tcfg.seed)?;
+                if cp.normalizer.dim != ncfg.obs_dim {
+                    return Err(format!(
+                        "checkpoint `{}` has {}-channel observations but --mission {} needs {} \
+                         (train a mission checkpoint with --mode train --mission mission)",
+                        tcfg.checkpoint_dir,
+                        cp.normalizer.dim,
+                        mission_mode(args),
+                        ncfg.obs_dim
+                    )
+                    .into());
+                }
                 let card = rl_agent::policy::ExpertCard::from_checkpoint(&tcfg.checkpoint_dir, cp.algorithm.id());
                 Box::new(rl_agent::policy::RlPolicy::new(cp.algorithm, cp.normalizer, card))
             };

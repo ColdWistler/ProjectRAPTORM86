@@ -613,6 +613,47 @@ pub fn run_with_observer<B: AutodiffBackend<FloatElem = f32>>(
     )
 }
 
+/// Train on the 32-channel mission adapter.
+///
+/// Mission mode used to build a 32-channel network and then hand the trainer
+/// the 19-channel [`AvionicsEnv`], panicking on the first normalizer update.
+/// The env and its summary are constructed here so the rest of the loop is
+/// identical to avionics training.
+#[allow(clippy::too_many_arguments)]
+pub fn run_mission<B: AutodiffBackend<FloatElem = f32>>(
+    tcfg: &TrainerConfig,
+    telemetry: &TelemetryConfig,
+    ncfg: &NetConfig,
+    spec: &AlgoSpec,
+    device: &B::Device,
+    config_path: &str,
+    mission_cfg: &flight_core::MissionConfig,
+    reward: &crate::mission_env::RewardProfile,
+    obs: &mut TrainObserver,
+) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
+    let mut env = crate::mission_env::MissionEnv::new(
+        config_path,
+        mission_cfg.clone(),
+        reward.clone(),
+        tcfg.seed,
+    )?;
+    let capture_speed = mission_cfg.resolve_capture_speed(env.aircraft_config());
+    let airframe = std::path::Path::new(config_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    let mission = crate::contracts::MissionSummary::from_config(
+        airframe,
+        mission_cfg,
+        capture_speed,
+        &reward.name,
+    );
+    run_with_env(
+        tcfg, telemetry, ncfg, spec, device, &mut env,
+        Some(&mission), None, None, None, obs,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
     tcfg: &TrainerConfig,

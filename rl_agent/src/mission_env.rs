@@ -152,6 +152,17 @@ impl MissionEnv {
             last_obs: [0.0; MISSION_OBS_DIM],
         })
     }
+
+    /// Airframe loaded from `config_path` (used to resolve capture speed and
+    /// report the mission summary without re-reading the file).
+    pub fn aircraft_config(&self) -> &flight_core::AircraftConfig {
+        self.inner.aircraft_config()
+    }
+
+    /// Mission configuration this environment was built with.
+    pub fn mission_config(&self) -> &flight_core::MissionConfig {
+        self.inner.mission_config()
+    }
 }
 
 impl EnvSpec for MissionEnv {
