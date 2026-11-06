@@ -98,7 +98,7 @@ fn mission_specialization_is_persisted_and_card_round_trips() {
     let expert = read_json(&dir, "expert.json");
     assert_eq!(expert["specialization"], "capture");
 
-    let card = rl_agent::policy::ExpertCard::from_checkpoint(dir.to_str().unwrap(), "ppo");
+    let card = rl_agent::policy::ExpertCard::from_checkpoint(dir.to_str().unwrap(), "ppo").unwrap();
     assert_eq!(card.specialization, rl_agent::policy::Specialization::Capture);
     assert_eq!(card.contract, "mission.v1");
     assert_eq!(card.reward_profile, "balanced");

@@ -13,6 +13,7 @@ pub enum ModelKind {
     A2c,
     Sac,
     Td3,
+    D3qn,
     Heuristic,
 }
 
@@ -54,7 +55,7 @@ impl ExpertCard {
             "a2c" => ModelKind::A2c,
             "sac" => ModelKind::Sac,
             "td3" => ModelKind::Td3,
-            // Task 3 adds `ModelKind::D3qn`; update this arm then.
+            "d3qn" => ModelKind::D3qn,
             _ => ModelKind::Ppo,
         };
         let specialization = match specialization {
@@ -82,32 +83,53 @@ impl ExpertCard {
         }
     }
 
-    pub fn from_checkpoint(dir: &str, algo_id: &str) -> Self {
+    /// Load the card persisted beside a checkpoint, or reconstruct an honest
+    /// one from `net.json` when no `expert.json` exists.
+    ///
+    /// Legacy avionics checkpoints used to be reported as 32-channel mission
+    /// experts. The observation width in `net.json` is the ground truth, so
+    /// the contract and mask come from there. A malformed `expert.json` is an
+    /// error rather than a panic.
+    pub fn from_checkpoint(
+        dir: &str,
+        algo_id: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let expert_path = std::path::Path::new(dir).join("expert.json");
         if expert_path.exists() {
-            let content = std::fs::read_to_string(&expert_path).expect("read expert.json");
-            serde_json::from_str(&content).expect("parse expert.json")
-        } else {
-            let model = match algo_id {
-                "ppo" => ModelKind::Ppo,
-                "a2c" => ModelKind::A2c,
-                "sac" => ModelKind::Sac,
-                "td3" => ModelKind::Td3,
-                _ => ModelKind::Ppo,
-            };
-            Self {
-                id: "legacy".into(),
-                model,
-                specialization: Specialization::Full,
-                contract: crate::contracts::MISSION_CONTRACT.into(),
-                reward_profile: "balanced".into(),
-                obs_mask: (0..MISSION_OBS_DIM).collect(),
-                trained_steps: 0,
-                seed: 0,
-                git_commit: String::new(),
-                notes: String::new(),
-            }
+            let content = std::fs::read_to_string(&expert_path)?;
+            return Ok(serde_json::from_str(&content)?);
         }
+        let net: crate::net::NetConfig = serde_json::from_str(&std::fs::read_to_string(
+            std::path::Path::new(dir).join("net.json"),
+        )?)?;
+        let model = match algo_id {
+            "ppo" => ModelKind::Ppo,
+            "a2c" => ModelKind::A2c,
+            "sac" => ModelKind::Sac,
+            "td3" => ModelKind::Td3,
+            "d3qn" => ModelKind::D3qn,
+            _ => ModelKind::Ppo,
+        };
+        let (contract, obs_mask) = if net.obs_dim == MISSION_OBS_DIM {
+            (
+                crate::contracts::MISSION_CONTRACT,
+                (0..MISSION_OBS_DIM).collect(),
+            )
+        } else {
+            (AVIONICS_CONTRACT, (0..net.obs_dim).collect())
+        };
+        Ok(Self {
+            id: "legacy".into(),
+            model,
+            specialization: Specialization::Full,
+            contract: contract.into(),
+            reward_profile: "balanced".into(),
+            obs_mask,
+            trained_steps: 0,
+            seed: 0,
+            git_commit: String::new(),
+            notes: String::new(),
+        })
     }
 }
 
@@ -388,11 +410,41 @@ mod tests {
     fn legacy_checkpoint_card_falls_back_to_full_specialization() {
         let dir = std::env::temp_dir().join(format!("rl_agent_legacy_card_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let card = ExpertCard::from_checkpoint(dir.to_str().unwrap(), crate::algo::ALGO_PPO);
+        std::fs::write(
+            dir.join("net.json"),
+            r#"{"obs_dim":32,"hidden":128,"action_dim":4,"log_std_init":-0.5}"#,
+        )
+        .unwrap();
+        let card = ExpertCard::from_checkpoint(dir.to_str().unwrap(), crate::algo::ALGO_PPO).unwrap();
         assert_eq!(card.model, ModelKind::Ppo);
         assert_eq!(card.specialization, Specialization::Full);
         assert_eq!(card.contract, crate::contracts::MISSION_CONTRACT);
         assert_eq!(card.obs_mask.len(), MISSION_OBS_DIM);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_checkpoint_card_reports_its_real_contract_and_mask() {
+        let dir = std::env::temp_dir().join(format!("raptor-card-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("net.json"),
+            r#"{"obs_dim":19,"hidden":128,"action_dim":4,"log_std_init":-0.5}"#,
+        )
+        .unwrap();
+        let card = ExpertCard::from_checkpoint(dir.to_str().unwrap(), "d3qn").unwrap();
+        assert_eq!(card.contract, crate::contracts::AVIONICS_CONTRACT);
+        assert_eq!(card.obs_mask, (0..19).collect::<Vec<_>>());
+        assert_eq!(card.model, ModelKind::D3qn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_expert_json_is_an_error_not_a_panic() {
+        let dir = std::env::temp_dir().join(format!("raptor-card-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("expert.json"), "{not json").unwrap();
+        assert!(ExpertCard::from_checkpoint(dir.to_str().unwrap(), "ppo").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
