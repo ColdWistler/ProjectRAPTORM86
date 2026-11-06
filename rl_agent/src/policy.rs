@@ -1,7 +1,7 @@
 //! Policy abstractions for RL agent (Task 10).
 //! Defines [`Policy`] trait, [`RlPolicy`], [`HeuristicPolicy`], and metadata.
 
-use crate::contracts::{action_to_avionics, MISSION_OBS_DIM};
+use crate::contracts::{action_to_avionics, AVIONICS_CONTRACT, MISSION_OBS_DIM};
 use crate::{algo::Algorithm, normalize::RunningNormalizer};
 use burn::tensor::backend::AutodiffBackend;
 use flight_core::{MissionFeatures, MissionPhase, MissionContext};
@@ -40,6 +40,48 @@ pub struct ExpertCard {
 }
 
 impl ExpertCard {
+    /// Build the card for a run that is training right now (there is no
+    /// `expert.json` on disk yet).
+    pub fn for_training(
+        algo_id: &str,
+        obs_dim: usize,
+        reward_profile: &str,
+        specialization: &str,
+        seed: u64,
+    ) -> Self {
+        let model = match algo_id {
+            "ppo" => ModelKind::Ppo,
+            "a2c" => ModelKind::A2c,
+            "sac" => ModelKind::Sac,
+            "td3" => ModelKind::Td3,
+            // Task 3 adds `ModelKind::D3qn`; update this arm then.
+            _ => ModelKind::Ppo,
+        };
+        let specialization = match specialization {
+            "outbound" => Specialization::Outbound,
+            "capture" => Specialization::Capture,
+            "return" => Specialization::Return,
+            _ => Specialization::Full,
+        };
+        let contract = if obs_dim == MISSION_OBS_DIM {
+            crate::contracts::MISSION_CONTRACT
+        } else {
+            AVIONICS_CONTRACT
+        };
+        Self {
+            id: format!("{algo_id}-{seed}"),
+            model,
+            specialization,
+            contract: contract.into(),
+            reward_profile: reward_profile.into(),
+            obs_mask: (0..obs_dim).collect(),
+            trained_steps: 0,
+            seed,
+            git_commit: String::new(),
+            notes: String::new(),
+        }
+    }
+
     pub fn from_checkpoint(dir: &str, algo_id: &str) -> Self {
         let expert_path = std::path::Path::new(dir).join("expert.json");
         if expert_path.exists() {

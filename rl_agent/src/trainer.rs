@@ -629,6 +629,7 @@ pub fn run_mission<B: AutodiffBackend<FloatElem = f32>>(
     config_path: &str,
     mission_cfg: &flight_core::MissionConfig,
     reward: &crate::mission_env::RewardProfile,
+    specialization: Option<&str>,
     obs: &mut TrainObserver,
 ) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
     let mut env = crate::mission_env::MissionEnv::new(
@@ -650,7 +651,7 @@ pub fn run_mission<B: AutodiffBackend<FloatElem = f32>>(
     );
     run_with_env(
         tcfg, telemetry, ncfg, spec, device, &mut env,
-        Some(&mission), None, None, None, obs,
+        Some(&mission), None, Some(reward), specialization, obs,
     )
 }
 
@@ -664,7 +665,7 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
     env: &mut dyn EnvSpec,
     mission: Option<&crate::contracts::MissionSummary>,
     expert: Option<&crate::policy::ExpertCard>,
-    reward_profile: Option<&str>,
+    reward: Option<&crate::mission_env::RewardProfile>,
     specialization: Option<&str>,
     obs: &mut TrainObserver,
 ) -> Result<TrainingOutcome<B>, Box<dyn std::error::Error>> {
@@ -680,6 +681,31 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
         "avionics"
     };
 
+    // Mission runs need an expert card even before one exists on disk, so it
+    // is materialised here and persisted with the first checkpoint. Avionics
+    // runs stay metadata-free for 0.2.0 compatibility.
+    let fallback_card;
+    let expert: Option<&crate::policy::ExpertCard> = match expert {
+        Some(e) => Some(e),
+        None if mission.is_some() => {
+            fallback_card = crate::policy::ExpertCard::for_training(
+                agent.id(),
+                ncfg.obs_dim,
+                reward.map(|r| r.name.as_str()).unwrap_or("balanced"),
+                specialization.unwrap_or("full"),
+                tcfg.seed,
+            );
+            Some(&fallback_card)
+        }
+        None => None,
+    };
+    let checkpoint_meta = CheckpointMeta {
+        mission,
+        expert,
+        reward,
+        specialization,
+    };
+
     let meta = RunMeta {
         algo: agent.id(),
         backend: std::any::type_name::<B::Device>(),
@@ -687,7 +713,7 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
         ncfg,
         spec,
         mission,
-        reward_profile,
+        reward_profile: reward.map(|r| r.name.as_str()),
         specialization,
         contract,
         expert,
@@ -979,7 +1005,14 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
         if force_save
             || (tcfg.save_every > 0 && (it % tcfg.save_every == 0 || it == tcfg.iterations - 1))
         {
-            save_checkpoint(agent.as_ref(), &normalizer, tcfg, ncfg, &tcfg.checkpoint_dir)?;
+            save_checkpoint(
+                agent.as_ref(),
+                &normalizer,
+                tcfg,
+                ncfg,
+                &tcfg.checkpoint_dir,
+                &checkpoint_meta,
+            )?;
             saved = true;
         }
 
@@ -1104,17 +1137,32 @@ pub fn evaluate<B: AutodiffBackend<FloatElem = f32>>(
     m
 }
 
+/// Optional metadata persisted beside the weights so an evaluator can
+/// reconstruct contract, reward profile, and specialization without guessing.
+///
+/// Every field is optional so an avionics run can keep writing only the four
+/// 0.2.0 files; mission runs populate all of them.
+pub struct CheckpointMeta<'a> {
+    pub mission: Option<&'a crate::contracts::MissionSummary>,
+    pub expert: Option<&'a crate::policy::ExpertCard>,
+    pub reward: Option<&'a crate::mission_env::RewardProfile>,
+    pub specialization: Option<&'a str>,
+}
+
 /// Save the model weights (bin) plus JSON configs and normalizer.
 ///
 /// The algorithm id + hyper-parameters are persisted as `algo.json`; the
 /// network architecture as `net.json`; weights as `net.bin` (via the
-/// algorithm's own recorder).
+/// algorithm's own recorder). Mission runs additionally write `mission.json`,
+/// `expert.json`, and `reward.json` when present in `meta`; `specialization`
+/// rides in `expert.json`.
 pub fn save_checkpoint<B: AutodiffBackend<FloatElem = f32>>(
     agent: &dyn Algorithm<B>,
     normalizer: &RunningNormalizer,
     tcfg: &TrainerConfig,
     ncfg: &NetConfig,
     dir: &str,
+    meta: &CheckpointMeta<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
     agent.save_weights(Path::new(dir))?;
@@ -1128,6 +1176,24 @@ pub fn save_checkpoint<B: AutodiffBackend<FloatElem = f32>>(
         Path::new(dir).join("normalizer.json"),
         &serde_json::to_string_pretty(normalizer)?,
     )?;
+    if let Some(mission) = meta.mission {
+        write_json(
+            Path::new(dir).join("mission.json"),
+            &serde_json::to_string_pretty(mission)?,
+        )?;
+    }
+    if let Some(expert) = meta.expert {
+        write_json(
+            Path::new(dir).join("expert.json"),
+            &serde_json::to_string_pretty(expert)?,
+        )?;
+    }
+    if let Some(reward) = meta.reward {
+        write_json(
+            Path::new(dir).join("reward.json"),
+            &serde_json::to_string_pretty(reward)?,
+        )?;
+    }
     Ok(())
 }
 
