@@ -163,6 +163,24 @@ impl MissionEnv {
     pub fn mission_config(&self) -> &flight_core::MissionConfig {
         self.inner.mission_config()
     }
+
+    /// Reset onto a named exam scenario, returning the 32-channel observation.
+    pub fn reset_with_scenario_pub(&mut self, s: &flight_core::MissionScenario) -> Vec<f32> {
+        let r = self.inner.reset_with_scenario(s);
+        let obs = mission_observation(&r.avionics, &r.features);
+        self.last_obs = obs;
+        obs.iter().map(|&x| x as f32).collect()
+    }
+
+    /// Current mission phase, for tests that drive the policy directly.
+    pub fn phase_public(&self) -> flight_core::MissionPhase {
+        self.inner.phase()
+    }
+
+    /// Whether the episode ended by capturing the pickup and returning.
+    pub fn terminated_success(&self) -> bool {
+        self.inner.termination() == flight_core::MissionTermination::CapturedAndReturned
+    }
 }
 
 impl EnvSpec for MissionEnv {
