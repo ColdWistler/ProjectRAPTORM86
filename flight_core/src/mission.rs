@@ -766,5 +766,6 @@ impl MissionEnvironment {
         self.cached_features.clone()
     }
     pub fn step_count(&self) -> usize { self.step_count }
+    pub fn state(&self) -> &crate::state::AircraftState { self.inner.aircraft_state() }
     pub fn state_mut(&mut self) -> &mut crate::state::AircraftState { self.inner.state_mut() }
 }

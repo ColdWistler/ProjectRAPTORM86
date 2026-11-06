@@ -65,7 +65,9 @@ pub struct EpisodeScore {
     pub time_to_home_s: Option<f64>,
     pub outbound_track_error: f64,
     pub inbound_track_error: f64,
-    pub min_capture_speed: f64,
+    /// Minimum airspeed observed in the Capture phase. `None` means the
+    /// episode never entered Capture.
+    pub min_capture_speed: Option<f64>,
     pub capture_attempts: u32,
     pub energy: f64,
     pub reward: f64,
@@ -86,7 +88,8 @@ pub struct EvalSummary {
     pub mean_time_to_home_s: Option<f64>,
     pub mean_outbound_track_error: f64,
     pub mean_inbound_track_error: f64,
-    pub mean_min_capture_speed: f64,
+    /// Mean of the episodes that entered Capture; `None` when none did.
+    pub mean_min_capture_speed: Option<f64>,
     pub mean_energy: f64,
 }
 
@@ -115,6 +118,12 @@ pub fn wilson_interval(successes: usize, n: usize, z: f64) -> (f64, f64) {
 use crate::policy::Policy;
 use crate::mission_env::RewardProfile;
 
+/// Perpendicular distance from `(ax, ay)` to the line through the origin and
+/// `(tx, ty)`. Used to measure cross-track error toward the pickup/home.
+fn cross_track(ax: f64, ay: f64, (tx, ty): (f64, f64)) -> f64 {
+    ((ax * ty - ay * tx) / tx.hypot(ty).max(1e-9)).abs()
+}
+
 pub fn run_eval_suite(
     policy: &mut dyn Policy,
     env: &mut MissionEnvironment,
@@ -124,16 +133,22 @@ pub fn run_eval_suite(
 ) -> EvalSuite {
     let mut episodes = Vec::new();
     for s in scenarios {
-        env.reset_with_scenario(s);
         let reset_r = env.reset_with_scenario(s);
+        let pickup = (s.pickup_north, s.pickup_east);
         let mut obs_vec = crate::contracts::mission_observation(&reset_r.avionics, &reset_r.features).to_vec();
         policy.reset();
         let mut reward_total = 0.0;
         let mut energy = 0.0;
         let mut time_to_capture_s: Option<f64> = None;
         let mut time_to_home_s: Option<f64> = None;
-        let mut min_capture_speed = 0.0;
+        let mut min_capture_speed: Option<f64> = None;
         let mut capture_attempts: u32 = 0;
+        let mut captured_event = false;
+        let mut returned_event = false;
+        let mut outbound_track_sum = 0.0;
+        let mut outbound_track_n = 0usize;
+        let mut inbound_track_sum = 0.0;
+        let mut inbound_track_n = 0usize;
         let mut steps = 0usize;
         let mut terminated = false;
         let mut truncated = false;
@@ -159,17 +174,41 @@ pub fn run_eval_suite(
             obs_vec = crate::contracts::mission_observation(&out.avionics, &out.features).to_vec();
             reward_total += reward.reward(&out.signals);
             energy += (action[3] as f64).clamp(0.0, 1.0);
+            captured_event = captured_event || out.signals.captured;
+            returned_event = returned_event || out.signals.returned;
             if out.signals.captured && time_to_capture_s.is_none() {
                 time_to_capture_s = Some(step as f64 / 30.0); // roughly seconds
             }
             if out.signals.returned && time_to_home_s.is_none() {
                 time_to_home_s = Some(step as f64 / 30.0);
             }
-            if env.phase() == flight_core::MissionPhase::Capture {
-                capture_attempts = env.capture_attempts();
-                // approximate min capture speed from aircraft state via inner (not exposed directly)
-                // skip precise frame tracking for simplicity
+
+            let st = env.state();
+            let cross = cross_track(st.pos_x, st.pos_y, pickup);
+            // Exam targets are at most 2.5 km out. A larger cross-track means
+            // the simulation diverged (a crashing episode can leave the state
+            // non-finite), and must not poison the scorecard.
+            let sane = cross.is_finite() && cross <= 10_000.0;
+            match env.phase() {
+                flight_core::MissionPhase::Outbound if sane => {
+                    outbound_track_sum += cross;
+                    outbound_track_n += 1;
+                }
+                flight_core::MissionPhase::Return if sane => {
+                    inbound_track_sum += cross;
+                    inbound_track_n += 1;
+                }
+                flight_core::MissionPhase::Capture => {
+                    let speed = st.airspeed();
+                    if speed.is_finite() {
+                        min_capture_speed =
+                            Some(min_capture_speed.map_or(speed, |m: f64| m.min(speed)));
+                    }
+                }
+                _ => {}
             }
+            capture_attempts = env.capture_attempts();
+
             if out.terminated || out.truncated {
                 terminated = out.terminated;
                 truncated = out.truncated;
@@ -178,19 +217,27 @@ pub fn run_eval_suite(
             }
         }
         let out = last_out.as_ref().expect("episode had no steps");
-        let success = env.phase() == flight_core::MissionPhase::Done || (terminated && out.termination == flight_core::MissionTermination::CapturedAndReturned);
+        let success = terminated && out.termination == flight_core::MissionTermination::CapturedAndReturned;
         episodes.push(EpisodeScore {
             scenario: s.id.clone(),
             success,
-            captured: terminated && out.termination == flight_core::MissionTermination::CapturedAndReturned,
-            returned: terminated && out.signals.returned,
+            captured: captured_event,
+            returned: returned_event,
             crash: out.termination == flight_core::MissionTermination::GroundImpact || out.termination == flight_core::MissionTermination::OutOfBounds,
             timeout: truncated,
             termination: termination_str,
             time_to_capture_s,
             time_to_home_s,
-            outbound_track_error: 0.0,
-            inbound_track_error: 0.0,
+            outbound_track_error: if outbound_track_n > 0 {
+                outbound_track_sum / outbound_track_n as f64
+            } else {
+                0.0
+            },
+            inbound_track_error: if inbound_track_n > 0 {
+                inbound_track_sum / inbound_track_n as f64
+            } else {
+                0.0
+            },
             min_capture_speed,
             capture_attempts,
             energy,
@@ -216,9 +263,24 @@ pub fn run_eval_suite(
         None
     };
     let mean_energy = if n > 0 { episodes.iter().map(|e| e.energy).sum::<f64>() / n as f64 } else { 0.0 };
-    let mean_min_cap = if episodes.iter().any(|e| e.min_capture_speed > 0.0) {
-        episodes.iter().filter(|e| e.min_capture_speed > 0.0).map(|e| e.min_capture_speed).sum::<f64>() / episodes.iter().filter(|e| e.min_capture_speed > 0.0).count() as f64
-    } else { 0.0 };
+    let mean_outbound_track = if n > 0 {
+        episodes.iter().map(|e| e.outbound_track_error).sum::<f64>() / n as f64
+    } else {
+        0.0
+    };
+    let mean_inbound_track = if n > 0 {
+        episodes.iter().map(|e| e.inbound_track_error).sum::<f64>() / n as f64
+    } else {
+        0.0
+    };
+    let mean_min_cap = if episodes.iter().any(|e| e.min_capture_speed.is_some()) {
+        Some(
+            episodes.iter().filter_map(|e| e.min_capture_speed).sum::<f64>()
+                / episodes.iter().filter(|e| e.min_capture_speed.is_some()).count() as f64,
+        )
+    } else {
+        None
+    };
     EvalSuite {
         contract: crate::contracts::MISSION_CONTRACT.into(),
         expert: "legacy".into(), // will be overridden by caller
@@ -235,8 +297,8 @@ pub fn run_eval_suite(
             timeout_rate: if n > 0 { timeouts as f64 / n as f64 } else { 0.0 },
             mean_time_to_capture_s: mean_time_capture,
             mean_time_to_home_s: mean_time_home,
-            mean_outbound_track_error: 0.0,
-            mean_inbound_track_error: 0.0,
+            mean_outbound_track_error: mean_outbound_track,
+            mean_inbound_track_error: mean_inbound_track,
             mean_min_capture_speed: mean_min_cap,
             mean_energy,
         },
@@ -266,7 +328,7 @@ pub fn write_eval_csv(path: &std::path::Path, suite: &EvalSuite) -> Result<(), B
             e.time_to_home_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
             e.outbound_track_error,
             e.inbound_track_error,
-            e.min_capture_speed,
+            e.min_capture_speed.map(|v| v.to_string()).unwrap_or_default(),
             e.capture_attempts,
             e.energy,
             e.reward,
@@ -301,6 +363,75 @@ mod tests {
         assert!(lo >= 0.0 && hi < 0.3);
         let (lo, hi) = wilson_interval(0, 0, 1.96);
         assert_eq!((lo, hi), (0.0, 0.0));
+    }
+
+    #[test]
+    fn track_error_is_measured_not_zero() {
+        // A straight-line run from the origin: place the pickup off-axis and
+        // fly one episode; the cross-track offset must be measured, and a
+        // capture speed only exists when the episode entered Capture.
+        let mut env = flight_core::MissionEnvironment::new(
+            "../m_sweep_mini.toml", MissionConfig::default(), 7,
+        ).unwrap();
+        let scenarios = default_scenarios();
+        let mut p = crate::policy::HeuristicPolicy::new(
+            55.0,
+            MissionConfig::default().resolve_capture_speed(env.aircraft_config()),
+            10.0,
+        );
+        let suite = run_eval_suite(
+            &mut p, &mut env, &scenarios[..1], 60, &crate::mission_env::RewardProfile::balanced(),
+        );
+        let e = &suite.episodes[0];
+        assert!(e.outbound_track_error.is_finite() && e.outbound_track_error >= 0.0);
+        assert!(e.inbound_track_error.is_finite() && e.inbound_track_error >= 0.0);
+        assert_eq!(e.min_capture_speed.is_none(), e.capture_attempts == 0);
+    }
+
+    #[test]
+    fn inbound_track_error_is_measured_on_the_return_leg() {
+        // The default heuristic never captures, so a normal exam run has no
+        // inbound samples and legitimately reports 0.0. Start a scenario
+        // already in Return, offset from the pickup-home line, and confirm the
+        // inbound leg is actually measured.
+        let mut env = flight_core::MissionEnvironment::new(
+            "../m_sweep_mini.toml", MissionConfig::default(), 7,
+        ).unwrap();
+        let scenario = MissionScenario {
+            id: "return_off_axis".into(),
+            pickup_north: 1000.0,
+            pickup_east: 0.0,
+            pickup_altitude: 800.0,
+            initial_phase: flight_core::MissionPhase::Return,
+            initial_north: Some(1000.0),
+            initial_east: Some(200.0),
+            initial_altitude: Some(800.0),
+            initial_airspeed: None,
+        };
+        let mut p = crate::policy::HeuristicPolicy::new(
+            55.0,
+            MissionConfig::default().resolve_capture_speed(env.aircraft_config()),
+            10.0,
+        );
+        let suite = run_eval_suite(
+            &mut p,
+            &mut env,
+            std::slice::from_ref(&scenario),
+            60,
+            &crate::mission_env::RewardProfile::balanced(),
+        );
+        let e = &suite.episodes[0];
+        assert!(
+            e.inbound_track_error.is_finite() && e.inbound_track_error > 0.0,
+            "inbound track error {} was not measured",
+            e.inbound_track_error
+        );
+    }
+
+    #[test]
+    fn captured_is_true_for_a_capture_that_ends_in_a_crash() {
+        let s = EpisodeScore { captured: true, crash: true, termination: "GroundImpact".into(), ..Default::default() };
+        assert!(s.captured, "capture is an event, not a termination reason");
     }
 
     #[test]
