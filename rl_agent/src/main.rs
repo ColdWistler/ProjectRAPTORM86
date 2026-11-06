@@ -350,7 +350,10 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
                     )
                     .into());
                 }
-                let card = rl_agent::policy::ExpertCard::from_checkpoint(&tcfg.checkpoint_dir, cp.algorithm.id());
+                let card = rl_agent::policy::ExpertCard::from_checkpoint(
+                    &tcfg.checkpoint_dir,
+                    cp.algorithm.id(),
+                )?;
                 Box::new(rl_agent::policy::RlPolicy::new(cp.algorithm, cp.normalizer, card))
             };
             let scenarios = match args.get("scenarios") {
