@@ -108,7 +108,9 @@
 <script>
 "use strict";
 
-/* ── Metric registry (mirrors godot/scripts/rl_chart.gd) ───────────── */
+/* ── Metric registry (mirrors rl_dash/src/main.rs + godot/scripts/rl_chart.gd) ──
+   Keys and labels are identical across all three dashboards; the colours are
+   the same hues the Godot chart uses, so no new colour is introduced here. */
 const METRICS = [
   { key: "mean_reward_per_step", label: "Reward / step",   color: "#73d986", mode: "max" },
   { key: "policy_loss",          label: "Policy loss",     color: "#f29a33", mode: "min" },
@@ -118,7 +120,54 @@ const METRICS = [
   { key: "alt_err",              label: "Eval alt err (m)",   color: "#f27366", mode: "min" },
   { key: "spd_err",              label: "Eval spd err (m/s)", color: "#4dd9d9", mode: "min" },
   { key: "eval_reward",          label: "Eval mean reward",   color: "#8cd973", mode: "max" },
+  // Ground-truth flight state (`env` block in metrics.jsonl). Absent on runs
+  // recorded before env telemetry existed; those series simply show nothing.
+  { key: "env_alt_mean",         label: "Env altitude (m)",       color: "#73b3f2", mode: "mid" },
+  { key: "env_airspeed_mean",    label: "Env airspeed (m/s)",     color: "#4dd9d9", mode: "mid" },
+  { key: "env_climb_mean",       label: "Env climb (m/s)",        color: "#d9b34d", mode: "mid" },
+  { key: "env_ground_speed_mean",label: "Env ground speed (m/s)", color: "#4da6f2", mode: "mid" },
+  { key: "env_roll_abs_mean",    label: "Env |roll| (rad)",       color: "#f27366", mode: "mid" },
+  { key: "env_pitch_abs_mean",   label: "Env |pitch| (rad)",      color: "#bf73f2", mode: "mid" },
+  { key: "env_aoa_mean",         label: "Env AoA (rad)",          color: "#e68cbf", mode: "mid" },
+  { key: "env_wind_mean",        label: "Env wind (m/s)",         color: "#8ca6f2", mode: "mid" },
+  { key: "env_throttle_mean",    label: "Env throttle",           color: "#99d973", mode: "mid" },
+  { key: "env_surface_effort_mean", label: "Env surface effort (deg)", color: "#e68cbf", mode: "mid" },
+  { key: "env_baro_err_abs_mean",label: "Env baro err (m)",       color: "#b3bfd9", mode: "mid" },
+  { key: "env_battery_pct_min",  label: "Env battery min (%)",    color: "#f2cc4d", mode: "mid" },
+  // Weather (`env.weather`, only present on runs with a weather system).
+  { key: "weather_wind_speed_mean", label: "Weather wind (m/s)",    color: "#8ca6f2", mode: "mid" },
+  { key: "weather_gust_rms_max", label: "Weather gust max (m/s)", color: "#6699cc", mode: "mid" },
+  { key: "weather_turbulence_mean", label: "Weather turbulence",   color: "#b3bfd9", mode: "mid" },
+  { key: "weather_severity_mean", label: "Weather severity",      color: "#f27366", mode: "mid" },
+  { key: "weather_visibility_min", label: "Weather visibility (m)", color: "#a6d9b3", mode: "mid" },
+  // Mission counters (mission-mode runs only; absent on avionics runs).
+  { key: "mission_captures",     label: "Mission captures",       color: "#59cc8c", mode: "max" },
+  { key: "mission_returns",      label: "Mission returns",        color: "#59a6f2", mode: "max" },
+  { key: "mission_successes",    label: "Mission successes",      color: "#f2cc59", mode: "max" },
 ];
+
+/* Series that live inside a nested block rather than at the top level of a
+   record: key -> path into the record. Mirrors the flattening in
+   `rl_dash`'s `MetricsRecord::metric`. */
+const NESTED = {
+  env_alt_mean:          ["env", "alt_mean"],
+  env_airspeed_mean:     ["env", "airspeed_mean"],
+  env_climb_mean:        ["env", "climb_mean"],
+  env_ground_speed_mean: ["env", "ground_speed_mean"],
+  env_roll_abs_mean:     ["env", "roll_abs_mean"],
+  env_pitch_abs_mean:    ["env", "pitch_abs_mean"],
+  env_aoa_mean:          ["env", "aoa_mean"],
+  env_wind_mean:         ["env", "wind_mean"],
+  env_throttle_mean:     ["env", "throttle_mean"],
+  env_surface_effort_mean: ["env", "surface_effort_mean"],
+  env_baro_err_abs_mean: ["env", "baro_err_abs_mean"],
+  env_battery_pct_min:   ["env", "battery_pct_min"],
+  weather_wind_speed_mean: ["env", "weather", "wind_speed_mean"],
+  weather_gust_rms_max:  ["env", "weather", "gust_rms_max"],
+  weather_turbulence_mean: ["env", "weather", "turbulence_mean"],
+  weather_severity_mean: ["env", "weather", "severity_mean"],
+  weather_visibility_min: ["env", "weather", "visibility_min"],
+};
 const COLORS = {};
 METRICS.forEach(m => (COLORS[m.key] = m.color));
 
@@ -127,6 +176,17 @@ let jsonl = [];          // parsed records, in file order
 let meta = {};           // run_id / status read from run.json (same dir)
 let visible = {};        // metric key -> bool
 let canvas, ctx, tooltip, raf = null;
+
+/* Grab the chart canvas and the tooltip. These used to be left unset, so every
+   drawChart() call threw on `ctx.setTransform` and the dashboard never drew
+   anything. The script is the last element in <body>, so the nodes exist by
+   the time it runs; DOMContentLoaded calls this again for safety. */
+function initChart() {
+  canvas = document.getElementById("chart");
+  ctx = canvas.getContext("2d");
+  tooltip = document.getElementById("tooltip");
+}
+initChart();
 
 /* ── File loading ──────────────────────────────────────────────────── */
 function pickFile() { document.getElementById("file").click(); }
@@ -182,8 +242,19 @@ function valueOf(rec, key) {
   switch (key) {
     case "alt_err": case "spd_err": case "eval_reward":
       return rec.eval ? rec.eval[key === "eval_reward" ? "total_reward" : key] : undefined;
-    default: return rec[key];
   }
+  // `env_*` / `weather_*` series live in nested blocks; a run recorded before
+  // that telemetry existed simply has no value for them.
+  const path = NESTED[key];
+  if (path) {
+    let node = rec;
+    for (const seg of path) {
+      if (!node || typeof node !== "object") return undefined;
+      node = node[seg];
+    }
+    return node;
+  }
+  return rec[key];
 }
 
 /* ── Smoothing ─────────────────────────────────────────────────────── */
@@ -424,6 +495,7 @@ function exportCsv() {
 
 /* Optional: open a run directly, e.g. dashboard.html?file=runs/2026.../metrics.jsonl */
 window.addEventListener("DOMContentLoaded", () => {
+  initChart();
   const f = new URLSearchParams(location.search).get("file");
   if (!f) return;
   fetch(f)
