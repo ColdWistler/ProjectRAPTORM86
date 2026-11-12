@@ -40,6 +40,10 @@ const METRICS: &[(&str, &str)] = &[
     ("crash_rate", "Crash rate"),
     ("mean_episode_steps", "Episode steps"),
     ("episodes_completed", "Episodes completed"),
+    // Mission-mode counters (`rl_agent` mission runs only).
+    ("mission_captures", "Mission captures"),
+    ("mission_returns", "Mission returns"),
+    ("mission_successes", "Mission successes"),
     ("alt_err", "Eval alt err (m)"),
     ("spd_err", "Eval spd err (m/s)"),
     ("eval_reward", "Eval mean reward"),
@@ -171,6 +175,13 @@ struct MetricsRecord {
     /// the `episodes_completed` metric.
     #[serde(default)]
     episodes_completed: Option<u64>,
+    /// Mission-mode counters. Absent on avionics runs, so they stay `None`.
+    #[serde(default)]
+    mission_captures: Option<f64>,
+    #[serde(default)]
+    mission_returns: Option<f64>,
+    #[serde(default)]
+    mission_successes: Option<f64>,
     #[serde(default)]
     checkpoint: bool,
     #[serde(default)]
@@ -258,6 +269,9 @@ impl MetricsRecord {
             "steps_per_s" => self.steps_per_s,
             "crash_rate" => self.crash_rate,
             "mean_episode_steps" => self.mean_episode_steps,
+            "mission_captures" => self.mission_captures,
+            "mission_returns" => self.mission_returns,
+            "mission_successes" => self.mission_successes,
             "alt_err" => self.eval.as_ref().and_then(|e| e.alt_err),
             "spd_err" => self.eval.as_ref().and_then(|e| e.spd_err),
             "eval_reward" => self.eval.as_ref().and_then(|e| e.total_reward),
@@ -2435,6 +2449,29 @@ mod tests {
         .unwrap();
         assert!((no_weather.metric("env_alt_mean").unwrap() - 950.0).abs() < 1e-9);
         assert_eq!(no_weather.metric("weather_gust_rms_max"), None);
+    }
+
+    #[test]
+    fn mission_counters_parse_and_appear_in_the_metric_list() {
+        let rec: MetricsRecord = serde_json::from_str(
+            r#"{"iteration":0,"mission_captures":2,"mission_returns":1,"mission_successes":1}"#,
+        )
+        .unwrap();
+        assert_eq!(rec.metric("mission_captures"), Some(2.0));
+        assert_eq!(rec.metric("mission_returns"), Some(1.0));
+        assert_eq!(rec.metric("mission_successes"), Some(1.0));
+        for key in ["mission_captures", "mission_returns", "mission_successes"] {
+            assert!(
+                METRICS.iter().any(|(k, _)| *k == key),
+                "rl_dash must offer the `{key}` series"
+            );
+        }
+
+        // Avionics records have no mission keys and must stay `None`.
+        let avionics: MetricsRecord = serde_json::from_str(r#"{"iteration":0}"#).unwrap();
+        assert_eq!(avionics.metric("mission_captures"), None);
+        assert_eq!(avionics.metric("mission_returns"), None);
+        assert_eq!(avionics.metric("mission_successes"), None);
     }
 
     #[test]

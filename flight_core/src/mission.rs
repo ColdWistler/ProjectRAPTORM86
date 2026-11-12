@@ -342,6 +342,7 @@ mod tests {
         assert!(out.signals.captured);
         assert_eq!(out.signals.dwell_fraction, 1.0);
         assert_eq!(env.phase(), MissionPhase::Return);
+        assert!(env.context().captured, "capture must latch in the mission context");
     }
 
     #[test]
@@ -757,6 +758,10 @@ impl MissionEnvironment {
                 || (self.tension == 0.0 && self.dwell_steps > 0);
             if self.dwell_steps >= self.config.capture_dwell_steps && stable {
                 self.phase = MissionPhase::Return;
+                // Latch the capture: `MissionContext.captured` reports it for
+                // the rest of the episode (telemetry and gating both rely on
+                // this being true after the capture transition).
+                self.captured = true;
             }
         } else if self.phase == MissionPhase::Return {
             let s = self.inner.aircraft_state();

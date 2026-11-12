@@ -481,6 +481,12 @@ The rollout-derived fields (`mean_reward_per_step`, `mean_episode_steps`,
 stream — they were previously only visible as a console line. Flatten it to a
 table with any JSONL tool, or press **Download CSV** in the dashboard.
 
+Mission runs (`--mission mission`) add four purely additive keys:
+`mission_captures`, `mission_returns`, `mission_successes` (counts for this
+iteration, not cumulative) and `mean_phase_steps` (`[outbound, capture,
+return]`, with the terminal `Done` phase folded into `return`). Avionics
+records omit all four, so their schema is unchanged.
+
 ### Environment telemetry
 
 The `env` object (abridged in the example above) summarises the
