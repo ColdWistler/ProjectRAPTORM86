@@ -68,12 +68,15 @@ pub fn hook_tip_position_ned(state: &AircraftState, hook_offset_body: &[f64; 3])
 }
 
 /// Apply skyhook forces and update state
+///
+/// `_current_time` is accepted for API stability; the winch model is
+/// step-driven and does not use it yet.
 pub fn update(
     state: &mut AircraftState,
     skyhook: &mut SkyhookState,
     config: &SkyhookConfig,
     dt: f64,
-    current_time: f64,
+    _current_time: f64,
 ) -> (Vector3<f64>, Vector3<f64>) {
     let mut force = Vector3::zeros();
     let mut moment = Vector3::zeros();

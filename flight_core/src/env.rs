@@ -20,8 +20,6 @@ use nalgebra::Vector3;
 use crate::atmosphere::Atmosphere;
 #[cfg(feature = "full-avionics")]
 use crate::avionics::{AvionicsSystem, FaultFlag, FaultFlags};
-#[cfg(feature = "full-avionics")]
-use crate::frame::FlightFrame;
 
 /// A 12-component observation vector (same layout as
 /// [`crate::AircraftState::to_observation_array`]).
@@ -1052,7 +1050,7 @@ mod tests {
         state.v = 0.0;
         state.w = 0.0;
 
-        let (physics_roll, physics_pitch, _) = state.euler_angles();
+        let (physics_roll, _physics_pitch, _) = state.euler_angles();
         assert!(
             physics_roll < 0.0,
             "setup must produce a bank, got {:.1}°",

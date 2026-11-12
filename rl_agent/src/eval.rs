@@ -1,10 +1,9 @@
 //! Evaluation framework for mission scenarios (Task 10 interface).
 
-use flight_core::{MissionConfig, MissionEnvironment, MissionSignals, MissionScenario};
+use flight_core::{MissionEnvironment, MissionScenario};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 
 pub const EXAM_SCENARIOS: usize = 30;
 
@@ -345,6 +344,7 @@ pub fn write_eval_csv(path: &std::path::Path, suite: &EvalSuite) -> Result<(), B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flight_core::MissionConfig;
 
     #[test]
     fn default_exam_has_30_spread_scenarios() {

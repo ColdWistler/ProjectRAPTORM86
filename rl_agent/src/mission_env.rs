@@ -118,7 +118,7 @@ impl RewardProfile {
     }
 }
 
-use flight_core::{WeatherConfig, MissionConfig, MissionEnvironment, MissionSignals, MissionContext};
+use flight_core::{WeatherConfig, MissionConfig, MissionEnvironment};
 use crate::contracts::{MISSION_OBS_DIM, mission_observation, action_to_avionics};
 use crate::trainer::{EnvSpec, StepOutcome};
 
@@ -267,6 +267,7 @@ impl EnvSpec for MissionEnv {
 mod tests {
     use super::*;
     use crate::contracts::MISSION_OBS_DIM;
+    use flight_core::MissionSignals;
 
     fn env() -> MissionEnv {
         MissionEnv::new("../m_sweep_mini.toml", MissionConfig::default(), RewardProfile::balanced(), 7)

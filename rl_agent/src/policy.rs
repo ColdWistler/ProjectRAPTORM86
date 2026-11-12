@@ -4,7 +4,7 @@
 use crate::contracts::{action_to_avionics, AVIONICS_CONTRACT, MISSION_OBS_DIM};
 use crate::{algo::Algorithm, normalize::RunningNormalizer};
 use burn::tensor::backend::AutodiffBackend;
-use flight_core::{MissionFeatures, MissionPhase, MissionContext};
+use flight_core::{MissionFeatures, MissionPhase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

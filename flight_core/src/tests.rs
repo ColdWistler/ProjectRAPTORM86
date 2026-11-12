@@ -3,12 +3,10 @@ mod tests {
         compute_forces, compute_forces_moments, compute_forces_with_terrain, compute_moments,
         ground_effect_factor, ControlInputs,
     };
-    use crate::atmosphere::Atmosphere;
     use crate::integrator::step;
     use crate::state::AircraftState;
     use crate::config::{AircraftConfig, Propulsion};
     use crate::terrain::{Terrain, TerrainHill};
-    use crate::Simulator;
     use nalgebra::Vector3;
 
     #[test]

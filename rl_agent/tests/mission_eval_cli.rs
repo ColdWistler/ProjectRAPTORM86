@@ -6,8 +6,7 @@ use flight_core::{MissionConfig, MissionEnvironment};
 use rl_agent::contracts::MISSION_CONTRACT;
 use rl_agent::eval::{default_scenarios, run_eval_suite, write_eval_json, write_eval_csv};
 use rl_agent::mission_env::RewardProfile;
-use rl_agent::policy::{HeuristicPolicy, PolicyContext};
-use flight_core::MissionPhase;
+use rl_agent::policy::HeuristicPolicy;
 
 #[test]
 fn eval_suite_writes_json_and_csv_for_the_heuristic() {

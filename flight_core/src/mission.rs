@@ -301,7 +301,7 @@ mod tests {
         let mut a = mission_env();
         let mut b = mission_env();
         let ra = a.reset();
-        let rb = b.reset();
+        let _rb = b.reset();
         assert_eq!(ra.phase, MissionPhase::Outbound);
         assert_eq!(a.scenario().pickup_north, b.scenario().pickup_north);
         assert_eq!(a.scenario().pickup_east, b.scenario().pickup_east);
@@ -469,10 +469,6 @@ pub struct MissionEnvironment {
     cached_features: MissionFeatures,
     tension: f64,
     tension_stable_steps: usize,
-    /// Optional RL weather configuration threaded through to the inner
-    /// [`AvionicsEnvironment`]. Set when the exam wants explicit weather
-    /// scenes baked into the launch scenario.
-    weather_config: Option<crate::weather::WeatherConfig>,
 }
 
 impl MissionEnvironment {
@@ -492,7 +488,7 @@ impl MissionEnvironment {
             ground_altitude: config.ground_altitude,
             max_steps: config.max_steps,
             dt: config.dt,
-            weather_config: weather_config.clone(),
+            weather_config,
             ..Default::default()
         };
         let avionics = AvionicsEnvironment::with_config(config_path, env_config)?;
@@ -531,7 +527,6 @@ impl MissionEnvironment {
             cached_features: MissionFeatures::default(),
             tension: 0.0,
             tension_stable_steps: 0,
-            weather_config: weather_config.clone(),
         })
     }
 
