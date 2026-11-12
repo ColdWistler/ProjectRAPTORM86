@@ -4,11 +4,24 @@
 //! Hidden: 32 units, tanh.
 //! Output: 4 logits (Outbound, Capture, Return, Done).
 //!
-//! Includes manual SGD train loop over synthetic 30-scenario exam.
+//! Trained with full-batch SGD on softmax cross-entropy over a seeded
+//! synthetic exam, so the gate and its accuracy are reproducible.
 
 use flight_core::{MissionFeatures, MissionPhase, MISSION_FEATURE_DIM};
 use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
+
+/// Seed for the synthetic exam. Fixed so every run sees the same samples.
+pub const EXAM_SEED: u64 = 2026;
+
+/// Seed for the gate's random initialisation.
+pub const GATE_INIT_SEED: u64 = 2026;
+
+/// Full-batch gradient-descent epochs used by [`train_gate`].
+pub const TRAIN_EPOCHS: usize = 2000;
+
+/// Learning rate used by [`train_gate`].
+pub const TRAIN_LR: f32 = 0.5;
 
 /// Label mapping: 0=Outbound,1=Capture,2=Return,3=Done
 pub const PHASE_LABELS: [&str; 4] = ["outbound", "capture", "return", "done"];
@@ -40,28 +53,28 @@ pub struct GateMLP {
 }
 
 impl GateMLP {
+    /// Randomly initialise the gate from `seed` (Glorot-uniform weights).
     pub fn new(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
+        let limit1 = (6.0 / (MISSION_FEATURE_DIM + 32) as f32).sqrt();
+        let limit2 = (6.0 / (32 + 4) as f32).sqrt();
+
         let mut w1 = vec![vec![0.0f32; 32]; MISSION_FEATURE_DIM];
-        let mut b1 = vec![0.0f32; 32];
-        for i in 0..MISSION_FEATURE_DIM {
-            for j in 0..32 {
-                w1[i][j] = rng.gen_range(-0.05..0.05);
+        for row in &mut w1 {
+            for v in row {
+                *v = rng.gen_range(-limit1..limit1);
             }
         }
-        for j in 0..32 {
-            b1[j] = rng.gen_range(-0.05..0.05);
-        }
+        let b1 = vec![0.0f32; 32];
+
         let mut w2 = vec![vec![0.0f32; 4]; 32];
-        let mut b2 = vec![0.0f32; 4];
-        for i in 0..32 {
-            for j in 0..4 {
-                w2[i][j] = rng.gen_range(-0.05..0.05);
+        for row in &mut w2 {
+            for v in row {
+                *v = rng.gen_range(-limit2..limit2);
             }
         }
-        for j in 0..4 {
-            b2[j] = rng.gen_range(-0.05..0.05);
-        }
+        let b2 = vec![0.0f32; 4];
+
         Self { w1, b1, w2, b2 }
     }
 
@@ -117,51 +130,95 @@ impl GateMLP {
         h
     }
 
-    /// Simple hill-climb / random perturbation training for demonstration.
-    pub fn train_hill_climb(&mut self, samples: &[(Vec<f32>, usize)], epochs: usize) {
+    /// Train with full-batch SGD on softmax cross-entropy.
+    ///
+    /// Every sample contributes to the gradient each epoch; the update is the
+    /// mean gradient over the batch. The loop is deterministic for a fixed
+    /// initial gate and sample order.
+    pub fn train_sgd(&mut self, samples: &[(Vec<f32>, usize)], epochs: usize, lr: f32) {
+        if samples.is_empty() {
+            return;
+        }
+        let n = samples.len() as f32;
+        let mut grad_w1 = vec![vec![0.0f32; 32]; MISSION_FEATURE_DIM];
+        let mut grad_b1 = vec![0.0f32; 32];
+        let mut grad_w2 = vec![vec![0.0f32; 4]; 32];
+        let mut grad_b2 = vec![0.0f32; 4];
+
         for _ in 0..epochs {
-            // compute accuracy
-            let mut correct = 0;
-            for (x, label) in samples {
-                if self.predict_idx(x) == *label {
-                    correct += 1;
-                }
+            for g in &mut grad_w1 {
+                g.fill(0.0);
             }
-            // try a small random weight perturbation; keep if improves
-            let mut best = self.clone();
-            let mut best_acc = correct;
-            let mut rng = StdRng::seed_from_u64(42 + (correct as u64));
-            for _ in 0..20 {
-                let mut trial = self.clone();
-                // perturb all weights slightly
-                for i in 0..MISSION_FEATURE_DIM {
-                    for j in 0..32 {
-                        trial.w1[i][j] += rng.gen_range(-0.01..0.01);
-                    }
+            grad_b1.fill(0.0);
+            for g in &mut grad_w2 {
+                g.fill(0.0);
+            }
+            grad_b2.fill(0.0);
+
+            for (x, label) in samples {
+                let h = self.hidden_for(x);
+                let logits = self.forward(x);
+
+                // Softmax cross-entropy gradient wrt logits: p - onehot.
+                let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut exp = [0.0f32; 4];
+                let mut denom = 0.0f32;
+                for j in 0..4 {
+                    exp[j] = (logits[j] - max).exp();
+                    denom += exp[j];
                 }
-                for j in 0..32 {
-                    trial.b1[j] += rng.gen_range(-0.01..0.01);
+                let mut dz2 = [0.0f32; 4];
+                for j in 0..4 {
+                    let p = exp[j] / denom;
+                    let target = if j == *label { 1.0 } else { 0.0 };
+                    dz2[j] = (p - target) / n;
                 }
+
+                // Output layer.
                 for i in 0..32 {
                     for j in 0..4 {
-                        trial.w2[i][j] += rng.gen_range(-0.01..0.01);
+                        grad_w2[i][j] += h[i] * dz2[j];
                     }
                 }
                 for j in 0..4 {
-                    trial.b2[j] += rng.gen_range(-0.01..0.01);
+                    grad_b2[j] += dz2[j];
                 }
-                let mut acc = 0;
-                for (x, label) in samples {
-                    if trial.predict_idx(x) == *label {
-                        acc += 1;
+
+                // Backprop through tanh hidden layer.
+                let mut dz1 = [0.0f32; 32];
+                for i in 0..32 {
+                    let mut dh = 0.0f32;
+                    for j in 0..4 {
+                        dh += self.w2[i][j] * dz2[j];
+                    }
+                    dz1[i] = dh * (1.0 - h[i] * h[i]);
+                }
+                for i in 0..MISSION_FEATURE_DIM {
+                    for j in 0..32 {
+                        grad_w1[i][j] += x[i] * dz1[j];
                     }
                 }
-                if acc > best_acc {
-                    best_acc = acc;
-                    best = trial;
+                for j in 0..32 {
+                    grad_b1[j] += dz1[j];
                 }
             }
-            *self = best;
+
+            for i in 0..MISSION_FEATURE_DIM {
+                for j in 0..32 {
+                    self.w1[i][j] -= lr * grad_w1[i][j];
+                }
+            }
+            for j in 0..32 {
+                self.b1[j] -= lr * grad_b1[j];
+            }
+            for i in 0..32 {
+                for j in 0..4 {
+                    self.w2[i][j] -= lr * grad_w2[i][j];
+                }
+            }
+            for j in 0..4 {
+                self.b2[j] -= lr * grad_b2[j];
+            }
         }
     }
 }
@@ -177,69 +234,64 @@ impl Clone for GateMLP {
     }
 }
 
-/// Build synthetic 30-scenario exam: 7 per phase + 2 extra.
+/// Build the seeded synthetic 30-scenario exam.
+///
+/// The sample set is identical on every call. Return and Done deliberately
+/// share `f[7] = 2.0` and differ only at `f[9]` (0.0 vs 0.05), so the gate has
+/// to learn the time-remaining split rather than the phase one-hot alone.
 pub fn exam_scenarios() -> Vec<(Vec<f32>, usize)> {
+    let mut rng = StdRng::seed_from_u64(EXAM_SEED);
     let mut samples = Vec::with_capacity(30);
     // Outbound (0): phase=0.0, others random
     for _ in 0..7 {
         let mut f = [0.0f32; MISSION_FEATURE_DIM];
-        f[7] = 0.0; // phase
-        f[0] = rand::random::<f32>() * 0.8;
-        f[10] = rand::random::<f32>();
+        f[7] = 0.0;
+        f[0] = rng.gen_range(0.0..0.8);
+        f[10] = rng.gen_range(0.0..1.0);
         samples.push((f.to_vec(), 0));
     }
     // Capture (1): phase=1.0
     for _ in 0..8 {
         let mut f = [0.0f32; MISSION_FEATURE_DIM];
         f[7] = 1.0;
-        f[0] = rand::random::<f32>() * 0.3 + 0.1;
-        f[11] = rand::random::<f32>();
+        f[0] = rng.gen_range(0.1..0.4);
+        f[11] = rng.gen_range(0.0..1.0);
         samples.push((f.to_vec(), 1));
     }
-    // Return (2): phase=2.0
+    // Return (2): phase=2.0, no time-remaining signal
     for _ in 0..7 {
         let mut f = [0.0f32; MISSION_FEATURE_DIM];
         f[7] = 2.0;
-        f[5] = rand::random::<f32>() * 0.5;
+        f[5] = rng.gen_range(0.0..0.5);
         samples.push((f.to_vec(), 2));
     }
-    // Done (3): phase=2.0 (same encoding as return) with high time_remaining_fraction
+    // Done (3): same phase encoding as Return, low time remaining
     for _ in 0..8 {
         let mut f = [0.0f32; MISSION_FEATURE_DIM];
         f[7] = 2.0;
-        f[9] = 0.05; // low time remaining = near done
+        f[9] = 0.05;
         samples.push((f.to_vec(), 3));
     }
     samples
 }
 
-/// Train a gate to >= 90% accuracy on exam.
-pub fn train_gate() -> GateMLP {
-    let mut gate = GateMLP::new(2026);
-    let exam = exam_scenarios();
-    // Hard-coded demonstration initialization that encodes phase feature
-    // (index 7) into hidden neurons 0-3, and uses time_remaining_fraction
-    // (index 9) to split Return (label 2) from Done (label 3).
-    gate.w1[7][0] = -10.0; gate.b1[0] = 3.0;
-    gate.w1[7][1] = 15.0; gate.b1[1] = -15.0;
-    gate.w1[7][2] = 15.0; gate.b1[2] = -20.0;
-    gate.w1[7][3] = 15.0; gate.b1[3] = -25.0;
-    gate.w1[9][3] = -20.0;
-    for i in 0..32 {
-        for j in 0..4 {
-            gate.w2[i][j] = if i == j {
-                match i {
-                    0 => 3.0,
-                    1 => 3.0,
-                    2 => 4.0,
-                    _ => 7.0,
-                }
-            } else {
-                0.0
-            };
-        }
+/// Fraction of `samples` the gate classifies correctly.
+pub fn evaluate_gate(gate: &GateMLP, samples: &[(Vec<f32>, usize)]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
     }
-    gate.b2 = vec![0.0; 4];
+    let correct = samples
+        .iter()
+        .filter(|(x, label)| gate.predict_idx(x) == *label)
+        .count();
+    correct as f64 / samples.len() as f64
+}
+
+/// Train a gate from a random initialisation to the exam.
+pub fn train_gate() -> GateMLP {
+    let mut gate = GateMLP::new(GATE_INIT_SEED);
+    let exam = exam_scenarios();
+    gate.train_sgd(&exam, TRAIN_EPOCHS, TRAIN_LR);
     gate
 }
 
@@ -256,17 +308,44 @@ pub fn features_to_input(f: &MissionFeatures) -> [f32; MISSION_FEATURE_DIM] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn gate_predicts_phase() {
+    fn trained_gate_beats_the_chance_baseline() {
         let gate = train_gate();
         let exam = exam_scenarios();
-        let mut correct = 0;
-        for (x, label) in &exam {
-            if gate.predict_idx(x) == *label {
-                correct += 1;
-            }
+        let accuracy = evaluate_gate(&gate, &exam);
+        let correct = (accuracy * exam.len() as f64).round() as usize;
+        println!(
+            "learned gate: {correct}/{} correct ({:.1}%) after {TRAIN_EPOCHS} epochs at lr {TRAIN_LR}",
+            exam.len(),
+            accuracy * 100.0
+        );
+        // Four balanced classes => chance is 25%.
+        assert!(
+            accuracy >= 0.90,
+            "gate accuracy {accuracy:.3} is below 0.90 (chance = 0.25)"
+        );
+    }
+
+    #[test]
+    fn trained_gate_is_seeded_and_reproducible() {
+        let first = train_gate();
+        let second = train_gate();
+        for (x, _) in exam_scenarios() {
+            assert_eq!(
+                first.forward(&x),
+                second.forward(&x),
+                "training must be deterministic for a fixed seed"
+            );
+            assert_eq!(first.predict_idx(&x), second.predict_idx(&x));
         }
-        // Expect high accuracy (demonstration gate)
-        assert!(correct >= 22, "gate accuracy too low: {}/30", correct);
+    }
+
+    #[test]
+    fn exam_scenarios_are_deterministic() {
+        let first = exam_scenarios();
+        let second = exam_scenarios();
+        assert_eq!(first.len(), 30);
+        assert_eq!(first, second, "the exam must not change between calls");
     }
 }
