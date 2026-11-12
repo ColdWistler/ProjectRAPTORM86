@@ -54,7 +54,6 @@ pub struct WeatherExamEntry {
 /// while using the same seed-controlled spread logic.
 pub fn weather_scenarios() -> Vec<WeatherExamEntry> {
     let mut entries = Vec::with_capacity(WEATHER_SCENARIO_COUNT);
-    let base_config = MissionConfig::default();
     // Cycle through bearings (36° increments) and preset pairs.
     for (preset_idx, preset) in PRESETS.iter().enumerate() {
         for cycle in 0..2 {
@@ -146,11 +145,9 @@ pub fn run_weather_episode(
     // requiring a full trained policy. Uses a neutral cruise action.
     let action = flight_core::AvionicsAction::level_cruise(0.5);
 
-    let mut steps = 0;
     let max_steps = mission_cfg.max_steps.min(600);
     let mut last_termination = String::new();
     for _ in 0..max_steps {
-        steps += 1;
         let out = env.step(action);
         if out.terminated || out.truncated {
             last_termination = format!("{:?}", out.termination);
@@ -232,7 +229,7 @@ pub fn build_summary(
     results: &[(String, bool, bool, bool, String)],
 ) -> WeatherExamSummary {
     let mut preset_stats: BTreeMap<String, Vec<(bool, bool, bool)>> = BTreeMap::new();
-    for (label, success, captured, crash, termination) in results {
+    for (label, success, captured, crash, _termination) in results {
         // Extract preset key from label: `w01_Clear` etc.
         let preset_key = label
             .split('_')

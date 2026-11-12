@@ -3,7 +3,7 @@
 //! Handles rotation of pivoted wing panels for variable sweep and
 //! provides helpers for computing positions of moving points like the hook.
 
-use crate::config::{CollisionPanel, MorphingWingConfig, WingPivot};
+use crate::config::{CollisionPanel, MorphingWingConfig};
 use nalgebra::{Rotation3, Vector3};
 
 /// Build the effective collision panel list for the current sweep angle.
@@ -50,10 +50,6 @@ pub fn build_effective_panels(
     }
     
     panels
-}
-
-fn pivot_axis(_pivot: &WingPivot) -> [f64; 3] {
-    [0.0, 0.0, 1.0]
 }
 
 /// Get hook tip position in body frame

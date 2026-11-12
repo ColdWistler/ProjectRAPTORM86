@@ -26,8 +26,7 @@ use crate::{ACTION_DIM, AVIONICS_OBS_DIM};
 use crate::contracts::action_to_avionics;
 use burn::tensor::backend::AutodiffBackend;
 use flight_core::{
-    AvionicsAction, AvionicsEnvironment, EnvConfig, FlightFrame, TerminationReason,
-    WeatherObservation,
+    AvionicsEnvironment, EnvConfig, FlightFrame, TerminationReason, WeatherObservation,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;

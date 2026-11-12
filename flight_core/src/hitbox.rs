@@ -49,7 +49,6 @@ pub fn check_terrain_contacts(
         
         if altitude < terrain_height + 0.1 {
             let penetration = terrain_height + 0.1 - altitude;
-            let normal = Vector3::new(0.0, 0.0, -1.0); // Up in NED? Wait - NED: z is down, so up is +z? No wait: pos_z positive is DOWN. So altitude above ground is -pos_z. Terrain height is likely in meters above some datum. Up normal in world would be (0,0,-1) if we're in NED with z down? Or easier to think: if we're below terrain, push up.
             let normal_up = Vector3::new(0.0, 0.0, -1.0); // Upward in NED frame (negative z direction)
             let vel_rel = vel_ned.dot(&normal_up).min(0.0).abs();
             
@@ -67,30 +66,28 @@ pub fn check_terrain_contacts(
     contacts
 }
 
-/// Resolve contacts by applying impulses
+/// Resolve contacts by applying impulses.
+///
+/// The returned moment is currently always zero: the contact-offset moment
+/// term is not modelled yet, so `_state` and `_dt` are accepted for API
+/// stability but unused.
 pub fn resolve_contacts(
-    state: &mut AircraftState,
+    _state: &mut AircraftState,
     contacts: &[Contact],
-    dt: f64,
+    _dt: f64,
 ) -> (Vector3<f64>, Vector3<f64>) {
     let mut force = Vector3::zeros();
-    let mut moment = Vector3::zeros();
+    let moment = Vector3::zeros();
     
     if contacts.is_empty() {
         return (force, moment);
     }
-    
-    let rot_inv = state.rotation_earth_to_body().inverse();
     
     for contact in contacts {
         if contact.penetration > 0.0 {
             // Apply normal impulse
             let impulse_force = contact.normal_ned * contact.impulse;
             force += impulse_force;
-            
-            // Apply moment (approximate)
-            let pos_rel = Vector3::new(state.pos_x, state.pos_y, state.pos_z);
-            // This is simplified
         }
     }
     

@@ -68,11 +68,9 @@ the models are trained against.
 
 ### Known issues
 
-- Mission mode and the mission eval suite still build their networks with
-  the 19-channel avionics observation width instead of the 32-channel
-  mission width, so they panic at start-up.
-- The learned gate is still hand-tuned constants rather than a trained
-  model, and the phase selector never dispatches an expert.
-- CPU runs are not bitwise reproducible across processes (burn's `ndarray`
-  backend enables `ndarray/rayon`); the in-process same-seed test is
-  exact.
+- **Godot trainer tab** — the mission dropdown does not refresh after a new
+  run appears; you must click **Rescan** or restart the editor.
+- **rl_dash export** — CSV download does not downsample, so large runs
+  produce very large files.
+- **Module organisation** — `rl_agent` is still a monolith and `flight_core`
+  has several shallow modules that should be consolidated.

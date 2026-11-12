@@ -10,7 +10,7 @@ use crate::expert::ExpertRegistry;
 use crate::learned_gate::{features_to_input, GateMLP};
 use crate::policy::{ExpertCard, HeuristicPolicy, Policy, PolicyContext};
 use crate::contracts::MISSION_OBS_DIM;
-use flight_core::{MissionFeatures, MissionPhase, MISSION_FEATURE_DIM};
+use flight_core::{MissionPhase, MISSION_FEATURE_DIM};
 use std::collections::{HashMap, HashSet};
 
 fn phase_feature_array(p: MissionPhase) -> [f32; MISSION_FEATURE_DIM] {
@@ -311,15 +311,13 @@ pub fn select_policy(
     let target_label = target.unwrap_or_else(|| "heuristic".into());
 
     let mut status = SelectorStatus::Stable;
-    let mut new_stable = stable_cnt;
-    let mut new_label = current_label.to_string();
-
-    if phase == ctx.phase {
+    let new_stable = if phase == ctx.phase {
         // Hysteresis: count stable steps within same phase.
-        new_stable = stable_cnt.saturating_add(1);
+        stable_cnt.saturating_add(1)
     } else {
-        new_stable = 0;
-    }
+        0
+    };
+    let mut new_label = current_label.to_string();
 
     if new_stable >= config.hysteresis_steps {
         if new_label != target_label {

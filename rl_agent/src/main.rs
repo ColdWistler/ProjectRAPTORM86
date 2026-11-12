@@ -21,11 +21,10 @@ use rl_agent::trainer::{
     TrainerConfig,
 };
 use rl_agent::{ACTION_DIM, AVIONICS_OBS_DIM};
-use rl_agent::mission_env::{MissionEnv, RewardProfile};
 use rl_agent::expert::ExpertRegistry;
 use rl_agent::policy::{ExpertCard, HeuristicPolicy, Policy, RlPolicy};
 use rl_agent::selector::{PhaseSelector, SelectorConfig};
-use flight_core::{MissionConfig, MissionEnvironment, MissionPhase};
+use flight_core::{MissionConfig, MissionEnvironment};
 
 const USAGE: &str = "\
 rl_agent — burn/PPO trainer for the flight_core AvionicsEnvironment
