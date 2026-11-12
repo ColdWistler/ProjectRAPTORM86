@@ -6,11 +6,12 @@
 //!
 //! Uses [`MissionContext`] (Task 2) via [`PolicyContext`].
 
+use crate::expert::ExpertRegistry;
 use crate::learned_gate::{features_to_input, GateMLP};
 use crate::policy::{ExpertCard, HeuristicPolicy, Policy, PolicyContext};
 use crate::contracts::MISSION_OBS_DIM;
 use flight_core::{MissionFeatures, MissionPhase, MISSION_FEATURE_DIM};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn phase_feature_array(p: MissionPhase) -> [f32; MISSION_FEATURE_DIM] {
     let mut f = [0.0f32; MISSION_FEATURE_DIM];
@@ -68,23 +69,44 @@ pub enum SelectorStatus {
 pub struct PhaseSelector {
     config: SelectorConfig,
     heuristic: HeuristicPolicy,
+    /// Expert policies the config labels bind to.
+    experts: ExpertRegistry,
     current_expert_label: String,
+    /// Label actually dispatched on the previous `act`, used to detect a
+    /// switch for bumpless transfer.
+    last_dispatched_label: String,
     previous_action: Vec<f32>,
     stable_cnt: usize,
     last_phase: MissionPhase,
     status: SelectorStatus,
     card: ExpertCard,
     gate: Option<GateMLP>,
+    /// Unknown labels already warned about, so a bad map warns once.
+    warned_unknown: HashSet<String>,
 }
 
 impl PhaseSelector {
-    /// Build with a learned gate (already trained). When `None`, behaves as the
-    /// rule-based hybrid selector from before this feature.
+    /// Build without a registry: every phase falls back to the heuristic.
     pub fn new(config: SelectorConfig, heuristic: HeuristicPolicy) -> Self {
-        Self::with_gate(config, heuristic, None)
+        Self::with_experts(config, heuristic, ExpertRegistry::new(), None)
     }
 
+    /// Build with a learned gate (already trained). When `None`, behaves as the
+    /// rule-based hybrid selector from before this feature.
     pub fn with_gate(config: SelectorConfig, heuristic: HeuristicPolicy, gate: Option<GateMLP>) -> Self {
+        Self::with_experts(config, heuristic, ExpertRegistry::new(), gate)
+    }
+
+    /// Build with the experts named by [`SelectorConfig::phases`].
+    ///
+    /// `heuristic` is both the label `"heuristic"` and the fallback whenever a
+    /// selected expert is unknown or returns an invalid action.
+    pub fn with_experts(
+        config: SelectorConfig,
+        heuristic: HeuristicPolicy,
+        experts: ExpertRegistry,
+        gate: Option<GateMLP>,
+    ) -> Self {
         let card = ExpertCard {
             id: "hybrid_selector_v1".into(),
             model: crate::policy::ModelKind::Heuristic,
@@ -104,14 +126,22 @@ impl PhaseSelector {
         Self {
             config,
             heuristic,
+            experts,
             current_expert_label: "heuristic".into(),
+            last_dispatched_label: "heuristic".into(),
             previous_action: vec![0.0; 4],
             stable_cnt: 0,
             last_phase: MissionPhase::Outbound,
             status: SelectorStatus::Stable,
             card,
             gate,
+            warned_unknown: HashSet::new(),
         }
+    }
+
+    /// Registered experts (for reporting and tests).
+    pub fn experts(&self) -> &ExpertRegistry {
+        &self.experts
     }
 
     /// Select expert label for phase.
@@ -167,6 +197,7 @@ impl PhaseSelector {
         self.stable_cnt = 0;
         self.last_phase = MissionPhase::Outbound;
         self.current_expert_label = "heuristic".into();
+        self.last_dispatched_label = "heuristic".into();
         self.previous_action = vec![0.0; 4];
         self.status = SelectorStatus::Stable;
     }
@@ -209,23 +240,40 @@ impl Policy for PhaseSelector {
     fn act(&mut self, obs: &[f32], ctx: &PolicyContext) -> Vec<f32> {
         let expert_label = self.select_policy(ctx);
 
-        // For this milestone the selector holds the heuristic directly and
-        // uses it as both the configured expert when unmatched and as
-        // the NaN fallback.
-        let mut action = self.heuristic.act(obs, ctx);
+        let mut action = if expert_label == "heuristic" {
+            self.heuristic.act(obs, ctx)
+        } else if let Some(expert) = self.experts.get_mut(&expert_label) {
+            let candidate = expert.act(obs, ctx);
+            if self.is_valid_action(&candidate) {
+                candidate
+            } else if self.config.heuristic_fallback {
+                // A broken expert (wrong length, non-finite, out of bounds)
+                // must never reach the avionics contract.
+                self.status = SelectorStatus::FallbackHeuristic;
+                self.heuristic.act(obs, ctx)
+            } else {
+                // Fallback disabled: repeat the last safe command.
+                self.previous_action.clone()
+            }
+        } else {
+            // A phase mapped to a label nobody registered. Keep flying on the
+            // heuristic and warn once per label instead of silently ignoring
+            // the misconfiguration.
+            if self.warned_unknown.insert(expert_label.clone()) {
+                eprintln!(
+                    "rl_agent: warning: unknown expert `{expert_label}` selected for \
+                     phase {:?}; using the heuristic",
+                    ctx.phase
+                );
+            }
+            self.status = SelectorStatus::Stable;
+            self.heuristic.act(obs, ctx)
+        };
 
-        // Heuristic fallback when RL model would return NaN / out-of-range.
-        if !self.is_valid_action(&action) {
-            self.status = SelectorStatus::FallbackHeuristic;
-            action = self.heuristic.act(obs, ctx);
-        }
-
-        // Bumpless throttle transfer when expert label changed.
-        if self.current_expert_label != expert_label {
-            // Transitioning: apply slew.
-            // Since heuristic is the only direct expert here, we still
-            // demonstrate the slew logic on throttle.
+        // Bumpless throttle transfer when the dispatched expert changed.
+        if self.last_dispatched_label != expert_label {
             action = self.apply_bumpless(&action);
+            self.last_dispatched_label = expert_label;
         }
 
         self.previous_action = action.clone();
@@ -426,5 +474,204 @@ mod tests {
         // Gate should stay deterministic when called repeatedly.
         let label2 = sel.select_policy(&default_ctx(MissionPhase::Outbound));
         assert_eq!(label, label2);
+    }
+
+    /// Test policy that replays a fixed sequence of actions, holding the last
+    /// one once the sequence is exhausted.
+    struct ScriptedPolicy {
+        actions: Vec<Vec<f32>>,
+        idx: usize,
+        card: ExpertCard,
+    }
+
+    impl ScriptedPolicy {
+        fn new(actions: Vec<Vec<f32>>) -> Self {
+            assert!(!actions.is_empty());
+            Self {
+                actions,
+                idx: 0,
+                card: ExpertCard::for_training(
+                    "ppo",
+                    MISSION_OBS_DIM,
+                    "balanced",
+                    "full",
+                    1,
+                ),
+            }
+        }
+    }
+
+    impl Policy for ScriptedPolicy {
+        fn act(&mut self, _obs: &[f32], _ctx: &PolicyContext) -> Vec<f32> {
+            let i = self.idx.min(self.actions.len() - 1);
+            self.idx += 1;
+            self.actions[i].clone()
+        }
+
+        fn deterministic_action(&mut self, obs: &[f32], ctx: &PolicyContext) -> Vec<f32> {
+            self.act(obs, ctx)
+        }
+
+        fn reset(&mut self) {
+            self.idx = 0;
+        }
+
+        fn card(&self) -> &ExpertCard {
+            &self.card
+        }
+    }
+
+    fn scripted(actions: Vec<Vec<f32>>) -> Box<dyn Policy> {
+        Box::new(ScriptedPolicy::new(actions))
+    }
+
+    fn obs() -> Vec<f32> {
+        vec![0.0f32; MISSION_OBS_DIM]
+    }
+
+    #[test]
+    fn selector_dispatches_the_configured_expert() {
+        let mut cfg = SelectorConfig::new();
+        cfg.hysteresis_steps = 0;
+        cfg.bumpless_slew_max = 1.0;
+        cfg.phases.insert("outbound".into(), "expert_a".into());
+
+        let mut experts = ExpertRegistry::new();
+        experts.insert("expert_a", scripted(vec![vec![0.11, -0.22, 0.33, 0.44]]));
+        let mut sel = PhaseSelector::with_experts(
+            cfg,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            experts,
+            None,
+        );
+
+        let action = sel.act(&obs(), &default_ctx(MissionPhase::Outbound));
+        assert_eq!(
+            action,
+            vec![0.11, -0.22, 0.33, 0.44],
+            "the configured expert's action must be dispatched verbatim"
+        );
+        assert_eq!(sel.status(), SelectorStatus::Stable);
+        assert_eq!(sel.experts().len(), 1);
+    }
+
+    #[test]
+    fn invalid_expert_action_falls_back_to_heuristic() {
+        let bad_actions = [
+            vec![0.0, f32::NAN, 0.0, 0.0], // non-finite
+            vec![0.1, 0.2, 0.3],           // wrong length
+        ];
+        for bad in bad_actions {
+            let mut cfg = SelectorConfig::new();
+            cfg.hysteresis_steps = 0;
+            cfg.bumpless_slew_max = 1.0;
+            cfg.heuristic_fallback = true;
+            cfg.phases.insert("outbound".into(), "expert_bad".into());
+
+            let mut experts = ExpertRegistry::new();
+            experts.insert("expert_bad", scripted(vec![bad]));
+            let mut sel = PhaseSelector::with_experts(
+                cfg,
+                HeuristicPolicy::new(55.0, 11.5, 10.0),
+                experts,
+                None,
+            );
+
+            let ctx = default_ctx(MissionPhase::Outbound);
+            let expected = HeuristicPolicy::new(55.0, 11.5, 10.0).act(&obs(), &ctx);
+            let action = sel.act(&obs(), &ctx);
+            assert_eq!(action, expected, "invalid expert action must not be emitted");
+            assert_eq!(sel.status(), SelectorStatus::FallbackHeuristic);
+        }
+    }
+
+    #[test]
+    fn invalid_expert_action_repeats_previous_action_without_fallback() {
+        let mut cfg = SelectorConfig::new();
+        cfg.hysteresis_steps = 0;
+        cfg.bumpless_slew_max = 1.0;
+        cfg.heuristic_fallback = false;
+        cfg.phases.insert("outbound".into(), "expert_a".into());
+
+        let mut experts = ExpertRegistry::new();
+        experts.insert(
+            "expert_a",
+            scripted(vec![
+                vec![0.1, 0.2, 0.3, 0.4],
+                vec![0.0, f32::NAN, 0.0, 0.0],
+            ]),
+        );
+        let mut sel = PhaseSelector::with_experts(
+            cfg,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            experts,
+            None,
+        );
+
+        let first = sel.act(&obs(), &default_ctx(MissionPhase::Outbound));
+        assert_eq!(first, vec![0.1, 0.2, 0.3, 0.4]);
+        let second = sel.act(&obs(), &default_ctx(MissionPhase::Outbound));
+        assert_eq!(
+            second, first,
+            "without heuristic fallback the selector must repeat the last safe action"
+        );
+    }
+
+    #[test]
+    fn unknown_expert_uses_heuristic_and_stays_stable() {
+        let mut cfg = SelectorConfig::new();
+        cfg.hysteresis_steps = 0;
+        // Isolate dispatch: the heuristic action must come through unchanged.
+        cfg.bumpless_slew_max = 1.0;
+        cfg.phases.insert("outbound".into(), "nobody_registered".into());
+
+        let mut sel = PhaseSelector::with_experts(
+            cfg,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            ExpertRegistry::new(),
+            None,
+        );
+
+        let ctx = default_ctx(MissionPhase::Outbound);
+        for _ in 0..3 {
+            let expected = HeuristicPolicy::new(55.0, 11.5, 10.0).act(&obs(), &ctx);
+            let action = sel.act(&obs(), &ctx);
+            assert_eq!(action, expected);
+            assert_eq!(sel.status(), SelectorStatus::Stable);
+        }
+        assert_eq!(
+            sel.warned_unknown.len(),
+            1,
+            "an unknown label should warn once, not every step"
+        );
+    }
+
+    #[test]
+    fn bumpless_slew_applies_when_the_expert_changes() {
+        let mut cfg = SelectorConfig::new();
+        cfg.hysteresis_steps = 0;
+        cfg.bumpless_slew_max = 0.1;
+        cfg.phases.insert("outbound".into(), "expert_a".into());
+        cfg.phases.insert("capture".into(), "expert_b".into());
+
+        let mut experts = ExpertRegistry::new();
+        experts.insert("expert_a", scripted(vec![vec![0.0, 0.0, 0.0, 0.5]]));
+        experts.insert("expert_b", scripted(vec![vec![0.0, 0.0, 0.0, 0.9]]));
+        let mut sel = PhaseSelector::with_experts(
+            cfg,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            experts,
+            None,
+        );
+
+        // First dispatch: throttle slews up from the zero baseline.
+        let a1 = sel.act(&obs(), &default_ctx(MissionPhase::Outbound));
+        assert!((a1[3] - 0.1).abs() < 1e-6, "throttle {:?}", a1[3]);
+        // Expert change: another 0.1 slew, not a jump to 0.9.
+        let a2 = sel.act(&obs(), &default_ctx(MissionPhase::Capture));
+        assert!((a2[3] - 0.2).abs() < 1e-6, "throttle {:?}", a2[3]);
+        // Same expert on the next step: no slew, the action passes through.
+        let a3 = sel.act(&obs(), &default_ctx(MissionPhase::Capture));
+        assert!((a3[3] - 0.9).abs() < 1e-6, "throttle {:?}", a3[3]);
     }
 }
