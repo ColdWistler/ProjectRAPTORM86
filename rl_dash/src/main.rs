@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 use sysinfo::System;
@@ -405,7 +405,26 @@ struct RunModel {
     records: Vec<MetricsRecord>,
     /// Byte offset of the last read in `metrics.jsonl` (incremental tail).
     file_len: u64,
+    /// Inode of `metrics.jsonl` at the last read (Unix only). A different
+    /// inode at the same path means a writer renamed a fresh file over it.
+    file_ino: Option<u64>,
+    /// Modification time of `metrics.jsonl` at the last read. Catches an
+    /// in-place rewrite that keeps both the path and the length.
+    file_mtime: Option<SystemTime>,
     error: Option<String>,
+}
+
+/// Inode for replacement detection, on Unix only.
+#[cfg(unix)]
+fn inode_of(meta: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.ino())
+}
+
+/// Non-Unix filesystems have no stable inode: rely on mtime alone.
+#[cfg(not(unix))]
+fn inode_of(_meta: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 /// Read + parse `run.json`; missing/unparseable → `None`.
@@ -423,6 +442,8 @@ impl RunModel {
             manifest,
             records: Vec::new(),
             file_len: 0,
+            file_ino: None,
+            file_mtime: None,
             error: None,
         }
     }
@@ -435,8 +456,8 @@ impl RunModel {
         }
     }
 
-    /// Append whatever is new since the last read. Truncation (file smaller
-    /// than remembered) restarts from 0.
+    /// Append whatever is new since the last read. Truncation restarts from 0,
+    /// as does a replaced or rewritten file (detected by inode/mtime).
     fn poll(&mut self) {
         let path = self.dir.join("metrics.jsonl");
         let mut f = match std::fs::File::open(&path) {
@@ -454,13 +475,27 @@ impl RunModel {
                 return;
             }
         };
-        let Ok(len) = f.metadata().map(|m| m.len()) else {
+        let Ok(meta) = f.metadata() else {
             return;
         };
-        if len < self.file_len {
+        let len = meta.len();
+        let ino = inode_of(&meta);
+        let mtime = meta.modified().ok();
+
+        // A same-length file can still be a different file: a writer that
+        // renames a fresh `metrics.jsonl` over the path, or rewrites it in
+        // place, leaves `len == file_len`. The inode catches the rename and
+        // the mtime catches the rewrite; a shortened file needs no detective
+        // work. In all three cases the old rows are stale, so start over.
+        let replaced = matches!((ino, self.file_ino), (Some(new), Some(old)) if new != old);
+        let truncated = len < self.file_len;
+        let rewritten = len == self.file_len && mtime != self.file_mtime;
+        if replaced || truncated || rewritten {
             self.file_len = 0;
             self.records.clear();
         }
+        self.file_ino = ino;
+        self.file_mtime = mtime;
         if len == self.file_len {
             return;
         }
@@ -972,6 +1007,7 @@ impl DashApp {
         // Keep existing models (their loaded records survive), add new ones,
         // and refresh manifests so a finished run's status shows up.
         let mut seen = BTreeMap::new();
+        let mut new_ids: Vec<String> = Vec::new();
         for dir in dirs {
             let id = dir
                 .file_name()
@@ -980,12 +1016,28 @@ impl DashApp {
             seen.insert(id.clone(), ());
             if !self.runs.contains_key(&id) {
                 self.visible.insert(id.clone(), true);
-                self.runs.insert(id, RunModel::new(dir));
+                self.runs.insert(id.clone(), RunModel::new(dir));
+                new_ids.push(id);
             }
         }
         for (id, run) in self.runs.iter_mut() {
             if seen.contains_key(id) {
                 run.reload_manifest();
+            }
+        }
+
+        // Poll runs that appeared on this scan immediately. Waiting for the
+        // next UI tick made a run that had already written records look empty
+        // on the tick it was discovered.
+        for id in &new_ids {
+            let has_records = if let Some(run) = self.runs.get_mut(id) {
+                run.poll();
+                !run.records.is_empty()
+            } else {
+                false
+            };
+            if has_records {
+                self.last_update.insert(id.clone(), Instant::now());
             }
         }
 
@@ -2505,6 +2557,104 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replaced_metrics_file_reloads_from_zero() {
+        let dir = std::env::temp_dir().join(format!("rl_dash_replace_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("metrics.jsonl");
+
+        // Same byte length, different value: only identity can distinguish
+        // the replacement from an unchanged file.
+        let old = r#"{"iteration":0,"mean_reward_per_step":1.0}"#;
+        let new = r#"{"iteration":0,"mean_reward_per_step":2.0}"#;
+        assert_eq!(old.len(), new.len());
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+
+        let mut run = RunModel::new(dir.clone());
+        run.poll();
+        assert_eq!(run.records.len(), 1);
+        assert_eq!(run.records[0].metric("mean_reward_per_step"), Some(1.0));
+
+        // Simulate a fresh writer replacing the file by rename: same path,
+        // same length, different inode.
+        let staged = dir.join("metrics.jsonl.new");
+        std::fs::write(&staged, format!("{new}\n")).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+
+        run.poll();
+        assert_eq!(run.records.len(), 1, "replaced file must not append");
+        assert_eq!(
+            run.records[0].metric("mean_reward_per_step"),
+            Some(2.0),
+            "the dashboard must show the replacement, not the stale row"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_length_in_place_rewrite_reloads_by_mtime() {
+        let dir = std::env::temp_dir().join(format!("rl_dash_rewrite_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("metrics.jsonl");
+
+        let old = r#"{"iteration":0,"mean_reward_per_step":1.0}"#;
+        let new = r#"{"iteration":0,"mean_reward_per_step":3.0}"#;
+        assert_eq!(old.len(), new.len());
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+
+        let mut run = RunModel::new(dir.clone());
+        run.poll();
+        assert_eq!(run.records[0].metric("mean_reward_per_step"), Some(1.0));
+
+        // Same inode and same length; only the mtime marks the rewrite. Set it
+        // explicitly instead of sleeping, so a coarse timestamp granularity
+        // cannot make this test flaky.
+        std::fs::write(&path, format!("{new}\n")).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(1))
+            .unwrap();
+
+        run.poll();
+        assert_eq!(run.records.len(), 1);
+        assert_eq!(run.records[0].metric("mean_reward_per_step"), Some(3.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rescan_polls_a_newly_discovered_run_on_the_same_tick() {
+        let root = std::env::temp_dir().join(format!("rl_dash_rescan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut app = DashApp::new(root.clone(), 0);
+        assert!(app.runs.is_empty(), "empty root has no runs");
+
+        let run_dir = root.join("20260101_000000_000_ppo_seed42");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("metrics.jsonl"),
+            format!("{}\n", SAMPLE.lines().next().unwrap()),
+        )
+        .unwrap();
+
+        app.rescan();
+        let run = app.runs.values().next().expect("run discovered");
+        assert_eq!(
+            run.records.len(),
+            1,
+            "rescan must poll the new run before returning"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
