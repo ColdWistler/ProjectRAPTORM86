@@ -66,6 +66,7 @@ pub mod trainer;
 pub mod mission_env;
 pub mod policy;
 pub mod eval;
+pub mod expert;
 pub mod selector;
 pub mod learned_gate;
 pub mod weather_exam;
