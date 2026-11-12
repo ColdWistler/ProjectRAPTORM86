@@ -253,10 +253,8 @@ impl FlightController {
     /// Current estimated attitude (roll/pitch) in radians.
     /// Roll matches the physics engine's
     /// [`AircraftState::euler_angles`](crate::state::AircraftState::euler_angles).
-    /// Pitch keeps the controller's historical sign convention (positive =
-    /// nose-up in the elevator/gyro chain) which the trim/elevator gains are
-    /// calibrated against. TODO: unify pitch to `euler_angles` and re-tune
-    /// the outer/inner loop signs together.
+    /// Pitch also matches `euler_angles` (positive = nose-up). The external
+    /// command convention is unchanged: `cmd_pitch < 0` still means "nose up".
     fn estimate_attitude(&self, bus: &AvionicsBus) -> (f64, f64) {
         // In the initial implementation we use the true quaternion from
         // the bus converted to Euler. A real FC would run an estimator.
@@ -267,9 +265,14 @@ impl FlightController {
         // `AircraftState::euler_angles` so a real bank reads with the right
         // sign and the aileron loop damps instead of diverging.
         let roll = (2.0 * (y * z - x * w)).atan2(1.0 - 2.0 * (x * x + y * y));
-        // Pitch (θ) about Y: historical convention, nose-up positive and
-        // consistent with the elevator/gyro chain.
-        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+        // Pitch (θ) about Y: mirror `body_axes_in_earth` exactly. The body
+        // forward axis in NED is `fwd = q⁻¹ · x̂`, and `euler_angles` uses
+        // `asin(-fwd.z)` with `fwd.z = 2(xz + wy)`. Computing the pitch the
+        // old way (`asin(2(wy - zx))`) only matched at wings level and added
+        // a `4·x·z` error in a bank, which made the pitch loop hold the wrong
+        // attitude and nose the aircraft down through a sustained turn.
+        let fwd_z = 2.0 * (x * z + w * y);
+        let pitch = (-fwd_z).clamp(-1.0, 1.0).asin();
         (roll, pitch)
     }
 }
@@ -315,12 +318,16 @@ impl AvionicsComponent for FlightController {
             }
             FcMode::Rate => {
                 // Rate loop only: cmd_roll = roll rate (rad/s), etc.
+                // `cmd_pitch` keeps the external convention (negative = nose
+                // up), so invert it into the physics-positive pitch rate.
                 let p_cmd = bus.cmd_roll;
-                let q_cmd = bus.cmd_pitch;
+                let q_cmd = -bus.cmd_pitch;
                 let r_cmd = bus.cmd_yaw_rate;
 
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
-                bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
+                // Positive elevator is nose-down in the physics model, so the
+                // rate loop output is negated to command positive (nose-up) q.
+                bus.fc_servo_elevator = -self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
                 self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
                 bus.fc_esc_throttle = self.throttle_filter;
@@ -331,15 +338,18 @@ impl AvionicsComponent for FlightController {
                 let max_att = self.config.max_attitude_rad;
 
                 let roll_cmd = bus.cmd_roll.clamp(-max_att, max_att);
-                let pitch_cmd = bus.cmd_pitch.clamp(-max_att, max_att);
+                // `estimate_attitude` and `physics` use nose-up-positive pitch,
+                // while the agent command convention is negative = nose up.
+                let pitch_cmd = (-bus.cmd_pitch).clamp(-max_att, max_att);
 
                 let p_cmd = self.roll_att.compute(roll_cmd, phi, dt);
                 let q_cmd = self.pitch_att.compute(pitch_cmd, theta, dt);
                 let r_cmd = bus.cmd_yaw_rate * self.config.yaw_rate_ff;
 
-                // Inner loop: rate → surface
+                // Inner loop: rate → surface. Positive elevator is nose-down,
+                // so negate the (nose-up-positive) pitch-rate controller output.
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
-                bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
+                bus.fc_servo_elevator = -self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
                 self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
                 bus.fc_esc_throttle = self.throttle_filter;
@@ -348,11 +358,13 @@ impl AvionicsComponent for FlightController {
                 // Hold wings-level: zero roll command, damp yaw, keep pitch
                 let (phi, theta) = self.estimate_attitude(bus);
                 let p_cmd = self.roll_att.compute(0.0, phi, dt);
-                let q_cmd = self.pitch_att.compute(bus.cmd_pitch, theta, dt);
+                // External `cmd_pitch` is negative-nose-up; the estimator and
+                // physics are nose-up positive.
+                let q_cmd = self.pitch_att.compute(-bus.cmd_pitch, theta, dt);
                 let r_cmd = bus.cmd_yaw_rate * self.config.yaw_rate_ff;
 
                 bus.fc_servo_aileron = self.roll_rate.compute(p_cmd, bus.gyro.x, dt);
-                bus.fc_servo_elevator = self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
+                bus.fc_servo_elevator = -self.pitch_rate.compute(q_cmd, bus.gyro.y, dt);
                 bus.fc_servo_rudder = self.yaw_rate_pid.compute(r_cmd, bus.gyro.z, dt);
                 self.throttle_filter = Self::smooth_throttle(self.throttle_filter, thr, dt);
                 bus.fc_esc_throttle = self.throttle_filter;

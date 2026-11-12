@@ -12,8 +12,19 @@ use serde::{Deserialize, Serialize};
 
 pub const MISSION_FEATURE_DIM: usize = 13;
 
+/// Wrap an angle to `(-pi, pi]`.
+///
+/// `rem_euclid(2pi) - pi` would map a straight-ahead bearing of `0` to `-pi`,
+/// which reads as "the target is behind" and sends every steering law into a
+/// permanent turn-around.
 fn wrap_pi(angle: f64) -> f64 {
-    angle.rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let wrapped = angle.rem_euclid(two_pi);
+    if wrapped > std::f64::consts::PI {
+        wrapped - two_pi
+    } else {
+        wrapped
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -191,6 +202,19 @@ mod tests {
             "m_sweep_mini.toml"
         };
         AircraftConfig::from_file(path).expect("m_sweep_mini.toml should load")
+    }
+
+    #[test]
+    fn wrap_pi_keeps_a_straight_ahead_bearing_at_zero() {
+        // A target exactly ahead must report a bearing of 0, not +/-pi, or
+        // every steering law reads it as "behind".
+        let pi = std::f64::consts::PI;
+        assert!(wrap_pi(0.0).abs() < 1e-12, "wrap_pi(0) = {}", wrap_pi(0.0));
+        assert!((wrap_pi(pi) - pi).abs() < 1e-12);
+        assert!((wrap_pi(-pi) - pi).abs() < 1e-12);
+        assert!((wrap_pi(3.0 * pi) - pi).abs() < 1e-12);
+        assert!((wrap_pi(2.5 * pi) - 0.5 * pi).abs() < 1e-12);
+        assert!((wrap_pi(-0.25 * pi) + 0.25 * pi).abs() < 1e-12);
     }
 
     #[test]
@@ -557,8 +581,51 @@ impl MissionEnvironment {
         }
         self.tension = 0.0;
         self.tension_stable_steps = 0;
-        self.cached_features = MissionFeatures::default();
+        self.cached_features = self.compute_features();
         MissionReset { avionics: self.inner.observation(), features: self.cached_features.clone(), phase: self.phase }
+    }
+
+    /// Mission features for the current state.
+    ///
+    /// The reset observation used to carry a zeroed feature block, which told
+    /// the agent it was already sitting on the pickup. The reset and every
+    /// step now share this computation, so the features always describe the
+    /// state the observation was taken in.
+    fn compute_features(&self) -> MissionFeatures {
+        let s = self.inner.aircraft_state();
+        let heading = s.euler_angles().2;
+        let pickup_bearing =
+            f64::atan2(self.scenario.pickup_east - s.pos_y, self.scenario.pickup_north - s.pos_x)
+                - heading;
+        let pickup_bearing = wrap_pi(pickup_bearing);
+        let home_bearing = f64::atan2(-s.pos_y, -s.pos_x) - heading;
+        let home_bearing = wrap_pi(home_bearing);
+        let pickup_distance = ((s.pos_x - self.scenario.pickup_north).powi(2)
+            + (s.pos_y - self.scenario.pickup_east).powi(2))
+        .sqrt();
+        MissionFeatures {
+            pickup_distance_norm: pickup_distance / 2500.0,
+            pickup_bearing_sin: pickup_bearing.sin(),
+            pickup_bearing_cos: pickup_bearing.cos(),
+            pickup_altitude_error_norm: (self.scenario.pickup_altitude - s.altitude()) / 500.0,
+            home_distance_norm: (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt() / self.config.home_radius,
+            home_bearing_sin: home_bearing.sin(),
+            home_bearing_cos: home_bearing.cos(),
+            phase: match self.phase {
+                MissionPhase::Outbound => 0.0,
+                MissionPhase::Capture => 1.0,
+                MissionPhase::Return => 2.0,
+                MissionPhase::Done => 2.0,
+            },
+            speed_margin_norm: (s.airspeed() - self.v_stall) / 10.0,
+            time_remaining_fraction: (1.0
+                - (self.step_count as f64 / self.config.max_steps.max(1) as f64))
+            .clamp(0.0, 1.0),
+            capture_dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64,
+            horizontal_offset_norm: pickup_distance / self.config.pickup_radius.max(1e-6),
+            vertical_offset_norm: (s.altitude() - self.scenario.pickup_altitude).abs()
+                / self.config.pickup_vertical_tolerance.max(1e-6),
+        }
     }
 
     pub fn step(&mut self, action: AvionicsAction) -> MissionStep {
@@ -718,27 +785,7 @@ impl MissionEnvironment {
             returned: self.phase == MissionPhase::Done,
         };
 
-        let s = self.inner.aircraft_state();
-        let heading = s.euler_angles().2;
-        let pickup_bearing = f64::atan2(self.scenario.pickup_east - s.pos_y, self.scenario.pickup_north - s.pos_x) - heading;
-        let pickup_bearing = wrap_pi(pickup_bearing);
-        let home_bearing = f64::atan2(-s.pos_y, -s.pos_x) - heading;
-        let home_bearing = wrap_pi(home_bearing);
-        let features = MissionFeatures {
-            pickup_distance_norm: pickup_distance / 2500.0,
-            pickup_bearing_sin: pickup_bearing.sin(),
-            pickup_bearing_cos: pickup_bearing.cos(),
-            pickup_altitude_error_norm: (pickup_altitude - s.altitude()) / 500.0,
-            home_distance_norm: (s.pos_x * s.pos_x + s.pos_y * s.pos_y).sqrt() / self.config.home_radius,
-            home_bearing_sin: home_bearing.sin(),
-            home_bearing_cos: home_bearing.cos(),
-            phase: match self.phase { MissionPhase::Outbound => 0.0, MissionPhase::Capture => 1.0, MissionPhase::Return => 2.0, MissionPhase::Done => 2.0 },
-            speed_margin_norm: (s.airspeed() - self.v_stall) / 10.0,
-            time_remaining_fraction: (1.0 - (self.step_count as f64 / self.config.max_steps.max(1) as f64)).clamp(0.0, 1.0),
-            capture_dwell_fraction: self.dwell_steps as f64 / self.config.capture_dwell_steps as f64,
-            horizontal_offset_norm: pickup_distance / self.config.pickup_radius.max(1e-6),
-            vertical_offset_norm: (s.altitude() - pickup_altitude).abs() / self.config.pickup_vertical_tolerance.max(1e-6),
-        };
+        let features = self.compute_features();
         self.previous_pickup_distance = pickup_distance;
         self.cached_features = features.clone();
         self.last_signals = signals;
