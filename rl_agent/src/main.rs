@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use burn::tensor::backend::AutodiffBackend;
 
-use rl_agent::algo::{AlgoSpec, ALGO_PPO};
+use rl_agent::algo::{AlgoSpec, ALGO_HYBRID, ALGO_PPO};
 use rl_agent::backend::{cpu_device, probe_gpu_train, try_gpu_device, Cpu, Gpu};
 use rl_agent::net::NetConfig;
 use rl_agent::telemetry::TelemetryConfig;
@@ -22,14 +22,17 @@ use rl_agent::trainer::{
 };
 use rl_agent::{ACTION_DIM, AVIONICS_OBS_DIM};
 use rl_agent::mission_env::{MissionEnv, RewardProfile};
-use rl_agent::policy::{HeuristicPolicy, Policy};
+use rl_agent::expert::ExpertRegistry;
+use rl_agent::policy::{ExpertCard, HeuristicPolicy, Policy, RlPolicy};
+use rl_agent::selector::{PhaseSelector, SelectorConfig};
 use flight_core::{MissionConfig, MissionEnvironment, MissionPhase};
 
 const USAGE: &str = "\
 rl_agent — burn/PPO trainer for the flight_core AvionicsEnvironment
 
 USAGE:
-  rl_agent [--mode train|eval] [--algo ppo|a2c|d3qn|sac|td3] [--backend cpu|gpu|auto] [options]
+  rl_agent [--mode train|eval|eval-suite] [--algo ppo|a2c|d3qn|sac|td3|hybrid]
+           [--backend cpu|gpu|auto] [options]
 
 ALGORITHM (--algo, default ppo):
   The training algorithm is pluggable: `--algo` selects one of the
@@ -42,6 +45,10 @@ ALGORITHM (--algo, default ppo):
   sac   off-policy soft actor-critic (twin critics, entropy bonus)
   td3   off-policy twin delayed DDPG (delayed actor, target smoothing)
   d3qn  off-policy dueling critic, double-Q target, prioritized replay
+
+  hybrid is not a gradient algorithm. It is a policy composition
+  (eval-suite only) that dispatches the heuristic or a per-phase expert
+  through `PhaseSelector`. Training with `--algo hybrid` is rejected.
 
 TRAIN MODE (default):
   --iterations N        update iterations                        (default 300)
@@ -119,6 +126,14 @@ EVAL-SUITE MODE:
   The heuristic policy (`--model heuristic`) skips the checkpoint entirely
   and evaluates that way; learned policies need `--checkpoint`.
 
+  Hybrid selector (`--algo hybrid`, eval-suite only):
+    --hysteresis N        steps a phase must hold before switching  (default 3)
+    --learned-gate on|off use the trained phase gate                 (default off)
+    --expert-map FILE     JSON object mapping phase -> checkpoint dir, e.g.
+                          {\"outbound\": \"checkpoints/outbound\",
+                           \"capture\": \"checkpoints/capture\"}
+                          Unmapped phases (or unknown experts) use the heuristic.
+
 MISSION MODE:
   --mission avionics|mission    training target (default avionics)
   --model ppo|heuristic         alias for --algo; heuristic is eval-only
@@ -155,6 +170,58 @@ fn main() {
     }
 }
 
+/// Every flag `rl_agent` understands.
+///
+/// `parse_args` rejects anything else, so a typo or a stale GUI control fails
+/// loudly instead of being silently ignored. Keep this in sync with the flags
+/// parsed below and with the Godot `ALGO_FIELDS` table.
+const KNOWN_FLAGS: &[&str] = &[
+    "algo",
+    "alpha",
+    "backend",
+    "batch-size",
+    "buffer-capacity",
+    "checkpoint",
+    "clip",
+    "config",
+    "control",
+    "entropy-coef",
+    "env-dt",
+    "env-max-steps",
+    "epochs",
+    "eval-episodes",
+    "eval-every",
+    "expert-map",
+    "gamma",
+    "hidden",
+    "hysteresis",
+    "iterations",
+    "lambda",
+    "learned-gate",
+    "log-std-init",
+    "lr",
+    "max-grad-norm",
+    "minibatch",
+    "mission",
+    "mode",
+    "model",
+    "name",
+    "out",
+    "policy-delay",
+    "polyak-tau",
+    "print-every",
+    "reward-profile",
+    "rollout",
+    "run-dir",
+    "save-every",
+    "scenarios",
+    "seed",
+    "specialization",
+    "stream",
+    "telemetry",
+    "value-coef",
+];
+
 fn parse_args() -> HashMap<String, String> {
     let mut out = HashMap::new();
     let mut it = std::env::args().skip(1);
@@ -164,15 +231,21 @@ fn parse_args() -> HashMap<String, String> {
             std::process::exit(0);
         }
         match arg.strip_prefix("--") {
-            Some(key) => match it.next() {
-                Some(value) => {
-                    out.insert(key.to_string(), value);
-                }
-                None => {
-                    eprintln!("rl_agent: missing value for --{key}");
+            Some(key) => {
+                if !KNOWN_FLAGS.contains(&key) {
+                    eprintln!("rl_agent: unknown flag --{key}");
                     std::process::exit(2);
                 }
-            },
+                match it.next() {
+                    Some(value) => {
+                        out.insert(key.to_string(), value);
+                    }
+                    None => {
+                        eprintln!("rl_agent: missing value for --{key}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             None => {
                 eprintln!("rl_agent: unexpected argument `{arg}` (see --help)");
                 std::process::exit(2);
@@ -189,6 +262,19 @@ fn parse_args() -> HashMap<String, String> {
 const GPU_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn run_main(args: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+    // `hybrid` composes policies; it has no weights to train, load, or save.
+    // Reject it before probing the backend so the failure is immediate and
+    // points at the real workflow.
+    let mode = args.get("mode").map(String::as_str).unwrap_or("train");
+    if model_id(args) == ALGO_HYBRID && mode != "eval-suite" {
+        eprintln!(
+            "rl_agent: --algo hybrid is eval-only; train an expert with --algo ppo \
+             (or a2c/sac/td3/d3qn), then score the selector with \
+             `--mode eval-suite --algo hybrid --expert-map <map.json>`"
+        );
+        std::process::exit(2);
+    }
+
     let backend = args.get("backend").map(String::as_str).unwrap_or("auto");
 
     match backend {
@@ -248,8 +334,10 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
     let ncfg = build_net_config(args)?;
     let config_path = config_path(args);
     let mode = args.get("mode").map(String::as_str).unwrap_or("train");
-    let spec = if mode == "eval-suite" && model_id(args) == "heuristic" {
-        AlgoSpec::from_id(ALGO_PPO)? // dummy, never used in heuristic branch
+    let eval_only_policy = matches!(model_id(args), "heuristic" | ALGO_HYBRID);
+    let spec = if mode == "eval-suite" && eval_only_policy {
+        // Dummy spec: neither the heuristic nor the hybrid selector loads one.
+        AlgoSpec::from_id(ALGO_PPO)?
     } else {
         build_algo_config(args)?
     };
@@ -342,6 +430,8 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
                     mission_cfg.resolve_capture_speed(env.aircraft_config()),
                     v_stall,
                 ))
+            } else if model_id(args) == ALGO_HYBRID {
+                build_hybrid_policy::<B>(args, &env, &mission_cfg, &device, tcfg.seed)?
             } else {
                 let cp = load_checkpoint::<B>(&tcfg.checkpoint_dir, &device, tcfg.seed)?;
                 if cp.normalizer.dim != ncfg.obs_dim {
@@ -567,6 +657,88 @@ fn build_algo_config(args: &HashMap<String, String>) -> Result<AlgoSpec, Box<dyn
         }
     }
     Ok(spec)
+}
+
+/// Parse the selector-specific flags shared by the hybrid eval-suite path.
+fn build_selector_config(
+    args: &HashMap<String, String>,
+) -> Result<SelectorConfig, Box<dyn std::error::Error>> {
+    let mut cfg = SelectorConfig::new();
+    cfg.hysteresis_steps = get_num(args, "hysteresis", cfg.hysteresis_steps)?;
+    cfg.learned_gate_enabled = match args.get("learned-gate").map(String::as_str) {
+        None | Some("off") => false,
+        Some("on") => true,
+        Some(other) => {
+            return Err(format!("--learned-gate must be `on` or `off`, got `{other}`").into())
+        }
+    };
+    Ok(cfg)
+}
+
+/// Build the eval-suite hybrid policy: a [`PhaseSelector`] over the heuristic
+/// and the experts named by `--expert-map`.
+///
+/// The map is a JSON object keyed by mission phase (`outbound`, `capture`,
+/// `return`, `done`) whose values are checkpoint directories. Missing phases
+/// and unknown/failed experts fall back to the heuristic, so `--algo hybrid`
+/// works with no map at all.
+fn build_hybrid_policy<B: AutodiffBackend<FloatElem = f32>>(
+    args: &HashMap<String, String>,
+    env: &MissionEnvironment,
+    mission_cfg: &MissionConfig,
+    device: &B::Device,
+    seed: u64,
+) -> Result<Box<dyn Policy>, Box<dyn std::error::Error>> {
+    let v_stall = flight_core::stall_speed(env.aircraft_config(), mission_cfg.cruise_altitude);
+    let heuristic = HeuristicPolicy::new(
+        mission_cfg.cruise_airspeed,
+        mission_cfg.resolve_capture_speed(env.aircraft_config()),
+        v_stall,
+    );
+
+    let mut config = build_selector_config(args)?;
+    let mut experts = ExpertRegistry::new();
+
+    if let Some(path) = args.get("expert-map") {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--expert-map `{path}`: {e}"))?;
+        let map: HashMap<String, String> = serde_json::from_str(&text)
+            .map_err(|e| format!("--expert-map `{path}`: {e}"))?;
+        for (phase, checkpoint) in map {
+            if !matches!(phase.as_str(), "outbound" | "capture" | "return" | "done") {
+                return Err(format!(
+                    "--expert-map `{path}`: unknown phase `{phase}` \
+                     (expected outbound, capture, return, or done)"
+                )
+                .into());
+            }
+            let cp = load_checkpoint::<B>(&checkpoint, device, seed)?;
+            if cp.normalizer.dim != rl_agent::contracts::MISSION_OBS_DIM {
+                return Err(format!(
+                    "--expert-map `{path}`: checkpoint `{checkpoint}` has {}-channel \
+                     observations; hybrid mission eval needs {}",
+                    cp.normalizer.dim,
+                    rl_agent::contracts::MISSION_OBS_DIM
+                )
+                .into());
+            }
+            let card = ExpertCard::from_checkpoint(&checkpoint, cp.algorithm.id())?;
+            config.phases.insert(phase.clone(), phase.clone());
+            experts.insert(
+                phase,
+                Box::new(RlPolicy::new(cp.algorithm, cp.normalizer, card)),
+            );
+        }
+    }
+
+    let gate = if config.learned_gate_enabled {
+        Some(rl_agent::learned_gate::train_gate())
+    } else {
+        None
+    };
+    Ok(Box::new(PhaseSelector::with_experts(
+        config, heuristic, experts, gate,
+    )))
 }
 
 fn build_specialization(

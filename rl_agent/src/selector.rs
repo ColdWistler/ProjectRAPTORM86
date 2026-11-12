@@ -476,6 +476,54 @@ mod tests {
         assert_eq!(label, label2);
     }
 
+    #[test]
+    fn learned_gate_changes_the_selected_expert() {
+        // A capture exam sample: the trained gate maps this to `capture`,
+        // while the phase→expert map says `heuristic`.
+        let features = flight_core::MissionFeatures {
+            pickup_distance_norm: 0.25,
+            phase: 1.0,
+            horizontal_offset_norm: 0.5,
+            ..Default::default()
+        };
+        let ctx = PolicyContext {
+            phase: MissionPhase::Outbound,
+            step: 0,
+            captured: false,
+            features: Some(features),
+        };
+
+        let mut cfg_off = SelectorConfig::new();
+        cfg_off.phases.insert("outbound".into(), "heuristic".into());
+        let mut off = PhaseSelector::with_gate(
+            cfg_off,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            None,
+        );
+
+        let mut cfg_on = SelectorConfig::new();
+        cfg_on.phases.insert("outbound".into(), "heuristic".into());
+        cfg_on.learned_gate_enabled = true;
+        let mut on = PhaseSelector::with_gate(
+            cfg_on,
+            HeuristicPolicy::new(55.0, 11.5, 10.0),
+            Some(crate::learned_gate::train_gate()),
+        );
+
+        // Default hysteresis is 3; give it enough steps to settle.
+        let mut off_label = String::new();
+        let mut on_label = String::new();
+        for _ in 0..4 {
+            off_label = off.select_policy(&ctx);
+            on_label = on.select_policy(&ctx);
+        }
+        assert_eq!(off_label, "heuristic");
+        assert_eq!(
+            on_label, "capture",
+            "the learned gate must override the configured phase map"
+        );
+    }
+
     /// Test policy that replays a fixed sequence of actions, holding the last
     /// one once the sequence is exhausted.
     struct ScriptedPolicy {

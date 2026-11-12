@@ -20,6 +20,15 @@ fn config_path() -> String {
     }
 }
 
+/// Mission config, resolved the same way (the default assumes the repo root).
+fn mission_config_path() -> String {
+    if std::path::Path::new("m_sweep_mini.toml").exists() {
+        "m_sweep_mini.toml".into()
+    } else {
+        "../m_sweep_mini.toml".into()
+    }
+}
+
 struct Run {
     success: bool,
     stdout: String,
@@ -217,6 +226,119 @@ fn off_policy_checkpoints_round_trip_through_the_cli() {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Run the hybrid selector in eval-suite mode. Returns the run plus the output
+/// directory it wrote `eval.json` / `eval.csv` into.
+fn run_hybrid_eval_suite(extra: &[&str]) -> (Run, std::path::PathBuf) {
+    let dir = scratch_dir("hybrid_eval");
+    let dir_s = dir.to_str().expect("utf-8 temp dir").to_string();
+
+    let mut args: Vec<String> = [
+        "--mode",
+        "eval-suite",
+        "--algo",
+        "hybrid",
+        "--mission",
+        "mission",
+        "--backend",
+        "cpu",
+        "--telemetry",
+        "off",
+        "--env-max-steps",
+        "32",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push("--config".into());
+    args.push(mission_config_path());
+    args.push("--out".into());
+    args.push(dir_s);
+    args.extend(extra.iter().map(|s| s.to_string()));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rl_agent"))
+        .args(&args)
+        .output()
+        .expect("rl_agent binary must be runnable");
+    (
+        Run {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        },
+        dir,
+    )
+}
+
+#[test]
+fn hybrid_eval_suite_runs_through_the_selector() {
+    let (r, dir) = run_hybrid_eval_suite(&[]);
+    assert!(
+        r.success,
+        "hybrid eval-suite failed:\nstdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("eval-suite:"),
+        "hybrid did not reach the eval-suite report:\n{}",
+        r.stdout
+    );
+
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("eval.json")).expect("eval.json written"),
+    )
+    .expect("eval.json is valid JSON");
+    assert_eq!(json["expert"], "hybrid_selector_v1");
+    assert_eq!(json["contract"], "mission.v1");
+    assert_eq!(json["summary"]["n"], 30);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hybrid_eval_suite_honours_hysteresis_and_learned_gate() {
+    let (r, dir) = run_hybrid_eval_suite(&["--hysteresis", "5", "--learned-gate", "on"]);
+    assert!(
+        r.success,
+        "hybrid eval-suite with --hysteresis 5 --learned-gate on failed:\n\
+         stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("eval.json")).expect("eval.json written"),
+    )
+    .expect("eval.json is valid JSON");
+    assert_eq!(json["expert"], "hybrid_selector_v1");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hybrid_training_is_rejected_with_a_pointer_to_experts() {
+    let r = run_algo("hybrid", &[]);
+    assert!(!r.success, "hybrid training must be rejected");
+    assert!(
+        r.stderr.contains("eval-only"),
+        "rejection should say hybrid is eval-only:\n{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("--expert-map"),
+        "rejection should point at --expert-map:\n{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn unknown_flag_is_rejected() {
+    let r = run_algo("ppo", &["--not-a-real-flag", "1"]);
+    assert!(!r.success, "an unknown flag must fail");
+    assert!(
+        r.stderr.contains("unknown flag --not-a-real-flag"),
+        "stderr should name the unknown flag:\n{}",
+        r.stderr
+    );
 }
 
 #[test]

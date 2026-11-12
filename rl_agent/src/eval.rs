@@ -136,6 +136,7 @@ pub fn run_eval_suite(
         let reset_r = env.reset_with_scenario(s);
         let pickup = (s.pickup_north, s.pickup_east);
         let mut obs_vec = crate::contracts::mission_observation(&reset_r.avionics, &reset_r.features).to_vec();
+        let mut features = reset_r.features;
         policy.reset();
         let mut reward_total = 0.0;
         let mut energy = 0.0;
@@ -160,7 +161,9 @@ pub fn run_eval_suite(
                 phase: env.phase(),
                 step,
                 captured: env.phase() == flight_core::MissionPhase::Return || env.phase() == flight_core::MissionPhase::Done,
-                features: None,
+                // The learned gate needs the 13 mission features; policies
+                // that do not use them ignore the field.
+                features: Some(features),
             };
             let action = policy.act(&obs_vec.iter().map(|v| *v as f32).collect::<Vec<_>>(), &ctx);
             let av_action = flight_core::AvionicsAction {
@@ -172,6 +175,7 @@ pub fn run_eval_suite(
             let out = env.step(av_action);
             last_out = Some(out.clone());
             obs_vec = crate::contracts::mission_observation(&out.avionics, &out.features).to_vec();
+            features = out.features;
             reward_total += reward.reward(&out.signals);
             energy += (action[3] as f64).clamp(0.0, 1.0);
             captured_event = captured_event || out.signals.captured;

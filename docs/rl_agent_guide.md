@@ -38,8 +38,8 @@ algorithm, backend and hyper-parameters and runs training with a live log
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--mode train\|eval` | `train` | Train, or evaluate a checkpointed policy |
-| `--algo NAME` | `ppo` | Training algorithm: `ppo`, `a2c`, `d3qn`, `sac`, `td3` (see §5) |
+| `--mode train\|eval\|eval-suite` | `train` | Train, evaluate one checkpoint, or score a policy over the mission scenarios |
+| `--algo NAME` | `ppo` | Training algorithm: `ppo`, `a2c`, `d3qn`, `sac`, `td3`; `hybrid` is eval-suite only (see §5) |
 | `--backend cpu\|gpu\|auto` | `auto` | Tensor backend at runtime (see §3) |
 | `--iterations N` | `300` | Iterations (one rollout + update each) |
 | `--rollout N` | `2048` | Env steps collected per iteration |
@@ -70,6 +70,11 @@ algorithm, backend and hyper-parameters and runs training with a live log
 | `--telemetry on\|off` | `on` | Write structured telemetry (see §12) |
 | `--run-dir DIR` | `runs` | Root dir for per-run telemetry subdirectories |
 | `--name LABEL` | none | Optional human label appended to the run id |
+| `--hysteresis N` | `3` | Hybrid only: steps a phase must hold before the selector switches expert |
+| `--learned-gate on\|off` | `off` | Hybrid only: use the trained phase-gating MLP instead of the phase→expert map |
+| `--expert-map FILE` | none | Hybrid only: JSON object mapping `outbound\|capture\|return\|done` to checkpoint dirs |
+| `--scenarios FILE` | built-in 30 | Eval-suite scenario file (JSON); defaults to the mission exam |
+| `--out DIR` | checkpoint dir | Eval-suite output directory for `eval.json` / `eval.csv` |
 
 ## 3. Backends (`--backend cpu | gpu | auto`)
 
@@ -208,6 +213,27 @@ cargo run -p rl_agent --release -- --algo ppo --backend auto
 `a2c`, `d3qn`, `sac`, `td3`). The algorithm's own flags (`--lr`, `--gamma`,
 `--epochs`, `--polyak-tau`, ...) configure the selected model;
 `AlgoSpec::from_id` rejects unknown ids with the registered list.
+
+`hybrid` is a **policy composition**, not a gradient algorithm: it is
+deliberately absent from `ALGORITHM_IDS` and only works with
+`--mode eval-suite`. That path builds a `PhaseSelector` over the heuristic and
+any experts named by `--expert-map`; `--hysteresis N` (default 3) controls how
+long a phase must hold before switching, and `--learned-gate on|off` (default
+`off`) replaces the phase→expert map with the trained gating MLP.
+`--mode train --algo hybrid` exits 2 with a pointer to `--expert-map`.
+
+```bash
+# Score the heuristic-backed selector (no experts) over the 30-scenario exam.
+cargo run -p rl_agent --release -- --mode eval-suite --algo hybrid \
+  --mission mission --backend cpu --telemetry off --out /tmp/hybrid
+
+# Bind trained per-phase experts.
+cat > /tmp/experts.json <<'JSON'
+{"outbound": "runs/outbound_expert", "capture": "runs/capture_expert"}
+JSON
+cargo run -p rl_agent --release -- --mode eval-suite --algo hybrid \
+  --mission mission --expert-map /tmp/experts.json --out /tmp/hybrid
+```
 
 ### The five models
 
