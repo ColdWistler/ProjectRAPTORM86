@@ -36,6 +36,16 @@ pub const ALGO_D3QN: &str = "d3qn";
 pub const ALGO_SAC: &str = "sac";
 pub const ALGO_TD3: &str = "td3";
 
+/// Policy-composition id for the hybrid phase selector.
+///
+/// `hybrid` is **not** a gradient algorithm: it composes the heuristic with
+/// per-phase expert policies and is therefore evaluation-only. It is
+/// deliberately absent from [`ALGORITHM_IDS`] and [`AlgoSpec::from_id`];
+/// `--mode eval-suite --algo hybrid` builds a
+/// [`PhaseSelector`](crate::selector::PhaseSelector) while training with it
+/// is rejected by the CLI.
+pub const ALGO_HYBRID: &str = "hybrid";
+
 /// Every registered algorithm id. Selections (CLI helpers, menu dropdowns)
 /// are drawn from this list.
 pub const ALGORITHM_IDS: &[&str] = &[ALGO_PPO, ALGO_A2C, ALGO_D3QN, ALGO_SAC, ALGO_TD3];
@@ -376,6 +386,15 @@ mod tests {
         assert_eq!(action.len(), 2);
         assert!(logp.is_finite());
         assert!(action.iter().all(|a| a.abs() < 1.0));
+    }
+
+    #[test]
+    fn hybrid_is_not_a_registered_training_algorithm() {
+        assert!(!ALGORITHM_IDS.contains(&ALGO_HYBRID));
+        assert!(
+            AlgoSpec::from_id(ALGO_HYBRID).is_err(),
+            "hybrid is a policy composition, not a gradient algorithm"
+        );
     }
 
     #[test]

@@ -14,7 +14,6 @@ const ALGORITHMS := [
 	{ "name": "SAC — soft actor-critic", "id": "sac" },
 	{ "name": "TD3 — twin delayed DDPG", "id": "td3" },
 	{ "name": "D3QN — dueling double DQN (continuous)", "id": "d3qn" },
-	{ "name": "Hybrid — phase selector", "id": "hybrid" },
 ]
 
 ## Backends (display name -> `--backend` value).
@@ -76,11 +75,6 @@ const ALGO_FIELDS := {
 		{ "label": "Learning rate",    "key": "lr",            "value": 0.0003,  "min": 0.0,   "max": 1.0,    "step": 0.0001, "format": "%.5f", "kind": "float" },
 		{ "label": "Gamma",            "key": "gamma",         "value": 0.99,    "min": 0.0,   "max": 1.0,    "step": 0.01,  "format": "%.2f",  "kind": "float" },
 		{ "label": "Tau (soft update)", "key": "polyak-tau",  "value": 0.005,   "min": 0.001, "max": 1.0,    "step": 0.001, "format": "%.4f", "kind": "float" },
-	],
-	"hybrid": [
-		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
-		{ "label": "Phase hysteresis", "key": "hysteresis",    "value": 3,       "min": 1,     "max": 20,     "step": 1,     "format": "%d",     "kind": "int" },
-		{ "label": "Learned gate",     "key": "learned-gate",  "value": 1,       "min": 0,     "max": 1,     "step": 1,     "format": "%d",     "kind": "int" },
 	],
 }
 
