@@ -440,6 +440,28 @@ impl EnvStats {
     }
 }
 
+/// Per-iteration mission counters (telemetry only).
+///
+/// Counters reset at every iteration boundary; `phase_steps` buckets the
+/// mission phases as `[outbound, capture, return]`, with the terminal `Done`
+/// phase folded into `return`, so every mission step lands in exactly one
+/// bucket.
+#[derive(Default)]
+struct MissionCounters {
+    captures: usize,
+    returns: usize,
+    successes: usize,
+    phase_steps: [usize; 3],
+}
+
+fn phase_index(phase: flight_core::MissionPhase) -> usize {
+    match phase {
+        flight_core::MissionPhase::Outbound => 0,
+        flight_core::MissionPhase::Capture => 1,
+        flight_core::MissionPhase::Return | flight_core::MissionPhase::Done => 2,
+    }
+}
+
 /// Human-readable cause for a finished episode, used in `episodes.jsonl`.
 ///
 /// Weather wins over ground impact when both are true on the same step: the
@@ -736,6 +758,9 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
     // is sampled whenever telemetry is on — not only when a live viewer also
     // wants frames (`--stream off` must still produce it).
     let telemetry_on = tele.is_some();
+    // Mission-mode runs expose a phase/capture context; avionics runs return
+    // `None`, which keeps their telemetry schema unchanged.
+    let mission_mode = env.mission_context().is_some();
     // Episodes can straddle iteration boundaries, so their length, reward total
     // and accumulator all live outside the per-iteration loop. Keeping
     // `ep_steps` here also makes the episode's reported length its true length,
@@ -790,6 +815,9 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
         let mut buffer = RolloutBuffer::new(ncfg.obs_dim, ncfg.action_dim);
         let mut final_obs: Option<Vec<f32>> = None;
         let mut roll = RolloutStats::default();
+        // Mission counters are per-iteration: a run that never finishes an
+        // episode in an iteration reports zeros rather than a stale total.
+        let mut mission_iter = MissionCounters::default();
 
         // `streaming` hoisted out of the loop: it is a plain bool, so the inner
         // loop reads a register instead of chasing the observer's Option.
@@ -830,6 +858,12 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
             let norm = frozen.normalize_f32(&obs_f32);
             let (action, log_prob) = agent.act(&norm);
             let outcome = env.step(&action);
+
+            if mission_mode {
+                if let Some(ctx) = env.mission_context() {
+                    mission_iter.phase_steps[phase_index(ctx.phase)] += 1;
+                }
+            }
 
             let mut reward = outcome.reward;
             if outcome.terminated {
@@ -923,6 +957,15 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
                                 env: summary,
                             })?;
                         }
+                    }
+                }
+
+                if mission_mode {
+                    if let Some(ctx) = env.mission_context() {
+                        let returned = ctx.phase == flight_core::MissionPhase::Done;
+                        mission_iter.captures += usize::from(ctx.captured);
+                        mission_iter.returns += usize::from(returned);
+                        mission_iter.successes += usize::from(ctx.captured && returned);
                     }
                 }
 
@@ -1028,6 +1071,22 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
                     episodes,
                 }
             });
+            let completed = roll.completed_episodes.max(1) as f64;
+            let (mission_captures, mission_returns, mission_successes, mean_phase_steps) =
+                if mission_mode {
+                    (
+                        Some(mission_iter.captures),
+                        Some(mission_iter.returns),
+                        Some(mission_iter.successes),
+                        Some([
+                            mission_iter.phase_steps[0] as f64 / completed,
+                            mission_iter.phase_steps[1] as f64 / completed,
+                            mission_iter.phase_steps[2] as f64 / completed,
+                        ]),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
             w.record(&IterationRecord {
                 iteration: it,
                 elapsed_s: iter_elapsed,
@@ -1045,6 +1104,10 @@ pub fn run_with_env<B: AutodiffBackend<FloatElem = f32>>(
                 env: env_stats.summary(),
                 checkpoint: saved,
                 stream,
+                mission_captures,
+                mission_returns,
+                mission_successes,
+                mean_phase_steps,
             })?;
         }
 

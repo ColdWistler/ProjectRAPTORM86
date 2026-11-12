@@ -48,6 +48,10 @@ const METRICS := {
 	# Weather (`env.weather`, only when the run has a weather system).
 	"weather_gust_rms_max": { "label": "Weather gust max (m/s)", "color": Color(0.40, 0.60, 0.80) },
 	"weather_visibility_min": { "label": "Weather visibility (m)", "color": Color(0.65, 0.85, 0.70) },
+	# Mission counters (mission-mode runs only; absent on avionics runs).
+	"mission_captures":  { "label": "Mission captures",  "color": Color(0.35, 0.80, 0.55) },
+	"mission_returns":   { "label": "Mission returns",   "color": Color(0.35, 0.65, 0.95) },
+	"mission_successes": { "label": "Mission successes", "color": Color(0.95, 0.80, 0.35) },
 }
 
 ## Raw series: Array of {"x": int iteration, "y": float value}.

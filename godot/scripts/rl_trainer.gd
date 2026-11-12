@@ -42,7 +42,6 @@ const ALGO_FIELDS := {
 		{ "label": "Eval every",       "key": "eval-every",    "value": 100,     "min": 0,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
 		{ "label": "Eval episodes",    "key": "eval-episodes", "value": 3,       "min": 0,     "max": 100,    "step": 1,     "format": "%d",     "kind": "int" },
 	],
-},
 	"a2c": [
 		{ "label": "Iterations",       "key": "iterations",    "value": 300,     "min": 1,     "max": 100000, "step": 1,     "format": "%d",     "kind": "int" },
 		{ "label": "Rollout steps",    "key": "rollout",       "value": 2048,    "min": 16,    "max": 100000, "step": 16,    "format": "%d",     "kind": "int" },
@@ -717,6 +716,11 @@ func _ingest_record(rec: Dictionary) -> void:
 	_push_point("value_loss", it, rec.get("value_loss"))
 	_push_point("entropy", it, rec.get("entropy"))
 	_push_point("advantage_mean", it, rec.get("advantage_mean"))
+	# Mission counters are written as JSON integers and are absent on avionics
+	# runs; `_push_point` accepts both ints and floats and skips nulls.
+	_push_point("mission_captures", it, rec.get("mission_captures"))
+	_push_point("mission_returns", it, rec.get("mission_returns"))
+	_push_point("mission_successes", it, rec.get("mission_successes"))
 	var ev: Variant = rec.get("eval")
 	if typeof(ev) == TYPE_DICTIONARY:
 		_push_point("alt_err", it, ev.get("alt_err"))
@@ -743,7 +747,12 @@ func _ingest_record(rec: Dictionary) -> void:
 
 
 func _push_point(key: String, it: int, value: Variant) -> void:
-	if value == null or typeof(value) != TYPE_FLOAT:
+	if value == null:
+		return
+	var kind := typeof(value)
+	# Integer metrics (mission counters) arrive as TYPE_INT; float metrics as
+	# TYPE_FLOAT. Both plot on the same axis once converted to float.
+	if kind != TYPE_FLOAT and kind != TYPE_INT:
 		return
 	if not _points.has(key):
 		_points[key] = []

@@ -180,6 +180,21 @@ pub struct IterationRecord<'a> {
     /// loss is reported rather than hidden.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamRecord>,
+    /// Mission-mode captures during this rollout. `None` for avionics runs,
+    /// so their records are byte-for-byte unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_captures: Option<usize>,
+    /// Mission-mode returns home during this rollout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_returns: Option<usize>,
+    /// Mission-mode successes (captured *and* returned) during this rollout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_successes: Option<usize>,
+    /// Mean steps per completed episode spent in
+    /// `[outbound, capture, return]`. `return` folds in the terminal `Done`
+    /// phase, so the three entries cover every step of a mission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_phase_steps: Option<[f64; 3]>,
 }
 
 /// Frame-streaming counters attached to an iteration record.
@@ -619,6 +634,10 @@ mod tests {
             }),
             checkpoint: false,
             stream: None,
+            mission_captures: None,
+            mission_returns: None,
+            mission_successes: None,
+            mean_phase_steps: None,
         };
         w.record(&rec).expect("record");
         w.record_episode(&EpisodeRecord {
@@ -690,6 +709,66 @@ mod tests {
         };
         let w = TelemetryWriter::start(&cfg, &meta).expect("start");
         assert!(w.is_none());
+    }
+
+    /// Minimal record so the mission-key serialization tests stay focused on
+    /// the new fields rather than the existing schema.
+    fn minimal_record<'a>(
+        captures: Option<usize>,
+        returns: Option<usize>,
+        successes: Option<usize>,
+        phase_steps: Option<[f64; 3]>,
+    ) -> IterationRecord<'a> {
+        IterationRecord {
+            iteration: 0,
+            elapsed_s: 1.0,
+            steps_per_s: 10.0,
+            policy_loss: 0.0,
+            value_loss: 0.0,
+            entropy: 0.0,
+            advantage_mean: 0.0,
+            advantage_std: 0.0,
+            mean_reward_per_step: 0.0,
+            mean_episode_steps: 0.0,
+            crash_rate: 0.0,
+            episodes_completed: 0,
+            eval: None,
+            env: None,
+            checkpoint: false,
+            stream: None,
+            mission_captures: captures,
+            mission_returns: returns,
+            mission_successes: successes,
+            mean_phase_steps: phase_steps,
+        }
+    }
+
+    #[test]
+    fn mission_records_carry_capture_counters() {
+        let rec = minimal_record(Some(2), Some(1), Some(1), Some([10.0, 4.0, 6.0]));
+        let json: serde_json::Value = serde_json::to_value(&rec).expect("serialize");
+        assert_eq!(json["mission_captures"], 2);
+        assert_eq!(json["mission_returns"], 1);
+        assert_eq!(json["mission_successes"], 1);
+        assert_eq!(json["mean_phase_steps"][0], 10.0);
+        assert_eq!(json["mean_phase_steps"][2], 6.0);
+    }
+
+    #[test]
+    fn avionics_records_omit_mission_counters() {
+        let rec = minimal_record(None, None, None, None);
+        let json: serde_json::Value = serde_json::to_value(&rec).expect("serialize");
+        for key in [
+            "mission_captures",
+            "mission_returns",
+            "mission_successes",
+            "mean_phase_steps",
+        ] {
+            assert!(
+                json.get(key).is_none(),
+                "avionics records must not grow a `{key}` key"
+            );
+        }
     }
 
     #[test]

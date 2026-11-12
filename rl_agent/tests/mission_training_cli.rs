@@ -52,3 +52,59 @@ fn mission_training_run_completes_and_writes_a_32_channel_checkpoint() {
     assert_eq!(net["obs_dim"], 32);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn mission_training_telemetry_records_capture_counters() {
+    let dir = std::env::temp_dir().join(format!(
+        "raptor-mission-telemetry-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(bin())
+        .args([
+            "--mode", "train", "--mission", "mission", "--algo", "ppo",
+            "--backend", "cpu", "--iterations", "1", "--rollout", "64",
+            "--env-max-steps", "64", "--seed", "42", "--telemetry", "on",
+            "--run-dir",
+        ])
+        .arg(&dir)
+        .arg("--checkpoint")
+        .arg(&dir)
+        .arg("--config")
+        .arg(mission_config())
+        .output()
+        .expect("run rl_agent");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // The writer puts metrics in `<run-dir>/<run-id>/metrics.jsonl`.
+    let mut metrics_path = None;
+    for entry in std::fs::read_dir(&dir).expect("run dir") {
+        let path = entry.expect("entry").path();
+        if path.is_dir() && path.join("metrics.jsonl").exists() {
+            metrics_path = Some(path.join("metrics.jsonl"));
+            break;
+        }
+    }
+    let metrics_path = metrics_path.expect("mission run must write metrics.jsonl");
+    let text = std::fs::read_to_string(&metrics_path).expect("read metrics.jsonl");
+    let line: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("at least one record")).expect("json line");
+
+    for key in [
+        "mission_captures",
+        "mission_returns",
+        "mission_successes",
+        "mean_phase_steps",
+    ] {
+        assert!(line.get(key).is_some(), "mission record is missing `{key}`: {line}");
+    }
+    assert_eq!(
+        line["mean_phase_steps"].as_array().map(Vec::len),
+        Some(3),
+        "mean_phase_steps must cover outbound/capture/return: {line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
