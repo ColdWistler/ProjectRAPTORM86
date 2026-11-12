@@ -153,41 +153,167 @@ pub trait Policy {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeuristicConfig {
-    pub cruise_airspeed: f64,
+    /// Cruise speed on the outbound and return legs (m/s). The mission asks
+    /// for `cruise_airspeed` (55 m/s), which this airframe cannot hold, so
+    /// the heuristic cruises at a speed the wing can sustain.
+    pub cruise_speed: f64,
+    /// The capture speed (m/s): the fastest the aircraft may fly and still
+    /// latch the hook.
     pub capture_speed: f64,
+    /// The stall speed (m/s).
     pub v_stall: f64,
+    /// The horizontal capture radius (m) — `MissionConfig::pickup_radius`.
+    pub capture_radius_m: f64,
+    /// The vertical tolerance around the pickup altitude (m) —
+    /// `MissionConfig::pickup_vertical_tolerance`.
+    pub pickup_vertical_tolerance_m: f64,
+    /// The maximum bank command (rad). The airframe spirals above ~35 deg of
+    /// bank, so the bank stays well inside that.
+    pub bank_cap: f64,
+    /// The bank command per radian of bearing error.
     pub bank_gain: f64,
-    pub pitch_gain: f64,
-    pub speed_gain: f64,
+    /// The bank command per rad/s of bearing rate. This damps the turn so the
+    /// aircraft settles on the target bearing instead of overshooting it.
+    pub bank_damp: f64,
+    /// The speed flown through the turn-back (m/s). A slow turn has a small
+    /// radius, which keeps the return leg short.
+    pub turn_speed: f64,
+    /// The distance (m) at which the approach speed ramp starts.
+    pub approach_distance_m: f64,
+    /// The altitude error → the demanded climb rate (m/s per m).
+    pub climb_rate_gain: f64,
+    /// The maximum climb-rate demand (m/s).
+    pub max_climb_rate: f64,
+    /// The climb-rate error → the pitch command (rad per m/s).
+    pub climb_gain: f64,
+    /// The nose-up pitch per m/s of excess airspeed (rad). Raising the nose
+    /// bleeds speed on the approach.
+    pub speed_pitch_gain: f64,
+    /// The airspeed error → the throttle.
+    pub throttle_speed_gain: f64,
+    /// The base throttle (fraction of the throttle range).
+    pub throttle_base: f64,
+    /// The vertical clearance kept from the pickup altitude while capturing
+    /// (m). The skyhook cable is only 8 m long but it is loaded hard inside
+    /// the capture radius, so the aircraft captures clear of it.
+    pub capture_altitude_margin: f64,
 }
 
 impl Default for HeuristicConfig {
     fn default() -> Self {
         Self {
-            cruise_airspeed: 55.0,
+            cruise_speed: 18.0,
             capture_speed: 11.5,
             v_stall: 10.0,
-            bank_gain: 1.2,
-            pitch_gain: 0.0015,
-            speed_gain: 0.03,
+            capture_radius_m: 40.0,
+            pickup_vertical_tolerance_m: 15.0,
+            bank_cap: 0.22,
+            bank_gain: 0.9,
+            bank_damp: 0.9,
+            turn_speed: 18.0,
+            approach_distance_m: 350.0,
+            climb_rate_gain: 0.05,
+            max_climb_rate: 2.0,
+            climb_gain: 0.04,
+            speed_pitch_gain: 0.03,
+            throttle_speed_gain: 0.06,
+            throttle_base: 0.05,
+            capture_altitude_margin: 25.0,
         }
     }
+}
+
+/// The pitch command (rad, nose-up positive) that holds level flight at a
+/// given speed.
+///
+/// This is *not* just the trim attitude. The flight controller's outer pitch
+/// loop is proportional-only, so it needs a rate command to hold an attitude
+/// against the trim elevator. At a steady attitude that leaves a fixed error
+/// of `-elevator_trim / 90` rad, so the command that actually produces the
+/// level-flight attitude is `trim_attitude - elevator_trim / 90`.
+///
+/// Both terms are measured with the airframe's trim solver
+/// (`Simulator::trim_level_flight`) for `m_sweep_mini.toml`: the wing needs a
+/// high angle of attack (and a lot of nose-up elevator) when slow and flies
+/// nearly flat when fast.
+fn level_flight_pitch_cmd(speed: f64) -> f64 {
+    /// (airspeed m/s, nose-up pitch command rad)
+    const TABLE: [(f64, f64); 13] = [
+        (9.00, 0.7329),
+        (10.00, 0.5701),
+        (11.00, 0.4491),
+        (11.43, 0.4066),
+        (12.50, 0.3188),
+        (14.00, 0.2281),
+        (16.00, 0.1442),
+        (19.00, 0.0644),
+        (22.00, 0.0093),
+        (26.00, -0.0260),
+        (30.00, -0.0518),
+        (35.00, -0.0723),
+        (40.00, -0.0856),
+    ];
+    let v = speed.clamp(TABLE[0].0, TABLE[TABLE.len() - 1].0);
+    for pair in TABLE.windows(2) {
+        let (v0, p0) = pair[0];
+        let (v1, p1) = pair[1];
+        if v <= v1 {
+            let t = (v - v0) / (v1 - v0).max(1e-9);
+            return p0 + t * (p1 - p0);
+        }
+    }
+    TABLE[TABLE.len() - 1].1
+}
+
+/// Wrap an angle into (-pi, pi].
+fn wrap_pi(a: f64) -> f64 {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut w = a % two_pi;
+    if w > std::f64::consts::PI {
+        w -= two_pi;
+    } else if w <= -std::f64::consts::PI {
+        w += two_pi;
+    }
+    w
 }
 
 #[derive(Debug, Clone)]
 pub struct HeuristicPolicy {
     cfg: HeuristicConfig,
     card: ExpertCard,
+    /// The launch altitude. The mission launches at the cruise altitude and
+    /// the home leg has to come back to it, so it is the altitude reference
+    /// for the whole flight.
+    home_altitude: Option<f64>,
+    /// The previous bearing error, used to damp the turn.
+    prev_bearing: Option<f64>,
+    /// The phase the previous bearing error was measured in.
+    prev_phase: Option<MissionPhase>,
+    /// The previous altitude, used to estimate the climb rate.
+    prev_altitude: Option<f64>,
+    /// The filtered climb rate (m/s).
+    climb_rate: f64,
 }
 
 impl HeuristicPolicy {
     pub fn new(cruise_airspeed: f64, capture_speed: f64, v_stall: f64) -> Self {
         let mut cfg = HeuristicConfig::default();
-        cfg.cruise_airspeed = cruise_airspeed;
+        // The airframe cannot sustain the mission's requested cruise speed, so
+        // the heuristic cruises at a speed the wing can hold level.
+        cfg.cruise_speed = if cruise_airspeed > 0.0 && cruise_airspeed < 40.0 {
+            cruise_airspeed
+        } else {
+            cfg.cruise_speed
+        };
         cfg.capture_speed = capture_speed;
         cfg.v_stall = v_stall;
         Self {
             cfg,
+            home_altitude: None,
+            prev_bearing: None,
+            prev_phase: None,
+            prev_altitude: None,
+            climb_rate: 0.0,
             card: ExpertCard {
                 id: "heuristic_v1".into(),
                 model: ModelKind::Heuristic,
@@ -202,41 +328,168 @@ impl HeuristicPolicy {
             },
         }
     }
+
+    /// Read one observation channel, mapping non-finite values to zero.
+    fn read(obs: &[f32], index: usize) -> f64 {
+        let v = obs.get(index).copied().unwrap_or(0.0) as f64;
+        if v.is_finite() { v } else { 0.0 }
+    }
 }
 
 impl Policy for HeuristicPolicy {
     fn act(&mut self, obs: &[f32], ctx: &PolicyContext) -> Vec<f32> {
-        let airspeed = obs.get(crate::contracts::OBS_AIRSPEED_INDICATED).copied().unwrap_or(0.0) as f64;
-        let airspeed = if airspeed.is_finite() { airspeed } else { 0.0 };
+        let dt = 1.0 / 30.0;
+        let airspeed = Self::read(obs, crate::contracts::OBS_AIRSPEED_INDICATED);
+        let altitude = Self::read(obs, crate::contracts::OBS_BARO_ALTITUDE);
         let phase = ctx.phase;
-        let bearing_sin = if phase == MissionPhase::Return {
-            obs.get(crate::contracts::OBS_HOME_BEARING_SIN).copied().unwrap_or(0.0) as f64
+        let return_leg = matches!(phase, MissionPhase::Return | MissionPhase::Done);
+
+        // The mission launches at the cruise altitude and the home leg has to
+        // come back to it, so the launch altitude is the altitude reference.
+        if self.home_altitude.is_none() && altitude > 0.0 {
+            self.home_altitude = Some(altitude);
+        }
+        let home_altitude = self.home_altitude.unwrap_or(altitude);
+
+        // The pickup altitude, recovered from the observation: the mission
+        // reports the altitude error against it.
+        let pickup_altitude =
+            altitude + Self::read(obs, crate::contracts::OBS_PICKUP_ALTITUDE_ERROR) * 500.0;
+
+        // Phase-appropriate steering: chase the pickup outbound, then home.
+        let (bearing_sin, bearing_cos) = if return_leg {
+            (
+                Self::read(obs, crate::contracts::OBS_HOME_BEARING_SIN),
+                Self::read(obs, crate::contracts::OBS_HOME_BEARING_COS),
+            )
         } else {
-            obs.get(crate::contracts::OBS_PICKUP_BEARING_SIN).copied().unwrap_or(0.0) as f64
+            (
+                Self::read(obs, crate::contracts::OBS_PICKUP_BEARING_SIN),
+                Self::read(obs, crate::contracts::OBS_PICKUP_BEARING_COS),
+            )
         };
-        let bearing_sin = if bearing_sin.is_finite() { bearing_sin } else { 0.0 };
-        let roll = (self.cfg.bank_gain * bearing_sin).clamp(-0.6, 0.6);
-        let alt_err = if phase == MissionPhase::Return {
-            0.0
+        let bearing_err = bearing_sin.atan2(bearing_cos);
+        let distance_m = if return_leg {
+            Self::read(obs, crate::contracts::OBS_HOME_DISTANCE) * 100.0
         } else {
-            obs.get(crate::contracts::OBS_PICKUP_ALTITUDE_ERROR).copied().unwrap_or(0.0) as f64 * 500.0
+            Self::read(obs, crate::contracts::OBS_PICKUP_DISTANCE) * 2500.0
         };
-        let pitch = (self.cfg.pitch_gain * alt_err).clamp(-0.4, 0.4);
-        let reference = if phase == MissionPhase::Capture { self.cfg.capture_speed } else { self.cfg.cruise_airspeed };
-        let throttle = (0.5 + self.cfg.speed_gain * (reference - airspeed)).clamp(0.0, 1.0);
-        let throttle = if phase == MissionPhase::Capture && airspeed < self.cfg.v_stall + 1.0 {
-            throttle.max(0.6)
+
+        // --- Speed target ------------------------------------------------
+        // The capture only latches inside the pickup radius at or below the
+        // capture speed, so the speed has to be on its way down *before* the
+        // pickup. The ramp starts far enough out that the aircraft can bleed
+        // the speed in the last few hundred metres.
+        let speed_target = match phase {
+            MissionPhase::Capture => self.cfg.capture_speed - 0.3,
+            MissionPhase::Return => {
+                // The return leg has no speed limit, so hold cruise: the
+                // turn-back is flown fast enough to stay clear of the stall
+                // and the pitch/roll coupling that comes with it.
+                self.cfg.cruise_speed
+            }
+            _ => {
+                if distance_m < self.cfg.approach_distance_m {
+                    let span = (self.cfg.approach_distance_m - self.cfg.capture_radius_m).max(1.0);
+                    let ramp = ((distance_m - self.cfg.capture_radius_m) / span).clamp(0.0, 1.0);
+                    self.cfg.capture_speed
+                        + (self.cfg.cruise_speed - self.cfg.capture_speed) * ramp
+                } else {
+                    self.cfg.cruise_speed
+                }
+            }
+        };
+
+        // --- Altitude target ---------------------------------------------
+        // The skyhook cable is loaded hard anywhere inside the capture radius
+        // at the pickup altitude, so the aircraft captures clear of it. When
+        // the home altitude is already clear of the cable the capture happens
+        // at the home altitude and the return leg needs no altitude change.
+        let capture_altitude = if (home_altitude - pickup_altitude).abs()
+            <= self.cfg.pickup_vertical_tolerance_m
+        {
+            pickup_altitude + self.cfg.capture_altitude_margin
         } else {
-            throttle
+            home_altitude
         };
-        vec![roll as f32, pitch as f32, 0.0_f32, throttle as f32]
+        let altitude_target = if return_leg {
+            home_altitude
+        } else {
+            capture_altitude
+        };
+
+        // --- Bank --------------------------------------------------------
+        // The bank turns the aircraft toward the target. The bearing rate
+        // damps the turn so the aircraft settles on the bearing instead of
+        // overshooting and spiralling.
+        let mut bank = self.cfg.bank_gain * bearing_err;
+        if self.prev_phase != Some(phase) {
+            self.prev_bearing = None;
+            self.prev_phase = Some(phase);
+        }
+        if let Some(prev) = self.prev_bearing {
+            let rate = wrap_pi(bearing_err - prev) / dt;
+            bank += self.cfg.bank_damp * rate;
+        }
+        self.prev_bearing = Some(bearing_err);
+        let bank = bank.clamp(-self.cfg.bank_cap, self.cfg.bank_cap);
+
+        // --- Pitch -------------------------------------------------------
+        // The altitude error demands a climb rate; the climb-rate loop turns
+        // that into a nose-up attitude around the level-flight trim.
+        let climb = match self.prev_altitude {
+            Some(prev) => {
+                let raw = (altitude - prev) / dt;
+                // The altitude only moves centimetres per step, so the raw
+                // difference is noisy: filter it before feeding it back.
+                self.climb_rate += 0.05 * (raw - self.climb_rate);
+                self.climb_rate
+            }
+            None => {
+                self.climb_rate = 0.0;
+                0.0
+            }
+        };
+        self.prev_altitude = Some(altitude);
+
+        let alt_error = altitude_target - altitude;
+        // The feedforward is the level-flight command for the *target* speed,
+        // not the current one. Following the current speed's trim is a
+        // positive feedback loop — fast asks for nose-down, which dives and
+        // speeds up further — and it made the phugoid diverge. Commanding the
+        // target trim instead makes the pitch speed-stabilizing: a fast
+        // aircraft sees a nose-up command and bleeds the excess.
+        let mut pitch_up = level_flight_pitch_cmd(speed_target);
+        // Explicit speed damping, active on every leg: fast → nose up (bleed
+        // speed), slow → nose down (recover speed).
+        pitch_up += self.cfg.speed_pitch_gain * (airspeed - speed_target).clamp(-8.0, 8.0);
+        // Altitude: demand a climb rate from the altitude error, then track it
+        // with the pitch. The climb-rate term damps the phugoid.
+        let desired_climb = (self.cfg.climb_rate_gain * alt_error)
+            .clamp(-self.cfg.max_climb_rate, self.cfg.max_climb_rate);
+        pitch_up += self.cfg.climb_gain * (desired_climb - climb);
+        let pitch_up = pitch_up.clamp(-0.4, 0.4);
+
+        // --- Throttle ----------------------------------------------------
+        // The throttle carries the speed; the pitch carries the altitude.
+        let throttle = (self.cfg.throttle_base
+            + self.cfg.throttle_speed_gain * (speed_target - airspeed))
+            .clamp(0.0, 1.0);
+
+        vec![bank as f32, (-pitch_up) as f32, 0.0, throttle as f32]
     }
 
     fn deterministic_action(&mut self, obs: &[f32], ctx: &PolicyContext) -> Vec<f32> {
         self.act(obs, ctx)
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.home_altitude = None;
+        self.prev_bearing = None;
+        self.prev_phase = None;
+        self.prev_altitude = None;
+        self.climb_rate = 0.0;
+    }
 
     fn card(&self) -> &ExpertCard {
         &self.card

@@ -138,7 +138,7 @@ fn derivatives(
     // matching the -omega.cross(&body_vel) transport term above.
     let omega_quat = nalgebra::Quaternion::new(0.0, -s.p, -s.q, -s.r);
     let q_as_quat = nalgebra::Quaternion::new(s.q0, s.q1, s.q2, s.q3);
-    let q_view_dot = 0.5 * q_as_quat * omega_quat;
+    let q_view_dot = 0.5 * omega_quat * q_as_quat;
 
     // --- Alpha-dot from the kinematic acceleration (for Cm_adot damping).
     //     alpha = atan2(w, u)  =>  d(alpha)/dt = (u*w_dot - w*u_dot) / (u² + w²).

@@ -181,6 +181,32 @@ impl MissionEnv {
     pub fn terminated_success(&self) -> bool {
         self.inner.termination() == flight_core::MissionTermination::CapturedAndReturned
     }
+
+    /// Step the mission with **physical** control commands.
+    ///
+    /// The [`EnvSpec`](crate::trainer::EnvSpec) contract is tanh-space (the
+    /// learning algorithms emit tanh actions), while
+    /// [`Policy`](crate::policy::Policy) implementations return physical
+    /// commands. Driving a policy through this environment therefore has to
+    /// bypass the tanh mapping, exactly like
+    /// [`run_eval_suite`](crate::eval::run_eval_suite) does.
+    pub fn step_physical(&mut self, action: &[f32]) -> StepOutcome {
+        let out = self.inner.step(flight_core::AvionicsAction {
+            roll_cmd: action[0] as f64,
+            pitch_cmd: action[1] as f64,
+            yaw_rate_cmd: action[2] as f64,
+            throttle: (action[3] as f64).clamp(0.0, 1.0),
+        });
+        let obs = mission_observation(&out.avionics, &out.features);
+        self.last_obs = obs;
+        let reward = self.reward.reward(&out.signals);
+        StepOutcome {
+            obs: obs.to_vec(),
+            reward,
+            terminated: out.terminated,
+            truncated: out.truncated,
+        }
+    }
 }
 
 impl EnvSpec for MissionEnv {

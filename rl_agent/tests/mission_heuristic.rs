@@ -66,7 +66,46 @@ fn heuristic_actions_stay_inside_the_contract_bounds() {
 }
 
 #[test]
-#[ignore = "gated on Task 6: heuristic capture-approach profile"]
+fn heuristic_starts_bleeding_speed_before_the_pickup() {
+    use rl_agent::contracts::{MISSION_OBS_DIM, OBS_AIRSPEED_INDICATED, OBS_PICKUP_DISTANCE};
+    let mut p = policy();
+    let ctx = PolicyContext {
+        phase: MissionPhase::Outbound,
+        step: 0,
+        captured: false,
+        features: None,
+    };
+
+    // Compare at the same airspeed: the difference must come from the distance
+    // to the pickup, not from being faster. On approach the heuristic targets
+    // the lower capture speed, so it commands less throttle and a more nose-up
+    // attitude to bleed speed; far out it holds the cruise target.
+    let airspeed = 18.0;
+    let mut near = vec![0.0f32; MISSION_OBS_DIM];
+    near[OBS_AIRSPEED_INDICATED] = airspeed;
+    near[OBS_PICKUP_DISTANCE] = 0.12; // ~300 m out of 2500 m
+    let a = p.act(&near, &ctx);
+
+    let mut far = vec![0.0f32; MISSION_OBS_DIM];
+    far[OBS_AIRSPEED_INDICATED] = airspeed;
+    far[OBS_PICKUP_DISTANCE] = 0.9; // ~2250 m out
+    let b = p.act(&far, &ctx);
+
+    assert!(
+        a[3] + 1e-6 < b[3],
+        "approach throttle {} should be below cruise throttle {}",
+        a[3],
+        b[3]
+    );
+    assert!(
+        a[1] < b[1],
+        "approach pitch {} should be more nose-up than cruise pitch {}",
+        a[1],
+        b[1]
+    );
+}
+
+#[test]
 fn heuristic_completes_at_least_one_of_the_first_three_exam_scenarios() {
     let mut p = policy();
     let mut env = env();
@@ -83,7 +122,7 @@ fn heuristic_completes_at_least_one_of_the_first_three_exam_scenarios() {
                 features: None,
             };
             let a = p.act(&obs, &ctx);
-            let out = env.step(&a);
+            let out = env.step_physical(&a);
             obs = out.obs.iter().map(|&x| x as f32).collect();
             if out.terminated || out.truncated {
                 done = true;

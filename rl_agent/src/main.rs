@@ -327,7 +327,12 @@ fn exec<B: AutodiffBackend<FloatElem = f32>>(
             Ok(())
         }
         "eval-suite" => {
-            let mission_cfg = build_mission_config(args, tcfg.env_max_steps)?;
+            // The scorecard must give an episode the mission's own step budget.
+            // Falling back to the trainer's `env_max_steps` (2000 ≈ 67 s at
+            // 30 Hz) makes every scenario time out before the return leg, so a
+            // perfectly good capture is scored as a failure.
+            let mission_cfg =
+                build_mission_config(args, flight_core::MissionConfig::default().max_steps)?;
             let profile = build_reward_profile(args)?;
             let mut env = MissionEnvironment::new(&config_path, mission_cfg.clone(), tcfg.seed)?;
             let mut policy: Box<dyn Policy> = if model_id(args) == "heuristic" {

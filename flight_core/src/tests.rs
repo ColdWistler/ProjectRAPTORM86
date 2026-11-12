@@ -1187,4 +1187,90 @@ mod tests {
             orog.z
         );
     }
+
+    #[test]
+    fn banked_attitude_kinematics_match_euler_rates() {
+        // Regression: the quaternion update must be `0.5 * omega * q` (earth-
+        // to-body), not `0.5 * q * omega`. With the wrong order a banked
+        // attitude carrying combined p/q/r rates evolved the wrong way — the
+        // Euler pitch rate ran opposite to `q*cos(phi) - r*sin(phi)` — so every
+        // sustained turn diverged within ~20 s. Level flight and single-axis
+        // moves looked fine, which is why the bug hid for so long.
+        use nalgebra::UnitQuaternion;
+
+        let config = aircraft_default();
+        let mut state = AircraftState::default();
+        state.trim_level_flight(&config, 1000.0, 18.0);
+
+        // Add a bank and a pitch offset about the body axes, then read the
+        // actual resulting Euler angles rather than assuming a convention.
+        let base = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+            state.q0, state.q1, state.q2, state.q3,
+        ));
+        let extra = UnitQuaternion::from_axis_angle(
+            &Vector3::x_axis(),
+            -20.0_f64.to_radians(),
+        ) * UnitQuaternion::from_axis_angle(
+            &Vector3::y_axis(),
+            5.0_f64.to_radians(),
+        );
+        let q_att = (base * extra).normalize();
+        state.q0 = q_att.w;
+        state.q1 = q_att.i;
+        state.q2 = q_att.j;
+        state.q3 = q_att.k;
+
+        // Combined body rates: exactly the case the old multiplication order
+        // got wrong.
+        let (p, q_rate, r) = (0.4, 0.2, 0.3);
+        state.p = p;
+        state.q = q_rate;
+        state.r = r;
+
+        let (phi0, theta0, _psi0) = state.euler_angles();
+
+        // A tiny step keeps the aero moments from changing the rates enough to
+        // matter, so the attitude change is dominated by the kinematics.
+        let dt = 1e-5;
+        let controls = ControlInputs {
+            elevator: 0.0,
+            aileron: 0.0,
+            rudder: 0.0,
+            throttle: 0.0,
+            flap: 0.0,
+            wing_sweep: 0.0,
+        };
+        step(&mut state, &config, controls, None, dt, None);
+
+        let (phi1, theta1, _psi1) = state.euler_angles();
+        let wrap = |a: f64| {
+            let two_pi = 2.0 * std::f64::consts::PI;
+            let mut w = a % two_pi;
+            if w > std::f64::consts::PI {
+                w -= two_pi;
+            } else if w <= -std::f64::consts::PI {
+                w += two_pi;
+            }
+            w
+        };
+        let phi_dot = wrap(phi1 - phi0) / dt;
+        let theta_dot = wrap(theta1 - theta0) / dt;
+
+        let expected_phi_dot =
+            p + theta0.tan() * (q_rate * phi0.sin() + r * phi0.cos());
+        let expected_theta_dot = q_rate * phi0.cos() - r * phi0.sin();
+
+        assert!(
+            (theta_dot - expected_theta_dot).abs() < 1e-3,
+            "theta_dot {:.5} != {:.5} (quaternion kinematics order regression)",
+            theta_dot,
+            expected_theta_dot
+        );
+        assert!(
+            (phi_dot - expected_phi_dot).abs() < 1e-2,
+            "phi_dot {:.5} != {:.5} (quaternion kinematics order regression)",
+            phi_dot,
+            expected_phi_dot
+        );
+    }
 }
